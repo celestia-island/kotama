@@ -3,8 +3,8 @@
 
 只运行仓库自己构建的夹具；不写注册表、不安装服务、不接触未授权目标。
 默认顺序：gnu/ELF 夹具 → MSVC 夹具 → pack/load（先生成 dist 载荷）→ host live e2e
-（紧接 pack，缩短产物窗口）→ just gate → 可选 Ghidra。每个 e2e 开关只作用于对应步骤。
-Ghidra 较慢且依赖外部安装，使用 --oracle 显式加入。
+（紧接 pack，缩短产物窗口）→ just gate → 可选 Ghidra/IDA。每个 e2e 开关只作用于对应步骤。
+Ghidra/IDA 较慢且依赖外部安装，分别使用 --oracle / --ida 显式加入。
 
 工具路径通过 --zig / KOTAMA_ZIG、KOTAMA_PYTHON、KOTAMA_GHIDRA_HOME 与
 KOTAMA_JDK_HOME 提供；仓内不写死任何本机路径。
@@ -129,6 +129,7 @@ def main() -> int:
     parser.add_argument("--skip-pack", action = "store_true", help = "skip pack + LoadLibrary e2e")
     parser.add_argument("--skip-live", action = "store_true", help = "skip native host live e2e")
     parser.add_argument("--oracle", action = "store_true", help = "also run the real Ghidra PE oracle tests")
+    parser.add_argument("--ida", action = "store_true", help = "also run the real IDA PE cross-check")
     args = parser.parse_args()
 
     if os.name != "nt":
@@ -190,6 +191,12 @@ def main() -> int:
         run_step("real Ghidra PE oracle", [
             "cargo", "test", "-p", "kotama-backend-ghidra", "--", "--test-threads=1",
         ], oracle_env, timeout = 2400)
+    if args.ida:
+        if not env.get("KOTAMA_IDA"):
+            raise SystemExit("windows-bench: --ida requires KOTAMA_IDA=<idat.exe>")
+        run_step("real IDA PE cross-check", [
+            sys.executable, "tools/ida_crosscheck.py",
+        ], env, timeout = 1200)
 
     print("\nwindows-bench: all selected lanes are green", flush = True)
     return 0

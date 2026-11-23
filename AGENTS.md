@@ -88,8 +88,9 @@
   - MSVC 由 `tools/build_fixtures.py` 经 vswhere + `VsDevCmd.bat` 自动发现（VS 2026 + WinSDK）；
     `python tools/build_fixtures.py --targets x86_64-windows-msvc x86-windows-msvc --run` 出
     x64/x86、O2/Od、`/Zi` + 伴生 PDB 并原生运行。Windows smoke 只执行 `.exe`。
-  - 一键验收 = `just bench-windows`；追加 `--oracle` 纳入真实 Ghidra PE 差分。常驻 CI runner
-    尚未注册（2026-11-23 用户裁决），本机通过不等于常驻 CI 项完成。
+  - 一键验收 = `just bench-windows`；追加 `--oracle` 纳入真实 Ghidra PE 差分，追加
+    `--ida`（需 `KOTAMA_IDA`）纳入 IDA 差分。常驻 CI runner 尚未注册（2026-11-23 用户裁决），
+    本机通过不等于常驻 CI 项完成。
 
 ## 版本声明
 

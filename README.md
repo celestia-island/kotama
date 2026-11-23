@@ -39,7 +39,7 @@ basic-block-level pseudo-C.
 attach/scan/write/freeze, LoadLibrary injection over named pipes or loopback TCP, PE
 exception/unwind and MSVC RTTI recovery, RSDS-authenticated PDBs cross-checked with dbghelp,
 and GNU/MSVC fixture plus packaging lanes. Run `just bench-windows` on Windows (append
-`--oracle` for the real Ghidra differential).
+`--oracle` for the real Ghidra differential, `--ida` plus `KOTAMA_IDA` for the IDA one).
 
 Remaining for this phase: a persistent Windows CI runner (not registered yet) and the
 GUI/service surface (P5–P6). Tasks are tracked in PR #1.
@@ -92,6 +92,7 @@ cargo run -p kotama-cli -- analyze <file> --rtti                # MSVC RTTI/vtab
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <target>  # Windows: launch + inject + handshake
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll --pid <pid>       # Windows: attach to a running target
 just bench-windows                          # native Windows bench (add --oracle for Ghidra)
+KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
 python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
 ```
 

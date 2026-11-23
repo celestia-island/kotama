@@ -38,3 +38,7 @@ bench-windows *args:
 # Cross-check the PDB lane against the system dbghelp oracle.
 pdb-crosscheck:
     python tools/pdb_crosscheck.py
+
+# Cross-check function discovery against an IDA headless oracle.
+ida-crosscheck:
+    python tools/ida_crosscheck.py

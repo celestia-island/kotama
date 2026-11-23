@@ -36,7 +36,7 @@
 **Windows 原生车道已落地**（2026-11-23，Win10 Pro x64）：原生 host attach/scan/write/freeze、
 命名管道或回环 TCP 的 LoadLibrary 注入、PE exception/unwind 与 MSVC RTTI、RSDS 身份校验的 PDB
 并用 dbghelp 交叉验证、GNU/MSVC 夹具与打包车道。Windows 宿主上运行 `just bench-windows`
-（追加 `--oracle` 纳入真实 Ghidra 差分）。
+（追加 `--oracle` 纳入真实 Ghidra 差分；设置 `KOTAMA_IDA` 后追加 `--ida` 纳入 IDA 差分）。
 
 本阶段剩余：常驻 Windows CI runner（尚未注册）与 GUI/服务面（P5–P6）。任务面见 PR #1。
 
@@ -85,6 +85,7 @@ cargo run -p kotama-cli -- analyze <文件> --rtti                # MSVC RTTI/�
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <目标>  # Windows：拉起+注入+握手
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll --pid <pid>       # Windows：注入已运行目标
 just bench-windows                          # 原生 Windows 台架（追加 --oracle 纳入 Ghidra）
+KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # 可选 IDA 差分
 python3 tools/build_fixtures.py --run --host-samples   # 四目标靶子矩阵 + 运行冒烟
 ```
 
