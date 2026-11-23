@@ -12,6 +12,7 @@ KOTAMA_JDK_HOME 提供；仓内不写死任何本机路径。
 
 from __future__ import annotations
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -30,6 +31,44 @@ def run_step(name: str, command: list[str], env: dict[str, str], timeout: int = 
         raise SystemExit(f"windows-bench: {name} exceeded {timeout}s") from None
     if completed.returncode != 0:
         raise SystemExit(f"windows-bench: {name} failed with exit {completed.returncode}")
+
+
+def cli_injection_smoke(env: dict[str, str]) -> None:
+    agent = REPO / "dist" / "x86_64-pc-windows-gnu" / "kotama_agent.dll"
+    spin = REPO / "fixtures" / "generated" / "x86_64-windows-gnu" / "-O2" / "spin.exe"
+    for path in (agent, spin):
+        if not path.is_file():
+            raise SystemExit(f"windows-bench: CLI injection input missing: {path}")
+
+    print("\n=== windows-bench: CLI launch-then-inject smoke ===", flush = True)
+    for transport in ("pipe", "tcp"):
+        command = [
+            "cargo", "run", "--quiet", "-p", "kotama-cli", "--", "live", "inject",
+            "--payload", str(agent), "--transport", transport, "--", str(spin), "30",
+        ]
+        print("+ " + " ".join(command), flush = True)
+        try:
+            completed = subprocess.run(
+                command, cwd = REPO, env = env, capture_output = True,
+                text = True, encoding = "utf-8", timeout = 180,
+            )
+        except subprocess.TimeoutExpired:
+            raise SystemExit(f"windows-bench: CLI inject {transport} exceeded 180s") from None
+        if completed.returncode != 0:
+            print(completed.stdout + completed.stderr)
+            raise SystemExit(f"windows-bench: CLI inject {transport} failed with {completed.returncode}")
+        report = json.loads(completed.stdout)
+        if report.get("proto_version") != 3:
+            raise SystemExit(f"windows-bench: CLI inject {transport} proto mismatch: {report}")
+        if report.get("payload_main_base") != report.get("target_main_base"):
+            raise SystemExit(f"windows-bench: CLI inject {transport} main base mismatch: {report}")
+        if report.get("image_magic") != "4d5a":
+            raise SystemExit(f"windows-bench: CLI inject {transport} did not read MZ: {report}")
+        print(
+            f"# cli inject {transport}: pid={report['pid']} "
+            f"base={report['payload_main_base']} magic={report['image_magic']}",
+            flush = True,
+        )
 
 
 def main() -> int:
@@ -87,6 +126,7 @@ def main() -> int:
         run_step("native host live e2e", [
             "cargo", "test", "-p", "kotama-host", "--", "--test-threads=1",
         ], live_env)
+        cli_injection_smoke(env)
 
     run_step("just gate with required fixtures", ["just", "gate"], env)
     if args.oracle:
