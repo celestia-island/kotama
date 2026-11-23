@@ -30,6 +30,8 @@ use kotama_image::SectionInfo;
 use kotama_image::SymbolInfo;
 use kotama_image::UnwindInfo;
 
+pub mod msvc_rtti;
+
 pub use kotama::Evidence;
 pub use kotama::FunctionEntry;
 
