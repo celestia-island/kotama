@@ -2,7 +2,8 @@
 """原生 Windows 台架的一键验收车道。
 
 只运行仓库自己构建的夹具；不写注册表、不安装服务、不接触未授权目标。
-默认顺序：gnu/ELF 夹具 → MSVC 夹具 → just gate → pack/load e2e → host live e2e。
+默认顺序：gnu/ELF 夹具 → MSVC 夹具 → pack/load（先生成 dist 载荷）→ host live e2e
+（紧接 pack，缩短产物窗口）→ just gate → 可选 Ghidra。每个 e2e 开关只作用于对应步骤。
 Ghidra 较慢且依赖外部安装，使用 --oracle 显式加入。
 
 工具路径通过 --zig / KOTAMA_ZIG、KOTAMA_PYTHON、KOTAMA_GHIDRA_HOME 与
@@ -49,8 +50,6 @@ def main() -> int:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["KOTAMA_REQUIRE_FIXTURES"] = "1"
-    env["KOTAMA_PACK_E2E"] = "1"
-    env["KOTAMA_LIVE_E2E"] = "1"
     if args.zig:
         env["KOTAMA_ZIG"] = args.zig
     env.setdefault("KOTAMA_PYTHON", sys.executable)
@@ -70,23 +69,35 @@ def main() -> int:
             sys.executable, "tools/pdb_crosscheck.py",
         ], env)
 
-    run_step("just gate with required fixtures", ["just", "gate"], env)
+    if not args.skip_live and args.skip_pack:
+        raise SystemExit("windows-bench: live e2e needs the pack artifacts; drop --skip-pack or add --skip-live")
+
+    # pack/load 必须早于 gate：gate 本身不设 live 开关，但 host live e2e 依赖 dist 里的
+    # C agent/loader 与 MSVC Rust payload；干净 worktree 没有历史 dist。
     if not args.skip_pack:
+        pack_env = env.copy()
+        pack_env["KOTAMA_PACK_E2E"] = "1"
         run_step("pack and native LoadLibrary e2e", [
             "cargo", "test", "-p", "kotama-pack", "pack_windows", "--", "--test-threads=1",
-        ], env)
+        ], pack_env)
+
     if not args.skip_live:
+        live_env = env.copy()
+        live_env["KOTAMA_LIVE_E2E"] = "1"
         run_step("native host live e2e", [
             "cargo", "test", "-p", "kotama-host", "--", "--test-threads=1",
-        ], env)
+        ], live_env)
+
+    run_step("just gate with required fixtures", ["just", "gate"], env)
     if args.oracle:
         for variable in ("KOTAMA_GHIDRA_HOME", "KOTAMA_JDK_HOME"):
             if not env.get(variable):
                 raise SystemExit(f"windows-bench: --oracle requires {variable}")
-        env["KOTAMA_GHIDRA_E2E"] = "1"
+        oracle_env = env.copy()
+        oracle_env["KOTAMA_GHIDRA_E2E"] = "1"
         run_step("real Ghidra PE oracle", [
             "cargo", "test", "-p", "kotama-backend-ghidra", "--", "--test-threads=1",
-        ], env, timeout = 2400)
+        ], oracle_env, timeout = 2400)
 
     print("\nwindows-bench: all selected lanes are green", flush = True)
     return 0
