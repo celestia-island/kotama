@@ -1,0 +1,43 @@
+[advisories]
+db-path = "~/.cargo/advisory-db"
+unmaintained = "workspace"
+unsound = "workspace"
+yanked = "warn"
+
+[licenses]
+# Permissive only. kotama ships an in-process payload that gets loaded into
+# foreign binaries, so a copyleft runtime dependency would spread further than
+# usual. Reference implementations we read (retour, BSD-2-Clause) are fine;
+# anything AGPL/GPL/LGPL stays out of the tree.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+# Workspace crates carry SySL 1.0, which is not an SPDX expression.
+private = { ignore = true }
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

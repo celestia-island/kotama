@@ -1,0 +1,21 @@
+[package]
+name = "kotama-host"
+description = "Live session host for kotama: /proc maps and memory access, process images."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+kotama.workspace = true
+kotama-image.workspace = true
+kotama-proto.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true
+[dev-dependencies]
+kotama-scan.workspace = true

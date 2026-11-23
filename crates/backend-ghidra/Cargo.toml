@@ -1,0 +1,16 @@
+[package]
+name = "kotama-backend-ghidra"
+description = "Ghidra headless adapter for kotama: the differential oracle lane."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+kotama.workspace = true
+
+[lints]
+workspace = true

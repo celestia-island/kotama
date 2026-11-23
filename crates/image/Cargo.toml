@@ -1,0 +1,20 @@
+[package]
+name = "kotama-image"
+description = "Container loading for kotama: ELF and PE files as address spaces plus module facts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+kotama.workspace = true
+object.workspace = true
+sha2.workspace = true
+gimli.workspace = true
+pdb.workspace = true
+
+[lints]
+workspace = true

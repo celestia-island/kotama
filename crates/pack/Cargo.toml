@@ -1,0 +1,23 @@
+[package]
+name = "kotama-pack"
+description = "Payload packaging for kotama: cross-build the agent and emit a signed manifest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+kotama.workspace = true
+kotama-image.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+[dev-dependencies]
+kotama-host.workspace = true
+serde_json.workspace = true

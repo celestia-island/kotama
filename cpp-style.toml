@@ -1,0 +1,6 @@
+# cpp-style configuration — kotama
+#
+# The Windows payload agent and its wine-side loader are Windows-only sources:
+# winsock2.h / windows.h are the whole point of those files. They live in one
+# directory, so the platform-header allowlist is a single path glob.
+platform_paths = ["support/windows-agent/*"]

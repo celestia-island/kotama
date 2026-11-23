@@ -1,0 +1,52 @@
+[package]
+name = "kotama"
+description = "Static dissection and live instrumentation for binaries: the root library crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "2"
+members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+authors = ["Celestia Island"]
+repository = "https://github.com/celestia-island/kotama"
+license-file = "LICENSE"
+publish = false
+
+[workspace.dependencies]
+# 根包即库：CLI 与后续 crate 都从这里走。
+kotama = { path = ".", version = "^0.1" }
+kotama-image = { path = "crates/image", version = "^0.1" }
+kotama-scan = { path = "crates/scan", version = "^0.1" }
+kotama-decomp = { path = "crates/decomp", version = "^0.1" }
+kotama-backend-ghidra = { path = "crates/backend-ghidra", version = "^0.1" }
+kotama-proto = { path = "crates/proto", version = "^0.1" }
+kotama-host = { path = "crates/host", version = "^0.1" }
+kotama-pack = { path = "crates/pack", version = "^0.1" }
+
+# 静态管线（P0）
+object = "^0.41"
+iced-x86 = "^1"
+sha2 = "^0.11"
+gimli = "^0.34"
+pdb = "^0.8"
+rmp-serde = "^1"
+libc = "^0.2"
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"

@@ -1,0 +1,18 @@
+[package]
+name = "kotama-scan"
+description = "Function discovery for kotama: multi-evidence seeds merged into one table."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+kotama.workspace = true
+kotama-image.workspace = true
+iced-x86.workspace = true
+
+[lints]
+workspace = true

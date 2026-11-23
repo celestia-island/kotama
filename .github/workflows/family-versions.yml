@@ -1,0 +1,10 @@
+name: Family-Versions
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  check:
+    uses: celestia-island/celestia-devtools/.github/workflows/family-versions.yml@3279b48a65f3099d6f2387a4b909e2357e1f23fa
