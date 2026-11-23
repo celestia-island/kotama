@@ -89,6 +89,7 @@ cargo run -p kotama-cli -- --version       # version + payload ABI version
 cargo run -p kotama-cli -- analyze <file>  # function table as JSON (with evidence)
 cargo run -p kotama-cli -- analyze <file> --decompile --limit 8   # plus pseudo-C
 cargo run -p kotama-cli -- analyze <file> --rtti                # MSVC RTTI/vtable facts
+cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <target>  # Windows: launch + inject + handshake
 just bench-windows                          # native Windows bench (add --oracle for Ghidra)
 python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
 ```

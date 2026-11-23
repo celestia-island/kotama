@@ -82,6 +82,7 @@ cargo run -p kotama-cli -- --version       # 版本 + 载荷 ABI 版本
 cargo run -p kotama-cli -- analyze <文件>  # 函数表 JSON（带证据）
 cargo run -p kotama-cli -- analyze <文件> --decompile --limit 8   # 附伪 C
 cargo run -p kotama-cli -- analyze <文件> --rtti                # MSVC RTTI/虚表事实
+cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <目标>  # Windows：拉起+注入+握手
 just bench-windows                          # 原生 Windows 台架（追加 --oracle 纳入 Ghidra）
 python3 tools/build_fixtures.py --run --host-samples   # 四目标靶子矩阵 + 运行冒烟
 ```
