@@ -204,7 +204,7 @@ pub fn pack_target(
         sha256,
         abi_version: kotama::ABI_VERSION,
         proto_version: kotama_proto::PROTO_VERSION,
-        capabilities: payload_capabilities(),
+        capabilities: payload_capabilities(target),
         entry: if target.ends_with("-pc-windows-msvc") {
             "dllmain+loadlibrary"
         } else {
@@ -219,11 +219,18 @@ pub fn pack_target(
 }
 
 /// manifest 能力与载荷握手共用同一份声明，写/冻结不随只读包静默开放。
-fn payload_capabilities() -> Vec<&'static str> {
-    kotama_proto::READ_ONLY_CAPABILITIES
+///
+/// 只有 MSVC 的 Rust payload 声明了 `stack-snapshot`；GNU C agent 与 Linux cdylib
+/// 都没有该实现，manifest 必须和各自握手保持一致。
+fn payload_capabilities(target: &str) -> Vec<&'static str> {
+    let mut capabilities: Vec<&'static str> = kotama_proto::READ_ONLY_CAPABILITIES
         .iter()
         .map(|capability| capability.as_str())
-        .collect()
+        .collect();
+    if target.ends_with("-pc-windows-msvc") {
+        capabilities.push(kotama_proto::Capability::StackSnapshot.as_str());
+    }
+    capabilities
 }
 
 /// 构建脚本解释器：Windows 的 `python3` 常是商店占位符，优先用可配置的 `python`。
@@ -337,7 +344,7 @@ fn pack_windows_agent(
         sha256,
         abi_version: kotama::ABI_VERSION,
         proto_version: kotama_proto::PROTO_VERSION,
-        capabilities: payload_capabilities(),
+        capabilities: payload_capabilities(target),
         entry: "dllmain+loadlibrary",
         exports,
     };
@@ -406,7 +413,18 @@ mod tests {
 
     #[test]
     fn manifest_capabilities_come_from_the_wire_declaration() {
-        assert_eq!(payload_capabilities(), ["list-modules", "read-memory"]);
+        assert_eq!(
+            payload_capabilities("x86_64-unknown-linux-gnu"),
+            ["list-modules", "read-memory"]
+        );
+        assert_eq!(
+            payload_capabilities("x86_64-pc-windows-gnu"),
+            ["list-modules", "read-memory"]
+        );
+        assert_eq!(
+            payload_capabilities("x86_64-pc-windows-msvc"),
+            ["list-modules", "read-memory", "stack-snapshot"]
+        );
     }
 
     #[test]
@@ -523,6 +541,7 @@ mod tests {
         let manifest = pack_target(&repo, &dist, "x86_64-pc-windows-msvc").expect("pack msvc");
         assert_eq!(manifest.proto_version, kotama_proto::PROTO_VERSION);
         assert_eq!(manifest.entry, "dllmain+loadlibrary");
+        assert!(manifest.capabilities.contains(&"stack-snapshot"));
         let agent = dist.join(&manifest.target).join(&manifest.file);
         assert!(agent.is_file());
 
@@ -568,6 +587,7 @@ mod tests {
         let dist = repo.join("dist");
         let manifest = pack_target(&repo, &dist, "x86_64-pc-windows-gnu").expect("pack");
         assert_eq!(manifest.proto_version, kotama_proto::PROTO_VERSION);
+        assert!(!manifest.capabilities.contains(&"stack-snapshot"));
         let out_dir = dist.join(&manifest.target);
         let agent = out_dir.join(&manifest.file);
         let loader = out_dir.join("kotama_load.exe");
