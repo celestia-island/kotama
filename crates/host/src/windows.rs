@@ -40,6 +40,7 @@ use windows_sys::Win32::System::Memory::PAGE_WRITECOPY;
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 use windows_sys::Win32::System::SystemInformation::SYSTEM_INFO;
 use windows_sys::Win32::System::Threading::OpenProcess;
+use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
 use windows_sys::Win32::System::Threading::PROCESS_CREATE_THREAD;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION;
@@ -154,15 +155,49 @@ impl TargetProcess {
         Ok(modules)
     }
 
-    /// 取进程主镜像（按 `.exe` 路径识别，而不是排序后的最低基址）。
+    /// 取进程真实映像路径（QueryFullProcessImageNameW）。
+    ///
+    /// # Errors
+    /// 进程句柄失效或路径查询失败。
+    pub fn image_path(&self) -> Result<std::path::PathBuf, HostError> {
+        let mut buffer = vec![0u16; 32 * 1024];
+        let mut size = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        // SAFETY: handle 是存活的进程句柄；buffer 可写且长度由 size 给出。
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                self.handle.as_raw_handle(),
+                0,
+                buffer.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error(&format!(
+                "QueryFullProcessImageNameW pid {}",
+                self.pid
+            )));
+        }
+        Ok(std::path::PathBuf::from(String::from_utf16_lossy(
+            &buffer[..size as usize],
+        )))
+    }
+
+    /// 取进程主镜像：用真实映像路径精确匹配 Toolhelp 条目，而不是猜最低基址。
     ///
     /// # Errors
     /// 模块枚举失败，或进程没有任何模块。
     pub fn main_module(&self) -> Result<ModuleInfo, HostError> {
+        let image = self.image_path()?;
+        let image = image.to_string_lossy();
         let modules = self.modules()?;
         modules
             .iter()
-            .find(|module| module.path.to_ascii_lowercase().ends_with(".exe"))
+            .find(|module| module.path.eq_ignore_ascii_case(&image))
+            .or_else(|| {
+                modules
+                    .iter()
+                    .find(|module| module.path.to_ascii_lowercase().ends_with(".exe"))
+            })
             .or_else(|| modules.first())
             .cloned()
             .ok_or_else(|| HostError::Process(format!("pid {} has no modules", self.pid)))
@@ -513,6 +548,13 @@ mod tests {
             main.path.to_ascii_lowercase().ends_with(".exe"),
             "main module path is not an exe: {}",
             main.path
+        );
+        let image = process.image_path().expect("image path");
+        assert!(
+            main.path.eq_ignore_ascii_case(&image.to_string_lossy()),
+            "main module {} != image path {}",
+            main.path,
+            image.display()
         );
         assert_ne!(main.base, 0, "main module base is zero");
     }
