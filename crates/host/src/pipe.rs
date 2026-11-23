@@ -436,8 +436,11 @@ mod tests {
         let server = NamedPipeServer::for_pid(999_999).expect("server");
         let name = server.name().to_string();
         let client = std::thread::spawn(move || client_open(&name));
-        let result = server.accept(Duration::from_secs(5));
-        assert!(result.is_err(), "a client from another pid was accepted");
+        let error = match server.accept(Duration::from_secs(5)) {
+            Ok(_) => panic!("a client from another pid was accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("client pid"), "unexpected error: {error}");
         let _ = client.join();
     }
 

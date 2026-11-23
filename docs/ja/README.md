@@ -51,7 +51,7 @@ PE exception/unwind と MSVC RTTI、RSDS 認証 PDB と dbghelp 照合、GNU/MSV
 | 決定性 | 同一入力なら毎回バイト単位で同一の出力（差分と知識再利用の前提） |
 | 検証済み | 24 個のマトリクスフィクスチャ + `/bin/true`、`/bin/ls` など strip されたシステムバイナリ |
 
-既知の限界（P1 の範囲）：PE の正確な関数境界は PDB に依存（現在の mingw フィクスチャには PDB がなく、
+既知の限界：PE の正確な関数境界は PDB に依存（zig -g が伴生 PDB を生成。PDB なしでは
 call 先 + 線形走査でカバー）。Ghidra / IDA 差分オラクルは接続済みです。型推論・
 構造体復元・GUI/サービス面は未着手です。
 

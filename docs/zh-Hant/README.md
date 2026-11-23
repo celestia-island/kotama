@@ -49,7 +49,7 @@ PDB 並以 dbghelp 交叉驗證、GNU/MSVC 夾具與打包車道。Windows 上�
 | 確定性 | 同一輸入兩次輸出逐位元組相同（差分與知識庫複用的前提） |
 | 已驗證 | 24 個矩陣夾具 + `/bin/true`、`/bin/ls` 等 strip 系統二進位檔 |
 
-已知邊界（P1 範圍）：PE 的精確函式邊界依賴 PDB（當前 mingw 夾具無 PDB，靠 call 目標 + 線性掃描）；
+已知邊界：PE 的精確函式邊界依賴 PDB（zig -g 會產出 loops.pdb；無 PDB 時靠 call 目標 + 線性掃描）；
 Ghidra / IDA 差分 oracle 已接入。型別推斷、結構體恢復與 GUI/服務面尚未開始。
 
 設計決策與過程記錄在 PR 描述中（設計文件不進倉樹）。

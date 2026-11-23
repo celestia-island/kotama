@@ -124,12 +124,18 @@ fn stack_snapshot(_max_frames: u32) -> Result<Vec<kotama_proto::ThreadStack>, St
     Err("stack snapshot is a windows payload capability; this payload does not declare it".into())
 }
 
+/// 单帧上限；peer 给的 u32 不能触发无界分配（与宿主侧一致）。
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
 /// 传输帧（4 字节 LE 长度前缀 + msgpack；与宿主侧共用语义）。
 pub(crate) fn send_frame<S>(stream: &mut S, frame: &Frame) -> Result<(), std::io::Error>
 where
     S: Write,
 {
     let bytes = kotama_proto::encode(frame).map_err(|e| std::io::Error::other(e.to_string()))?;
+    if bytes.len() > MAX_FRAME_LEN {
+        return Err(std::io::Error::other("frame too large"));
+    }
     stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
     stream.write_all(&bytes)
 }
@@ -140,7 +146,11 @@ where
 {
     let mut length = [0u8; 4];
     stream.read_exact(&mut length).ok()?;
-    let mut bytes = vec![0u8; u32::from_le_bytes(length) as usize];
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_FRAME_LEN {
+        return None;
+    }
+    let mut bytes = vec![0u8; length];
     stream.read_exact(&mut bytes).ok()?;
     kotama_proto::decode(&bytes).ok()
 }

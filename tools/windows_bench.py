@@ -122,7 +122,7 @@ def cli_attach_smoke(env: dict[str, str]) -> None:
             child.wait()
 
 
-def cli_attach_case(label, command, payload, extra_env, env):
+def cli_attach_case(label, command, payload, extra_env, env, settle = 0.5):
     child_env = env.copy()
     child_env.pop("KOTAMA_PAYLOAD_PIPE", None)
     child_env.pop("KOTAMA_PAYLOAD_TCP", None)
@@ -132,7 +132,7 @@ def cli_attach_case(label, command, payload, extra_env, env):
         stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL,
     )
     try:
-        time.sleep(0.5)
+        time.sleep(settle)
         cli = [
             "cargo", "run", "--quiet", "-p", "kotama-cli", "--", "live", "inject",
             "--payload", str(payload), "--pid", str(child.pid),
@@ -174,7 +174,7 @@ def cli_attach_matrix(env):
     cli_attach_case("spin/rust-empty-env", [str(spin), "30"], rust_payload, {"KOTAMA_PAYLOAD_PIPE": ""}, env)
     pwsh = shutil.which("pwsh")
     if pwsh:
-        cli_attach_case("pwsh/low-base-exe", [pwsh, "-NoProfile", "-Command", "Start-Sleep 30"], agent, {}, env)
+        cli_attach_case("pwsh/low-base-exe", [pwsh, "-NoProfile", "-Command", "Start-Sleep 30"], agent, {}, env, settle = 2.0)
 
 
 def main() -> int:

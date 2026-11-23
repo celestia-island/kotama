@@ -52,8 +52,8 @@ Périmètre démontré :
 | Déterminisme | Même entrée, sortie identique octet par octet à chaque exécution (le prérequis du diff et de la réutilisation des connaissances) |
 | Vérifié sur | 24 cibles de la matrice de fixtures plus des binaires système dénudés comme `/bin/true` et `/bin/ls` |
 
-Limites connues (périmètre P1) : les frontières exactes des fonctions PE dépendent du PDB (les
-fixtures mingw n'en embarquent pas aujourd'hui ; cibles d'appel + balayage linéaire les couvrent) ;
+Limites connues : les frontières exactes des fonctions PE dépendent du PDB (zig -g génère le PDB
+compagnon ; sans lui, cibles d'appel + balayage linéaire les couvrent) ;
 les oracles Ghidra/IDA sont désormais câblés. L'inférence de types, la récupération de structs
 et la GUI/service ne sont pas encore commencées.
 

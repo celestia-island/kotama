@@ -52,7 +52,7 @@ PE exception/unwind와 MSVC RTTI, RSDS 인증 PDB와 dbghelp 대조, GNU/MSVC �
 | 결정성 | 같은 입력이면 매 실행 바이트 단위로 동일한 출력(차등 비교와 지식 재사용의 전제) |
 | 검증 대상 | 매트릭스 픽스처 24개 + `/bin/true`, `/bin/ls` 등 strip된 시스템 바이너리 |
 
-알려진 한계(P1 범위): PE의 정확한 함수 경계는 PDB에 의존(현재 mingw 픽스처에는 PDB가 없어
+알려진 한계: PE의 정확한 함수 경계는 PDB에 의존(zig -g가 loops.pdb를 생성하며, 없으면
 call 대상 + 선형 스캔으로 커버). Ghidra / IDA 차등 오라클은 연결되었습니다. 타입 추론,
 구조체 복원, GUI/서비스 면은 미착수입니다.
 
@@ -62,7 +62,7 @@ call 대상 + 선형 스캔으로 커버). Ghidra / IDA 차등 오라클은 연�
 
 | 영역 | 내용 | 단계 |
 | --- | --- | --- |
-| 정적 | 로드 → 함수 발견 → 기본 블록 디컴파일 ✅ / 타입 추론 · 구조체 · 차등 오라클 | P0 ✅ / P1 |
+| 정적 | 로드 → 함수 발견 → 기본 블록 디컴파일 → SEH/RTTI/PDB 증거와 Ghidra/IDA 차등 ✅ / 타입 추론 · 구조체 | P0 ✅ / P1 |
 | 동적 | 인젝션 (Windows / Linux 양선) → 메모리/스택/스냅샷 → 스캔/고정 → hook / trace | P2–P4 |
 | 패키징 | `hooks.toml` + hook 소스 → 플랫폼별 인젝션 라이브러리 + 매니페스트(ABI / 기능 / 다이제스트) | P4 |
 | 서비스면 | 서비스 (REST / WS / MCP) + hikari web UI + evernight 원격 노드 | P5–P6 |

@@ -52,8 +52,8 @@ Alcance demostrado:
 | Determinismo | Misma entrada, salida byte a byte idéntica en cada ejecución (la condición previa para el diff y la reutilización de conocimiento) |
 | Verificado en | 24 objetivos de la matriz de fixtures más binarios del sistema despojados como `/bin/true` y `/bin/ls` |
 
-Límites conocidos (alcance P1): los límites exactos de funciones PE dependen de PDB (los fixtures
-mingw no traen hoy; los cubren destinos de llamada + barrido lineal); los oráculos Ghidra/IDA ya
+Límites conocidos: los límites exactos de funciones PE dependen de PDB (zig -g genera el PDB
+acompañante; sin él los cubren destinos de llamada + barrido lineal); los oráculos Ghidra/IDA ya
 están conectados. La inferencia de tipos, la recuperación de structs y la GUI/servicio aún no
 han comenzado.
 
