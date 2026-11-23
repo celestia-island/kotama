@@ -27,6 +27,9 @@ Commands:
                              --decompile        also emit pseudo-C for the first --limit functions
                              --limit <N>        how many functions to decompile (default 8)
                              --xref             also emit the function-level call graph
+                             --strings          also emit string cross-references
+                             --vtables          also emit the generic vtable scan
+                             --rtti             also emit MSVC RTTI/vtable facts (PE/MSVC)
   oracle <path>            Run Ghidra headless and diff its function list against ours
   live attach <pid>        List modules of a running process (ELF + wine/native PE)
   live analyze <pid>       Parse the first wine/native PE module live and discover functions
@@ -186,6 +189,44 @@ struct Report {
     vtables: Option<Vec<VtableJson>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exceptions: Vec<ExceptionJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtti: Option<RttiJson>,
+}
+
+/// MSVC RTTI facts exposed by the CLI; deterministic order comes from the scanner.
+#[derive(Serialize)]
+struct RttiJson {
+    vtables: Vec<RttiVtableJson>,
+    type_descriptors: Vec<RttiTypeJson>,
+}
+
+#[derive(Serialize)]
+struct RttiVtableJson {
+    locator_ptr_rva: String,
+    address_point: String,
+    class_name: String,
+    offset: u32,
+    constructor_disp: u32,
+    hierarchy_rva: String,
+    bases: Vec<RttiBaseJson>,
+    slots: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RttiBaseJson {
+    rva: String,
+    class_name: String,
+    num_contained_bases: u32,
+    member_disp: i32,
+    vbtable_disp: i32,
+    vbase_disp: i32,
+}
+
+#[derive(Serialize)]
+struct RttiTypeJson {
+    rva: String,
+    mangled: String,
+    class_name: String,
 }
 
 /// 一条 PE64 exception/unwind 事实；地址全部是模块 RVA。
@@ -998,6 +1039,7 @@ fn analyze(args: &[String]) -> ExitCode {
     let mut xref = false;
     let mut strings = false;
     let mut vtables_flag = false;
+    let mut rtti_flag = false;
     let mut limit: usize = 8;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -1006,6 +1048,7 @@ fn analyze(args: &[String]) -> ExitCode {
             "--xref" => xref = true,
             "--strings" => strings = true,
             "--vtables" => vtables_flag = true,
+            "--rtti" => rtti_flag = true,
             "--limit" => match iter.next().and_then(|v| v.parse().ok()) {
                 Some(value) => limit = value,
                 None => {
@@ -1113,6 +1156,47 @@ fn analyze(args: &[String]) -> ExitCode {
                     .map(|runtime| format!("0x{:x}", runtime.begin_rva)),
             })
             .collect(),
+        rtti: rtti_flag.then(|| {
+            let facts = kotama_scan::msvc_rtti::scan(&module);
+            RttiJson {
+                vtables: facts
+                    .vtables
+                    .iter()
+                    .map(|table| RttiVtableJson {
+                        locator_ptr_rva: format!("0x{:x}", table.locator_ptr_rva),
+                        address_point: format!("0x{:x}", table.address_point),
+                        class_name: table.locator.type_descriptor.class_name.clone(),
+                        offset: table.locator.offset,
+                        constructor_disp: table.locator.constructor_disp,
+                        hierarchy_rva: format!("0x{:x}", table.locator.hierarchy.rva),
+                        bases: table
+                            .locator
+                            .hierarchy
+                            .bases
+                            .iter()
+                            .map(|base| RttiBaseJson {
+                                rva: format!("0x{:x}", base.rva),
+                                class_name: base.type_descriptor.class_name.clone(),
+                                num_contained_bases: base.num_contained_bases,
+                                member_disp: base.member_disp,
+                                vbtable_disp: base.vbtable_disp,
+                                vbase_disp: base.vbase_disp,
+                            })
+                            .collect(),
+                        slots: table.slots.iter().map(|rva| format!("0x{rva:x}")).collect(),
+                    })
+                    .collect(),
+                type_descriptors: facts
+                    .type_descriptors
+                    .iter()
+                    .map(|descriptor| RttiTypeJson {
+                        rva: format!("0x{:x}", descriptor.rva),
+                        mangled: descriptor.mangled.clone(),
+                        class_name: descriptor.class_name.clone(),
+                    })
+                    .collect(),
+            }
+        }),
         string_xrefs: strings.then(|| {
             string_xrefs(&module, &functions)
                 .into_iter()
