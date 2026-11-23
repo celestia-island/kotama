@@ -1,7 +1,7 @@
 //! 原生 Windows 注入 / 传输车道 e2e（KOTAMA_LIVE_E2E=1 门控）。
 //!
 //! 阶段 A（launch-then-inject + 回环 TCP，TCP 车道保留给 wine）：宿主自拉起
-//! spin.exe → 显式授权注入 dist/x86_64-windows-gnu/kotama_agent.dll → 载荷回连 →
+//! spin.exe → 显式授权注入 dist/x86_64-pc-windows-gnu/kotama_agent.dll → 载荷回连 →
 //! 握手 PROTO_VERSION → ListModules 主基址 == spin 基址 → ReadMemory 回 MZ →
 //! 宿主 Toolhelp 枚举到 kotama_agent.dll；未授权注入的负对照在授权前跑。
 //!
@@ -73,7 +73,7 @@ fn agent_dll() -> PathBuf {
         );
         return dll;
     }
-    let dll = repo_root().join("dist/x86_64-windows-gnu/kotama_agent.dll");
+    let dll = repo_root().join("dist/x86_64-pc-windows-gnu/kotama_agent.dll");
     assert!(
         dll.is_file(),
         "payload DLL missing: run tools/build_windows_agent.py with KOTAMA_ZIG ({})",
@@ -83,7 +83,7 @@ fn agent_dll() -> PathBuf {
 }
 
 fn loader_exe() -> PathBuf {
-    let loader = repo_root().join("dist/x86_64-windows-gnu/kotama_load.exe");
+    let loader = repo_root().join("dist/x86_64-pc-windows-gnu/kotama_load.exe");
     assert!(
         loader.is_file(),
         "loader missing: run tools/build_windows_agent.py with KOTAMA_ZIG ({})",
