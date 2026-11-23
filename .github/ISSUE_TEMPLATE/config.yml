@@ -1,5 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: 安全漏洞（私密）
-    url: https://github.com/celestia-island/kotama/security/advisories/new
-    about: 安全问题请走私密公告，不要在公开 issue 中披露。
