@@ -3,10 +3,9 @@
 //! 「不留脚手架」的验收口径：**pack 的产物必须能直接进 own-launch e2e 跑通**——
 //! manifest 不是摆设，`live launch --preload dist/<triple>/…so` 用的是 pack 出来的那颗。
 //!
-//! 支持面（P4 首版）：`x86_64-linux-gnu`（本机 cargo 原生目标，零额外工具链）与
-//! `x86-linux-gnu`（需 rustup 目标在位，缺了给明确指引）。**Windows 目标显式拒绝**：
-//! 载荷的 windows agent 是命名管道车道（wine 下宿主侧无法直连验证），随专用轮交付——
-//! 不产出空的 `.dll` 假装可用。
+//! 支持面：`x86_64-linux-gnu` / `i686-linux-gnu` 走 Rust cdylib；
+//! `x86_64-pc-windows-gnu` 走 zig cc 的 C agent + `kotama_load.exe`。其它目标显式拒绝，
+//! 不产出空产物假装可用；MSVC 与 32 位 Windows 打包在对应工具链接入后再开放。
 //!
 //! manifest 确定性：无时间戳、字段排序稳定、符号表升序——同源码两次 pack 逐字节相同
 //! （除编译器自身非确定性外；`sha256` 如实记录产物）。
@@ -210,6 +209,17 @@ pub fn pack_target(
     Ok(manifest)
 }
 
+/// 构建脚本解释器：Windows 的 `python3` 常是商店占位符，优先用可配置的 `python`。
+fn python_launcher() -> String {
+    std::env::var("KOTAMA_PYTHON").unwrap_or_else(|_| {
+        if cfg!(target_os = "windows") {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    })
+}
+
 /// windows 载荷打包：跑 `tools/build_windows_agent.py`（zig cc 出 dll + loader）。
 fn pack_windows_agent(
     repo_root: &Path,
@@ -224,7 +234,7 @@ fn pack_windows_agent(
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| PackError::Io(e.to_string()))?;
 
-    let output = std::process::Command::new("python3")
+    let output = std::process::Command::new(python_launcher())
         .arg(&script)
         .arg("--out-dir")
         .arg(&staging)
@@ -326,10 +336,11 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// 默认目标（宿主）。
 #[must_use]
 pub fn default_target() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "x86_64-unknown-linux-gnu"
-    } else {
-        "i686-unknown-linux-gnu"
+    match (cfg!(target_os = "windows"), cfg!(target_arch = "x86_64")) {
+        (true, true) => "x86_64-pc-windows-gnu",
+        (true, false) => "i686-pc-windows-gnu",
+        (false, true) => "x86_64-unknown-linux-gnu",
+        (false, false) => "i686-unknown-linux-gnu",
     }
 }
 
@@ -357,8 +368,15 @@ mod tests {
         );
     }
 
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn default_target_is_the_native_windows_lane() {
+        assert_eq!(default_target(), "x86_64-pc-windows-gnu");
+    }
+
     /// pack 产物功能验收（宿主机 + `KOTAMA_PACK_E2E=1`）：打出的 .so 必须能直接进
     /// own-launch（这是「pack 不产摆设」的判据——manifest 里的 sha256 即被注入的那颗）。
+    #[cfg(target_os = "linux")]
     #[test]
     fn pack_artifact_works_in_own_launch() {
         if std::env::var_os("KOTAMA_PACK_E2E").is_none() {
@@ -400,6 +418,57 @@ mod tests {
         assert_eq!(
             &magic, b"\x7fELF",
             "packed artifact must serve in-process reads"
+        );
+    }
+
+    /// Windows pack e2e（`KOTAMA_PACK_E2E=1` + `KOTAMA_ZIG`）：重新打包 C agent，
+    /// 校验 manifest 哈希，再用产出的 loader 在原生 Windows 真机 LoadLibrary 并拉起 spin。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn pack_windows_artifact_loads_natively() {
+        if std::env::var_os("KOTAMA_PACK_E2E").is_none() {
+            eprintln!("skip: set KOTAMA_PACK_E2E=1 to run the Windows pack e2e");
+            return;
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let dist = repo.join("dist");
+        let manifest = pack_target(&repo, &dist, "x86_64-pc-windows-gnu").expect("pack");
+        let out_dir = dist.join(&manifest.target);
+        let agent = out_dir.join(&manifest.file);
+        let loader = out_dir.join("kotama_load.exe");
+        let fixture = repo
+            .join("fixtures/generated/x86_64-windows-gnu/-O2/spin.exe")
+            .canonicalize()
+            .expect("fixture missing: run tools/build_fixtures.py first");
+
+        let bytes = std::fs::read(&agent).unwrap();
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(&bytes);
+        let hex = digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(hex, manifest.sha256);
+
+        let output = std::process::Command::new(&loader)
+            .arg(&agent)
+            .arg("--")
+            .arg(&fixture)
+            .arg("1")
+            .output()
+            .expect("run kotama_load with the packed agent");
+        assert!(
+            output.status.success(),
+            "loader failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.lines().any(|line| line.starts_with("spin: ")),
+            "target did not run after payload load: {stdout:?}"
         );
     }
 }

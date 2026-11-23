@@ -520,6 +520,7 @@ fn live_trace(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode 
 }
 
 /// 解析值规格：`u32:123` / `i32:-5` / `u64:8` / `f32:1.5` / `bytes:deadbeef`。
+#[cfg(target_os = "linux")]
 fn parse_value_spec(spec: &str) -> Result<kotama_host::scanner::Value, String> {
     let (kind, raw) = spec
         .split_once(':')

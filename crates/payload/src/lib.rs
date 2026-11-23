@@ -12,6 +12,8 @@
 //! P2/P3 口径只实现**只读**方法：`Hello` / `ListModules` / `ReadMemory`；`WriteMemory`
 //! 显式回「未随门禁开放」，与宿主 capability 门禁成对。
 
+#![allow(unsafe_code)] // 平台原语与 C ABI 边界；逐调用 SAFETY 注。
+
 use std::io::Read;
 use std::io::Write;
 

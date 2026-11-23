@@ -1,4 +1,5 @@
 set shell := ["bash", "-c"]
+set windows-shell := ["pwsh", "-NoProfile", "-Command"]
 
 _default:
     @just --list

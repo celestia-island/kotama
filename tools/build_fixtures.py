@@ -14,7 +14,8 @@ i386-windows-gnu，各出 -O2 与 -O0 两档（-g 常开——DWARF 是静态管
 
 工具链发现顺序：--zig > $KOTAMA_ZIG > PATH > /mnt/work/zig-*/zig。
 wine 发现顺序：--wine > $KOTAMA_WINE > PATH（wine64 > wine）。32 位 PE 在纯 wine64（无
-wine32）环境下会跑不动——脚本探测失败时按 lane-skip 报告，不算失败。
+wine32）环境下会跑不动——脚本探测失败时按 lane-skip 报告，不算失败。原生 Windows
+宿主直接运行 PE，不要求 wine；ELF 的运行在 Windows 上按 lane-skip 报告。
 """
 
 from __future__ import annotations
@@ -109,12 +110,16 @@ def build_all(zig: str, targets: list[str], opt_levels: list[str]) -> int:
 
 def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> int:
     failures = 0
+    native_windows = os.name == "nt"
 
     for target in targets:
         is_windows = target.endswith("-windows-gnu")
 
-        if is_windows and (wine is None):
-            print(f"lane-skip {target}: no wine on this host")
+        if is_windows and not native_windows and (wine is None):
+            print(f"lane-skip {target}: PE smoke runs need a Windows host or wine")
+            continue
+        if not is_windows and native_windows:
+            print(f"lane-skip {target}: ELF smoke runs need a Linux host")
             continue
 
         for opt in opt_levels:
@@ -128,7 +133,7 @@ def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> in
                 if exe.suffix == ".pdb":
                     continue
 
-                cmd = ([wine] if is_windows else []) + [str(exe)]
+                cmd = ([wine] if is_windows and not native_windows else []) + [str(exe)]
                 proc = run(cmd, timeout = 60)
                 name = f"{target}/-{opt}/{exe.name}"
 
