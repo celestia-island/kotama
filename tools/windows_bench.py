@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,56 @@ def cli_injection_smoke(env: dict[str, str]) -> None:
             f"base={report['payload_main_base']} magic={report['image_magic']}",
             flush = True,
         )
+
+
+def cli_attach_smoke(env: dict[str, str]) -> None:
+    agent = REPO / "dist" / "x86_64-pc-windows-gnu" / "kotama_agent.dll"
+    spin = REPO / "fixtures" / "generated" / "x86_64-windows-gnu" / "-O2" / "spin.exe"
+    for path in (agent, spin):
+        if not path.is_file():
+            raise SystemExit(f"windows-bench: CLI attach input missing: {path}")
+
+    child_env = env.copy()
+    child_env.pop("KOTAMA_PAYLOAD_PIPE", None)
+    child_env.pop("KOTAMA_PAYLOAD_TCP", None)
+    child = subprocess.Popen(
+        [str(spin), "30"], cwd = REPO, env = child_env,
+        stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(0.5)
+        command = [
+            "cargo", "run", "--quiet", "-p", "kotama-cli", "--", "live", "inject",
+            "--payload", str(agent), "--pid", str(child.pid),
+        ]
+        print("\n=== windows-bench: CLI attach-then-inject smoke ===", flush = True)
+        print("+ " + " ".join(command), flush = True)
+        completed = subprocess.run(
+            command, cwd = REPO, env = env, capture_output = True,
+            text = True, encoding = "utf-8", timeout = 180,
+        )
+        if completed.returncode != 0:
+            print(completed.stdout + completed.stderr)
+            raise SystemExit(f"windows-bench: CLI attach failed with {completed.returncode}")
+        report = json.loads(completed.stdout)
+        if report.get("transport") != "pipe":
+            raise SystemExit(f"windows-bench: CLI attach used the wrong transport: {report}")
+        if report.get("payload_main_base") != report.get("target_main_base"):
+            raise SystemExit(f"windows-bench: CLI attach main base mismatch: {report}")
+        if report.get("image_magic") != "4d5a":
+            raise SystemExit(f"windows-bench: CLI attach did not read MZ: {report}")
+        print(
+            f"# cli attach: pid={report['pid']} base={report['payload_main_base']} "
+            f"magic={report['image_magic']}",
+            flush = True,
+        )
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout = 5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
 
 
 def main() -> int:
@@ -127,6 +178,7 @@ def main() -> int:
             "cargo", "test", "-p", "kotama-host", "--", "--test-threads=1",
         ], live_env)
         cli_injection_smoke(env)
+        cli_attach_smoke(env)
 
     run_step("just gate with required fixtures", ["just", "gate"], env)
     if args.oracle:
