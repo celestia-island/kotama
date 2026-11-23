@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use kotama::ABI_VERSION;
 use kotama_backend_ghidra::GhidraOracle;
-use kotama_decomp::decompile_function_bounded;
+use kotama_decomp::decompile_function_bounded_with_exceptions;
 use kotama_host::TargetProcess;
 use kotama_image::LoadedModule;
 use kotama_scan::call_graph;
@@ -184,6 +184,20 @@ struct Report {
     string_xrefs: Option<Vec<StringXrefJson>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vtables: Option<Vec<VtableJson>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exceptions: Vec<ExceptionJson>,
+}
+
+/// 一条 PE64 exception/unwind 事实；地址全部是模块 RVA。
+#[derive(Serialize)]
+struct ExceptionJson {
+    begin: String,
+    end: String,
+    unwind_info: Option<String>,
+    flags: Option<u8>,
+    prolog_size: Option<u8>,
+    handler: Option<String>,
+    chained_begin: Option<String>,
 }
 
 /// 一个识别出的 vtable（`--vtables` 时才有）。
@@ -1019,6 +1033,7 @@ fn analyze(args: &[String]) -> ExitCode {
         }
     };
     let functions = discover(&module);
+    let exceptions = kotama_scan::exception_functions(&module);
 
     let report = Report {
         module_id: module.module_id().to_hex(),
@@ -1079,6 +1094,25 @@ fn analyze(args: &[String]) -> ExitCode {
                 })
                 .collect()
         }),
+        exceptions: exceptions
+            .iter()
+            .map(|exception| ExceptionJson {
+                begin: format!("0x{:x}", exception.runtime.begin_rva),
+                end: format!("0x{:x}", exception.runtime.end_rva),
+                unwind_info: (exception.runtime.unwind_info_rva != 0)
+                    .then(|| format!("0x{:x}", exception.runtime.unwind_info_rva)),
+                flags: exception.unwind.map(|unwind| unwind.flags),
+                prolog_size: exception.unwind.map(|unwind| unwind.prolog_size),
+                handler: exception
+                    .unwind
+                    .and_then(|unwind| unwind.handler_rva)
+                    .map(|rva| format!("0x{rva:x}")),
+                chained_begin: exception
+                    .unwind
+                    .and_then(|unwind| unwind.chained)
+                    .map(|runtime| format!("0x{:x}", runtime.begin_rva)),
+            })
+            .collect(),
         string_xrefs: strings.then(|| {
             string_xrefs(&module, &functions)
                 .into_iter()
@@ -1114,7 +1148,14 @@ fn analyze(args: &[String]) -> ExitCode {
         };
         for (index, function) in functions.iter().take(limit).enumerate() {
             let body_limit = limit_of(index);
-            let text = decompile_function_bounded(&space, id, module.arch, function, body_limit);
+            let text = decompile_function_bounded_with_exceptions(
+                &space,
+                id,
+                module.arch,
+                function,
+                body_limit,
+                &exceptions,
+            );
             println!();
             println!("{}", text.text);
         }
