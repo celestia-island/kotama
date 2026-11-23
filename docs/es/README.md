@@ -35,6 +35,12 @@ Es CLI y biblioteca a la vez — y una vista dentro de shittim-chest / hikari.
 `kotama analyze <archivo>` carga un fichero ELF/PE → descubre funciones → las decompila a
 pseudo-C a nivel de bloques básicos.
 
+**Los carriles nativos de Windows ya están implementados** (2026-11-23, Win10 Pro x64):
+host nativo attach/scan/write/freeze, inyección LoadLibrary por named pipe o TCP de loopback,
+exception/unwind de PE y RTTI de MSVC, PDB autenticado por RSDS contrastado con dbghelp, y
+matriz de fixtures GNU/MSVC más empaquetado. Ejecuta `just bench-windows` en Windows (añade
+`--oracle` para Ghidra y `--ida` con `KOTAMA_IDA` para IDA).
+
 Alcance demostrado:
 
 | Dimensión | Estado |
@@ -47,8 +53,9 @@ Alcance demostrado:
 | Verificado en | 24 objetivos de la matriz de fixtures más binarios del sistema despojados como `/bin/true` y `/bin/ls` |
 
 Límites conocidos (alcance P1): los límites exactos de funciones PE dependen de PDB (los fixtures
-mingw no traen hoy; los cubren destinos de llamada + barrido lineal); la inferencia de tipos, la
-recuperación de structs y el oráculo diferencial de Ghidra aún no están conectados.
+mingw no traen hoy; los cubren destinos de llamada + barrido lineal); los oráculos Ghidra/IDA ya
+están conectados. La inferencia de tipos, la recuperación de structs y la GUI/servicio aún no
+han comenzado.
 
 Las decisiones de diseño y los registros de proceso viven en las descripciones de los PR
 (los documentos de diseño no entran en el árbol fuente).

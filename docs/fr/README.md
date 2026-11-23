@@ -35,6 +35,12 @@ Pour ce dépôt, cela se lit : *voir le programme clairement, et enregistrer ce 
 `kotama analyze <fichier>` charge un fichier ELF/PE → découvre les fonctions → les décompile
 en pseudo-C au niveau des blocs de base.
 
+**Les voies natives Windows sont implémentées** (2026-11-23, Win10 Pro x64) : hôte natif
+attach/scan/write/freeze, injection LoadLibrary par named pipe ou TCP loopback, exception/unwind
+PE et RTTI MSVC, PDB authentifié RSDS recoupé avec dbghelp, et matrice de fixtures GNU/MSVC plus
+packaging. Lance `just bench-windows` sous Windows (ajoute `--oracle` pour Ghidra et `--ida`
+avec `KOTAMA_IDA` pour IDA).
+
 Périmètre démontré :
 
 | Dimension | État |
@@ -48,8 +54,8 @@ Périmètre démontré :
 
 Limites connues (périmètre P1) : les frontières exactes des fonctions PE dépendent du PDB (les
 fixtures mingw n'en embarquent pas aujourd'hui ; cibles d'appel + balayage linéaire les couvrent) ;
-l'inférence de types, la récupération de structs et l'oracle différentiel Ghidra ne sont pas
-encore câblés.
+les oracles Ghidra/IDA sont désormais câblés. L'inférence de types, la récupération de structs
+et la GUI/service ne sont pas encore commencées.
 
 Les décisions de conception et les registres de processus vivent dans les descriptions de PR
 (les documents de conception n'entrent pas dans l'arbre source).

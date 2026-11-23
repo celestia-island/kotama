@@ -35,6 +35,12 @@ shittim-chest / hikari의 뷰이기도 합니다.
 `kotama analyze <파일>`이 ELF/PE 파일을 로드 → 함수 발견 → 기본 블록 단위 디컴파일까지
 수행합니다.
 
+**네이티브 Windows 레인 구현 완료**(2026-11-23, Win10 Pro x64): 네이티브 host
+attach/scan/write/freeze, named pipe 또는 루프백 TCP를 통한 LoadLibrary 주입,
+PE exception/unwind와 MSVC RTTI, RSDS 인증 PDB와 dbghelp 대조, GNU/MSVC 픽스처 및
+패키징. Windows에서 `just bench-windows` 실행(`--oracle`는 Ghidra, `KOTAMA_IDA`와
+`--ida`는 IDA 차등).
+
 검증된 범위:
 
 | 차원 | 현황 |
@@ -47,7 +53,8 @@ shittim-chest / hikari의 뷰이기도 합니다.
 | 검증 대상 | 매트릭스 픽스처 24개 + `/bin/true`, `/bin/ls` 등 strip된 시스템 바이너리 |
 
 알려진 한계(P1 범위): PE의 정확한 함수 경계는 PDB에 의존(현재 mingw 픽스처에는 PDB가 없어
-call 대상 + 선형 스캔으로 커버). 타입 추론, 구조체 복원, Ghidra 차등 오라클은 미연결입니다.
+call 대상 + 선형 스캔으로 커버). Ghidra / IDA 차등 오라클은 연결되었습니다. 타입 추론,
+구조체 복원, GUI/서비스 면은 미착수입니다.
 
 설계 결정과 진행 기록은 PR 설명에 남깁니다(설계 문서는 소스 트리에 넣지 않습니다).
 

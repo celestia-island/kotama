@@ -33,6 +33,11 @@
 **P0 靜態管線已跑通**（2026-11-23 首提交，`master` 單主幹）。
 `kotama analyze <檔案>` 對一個 ELF/PE 檔做載入 → 函式發現 → 基本塊級反編譯。
 
+**Windows 原生車道已落地**（2026-11-23，Win10 Pro x64）：原生 host attach/scan/write/freeze、
+命名管道或回環 TCP 的 LoadLibrary 注入、PE exception/unwind 與 MSVC RTTI、RSDS 身分驗證
+PDB 並以 dbghelp 交叉驗證、GNU/MSVC 夾具與打包車道。Windows 上執行 `just bench-windows`
+（追加 `--oracle` 納入 Ghidra、設定 `KOTAMA_IDA` 後追加 `--ida` 納入 IDA）。
+
 已實證的範圍：
 
 | 維度 | 現狀 |
@@ -45,7 +50,7 @@
 | 已驗證 | 24 個矩陣夾具 + `/bin/true`、`/bin/ls` 等 strip 系統二進位檔 |
 
 已知邊界（P1 範圍）：PE 的精確函式邊界依賴 PDB（當前 mingw 夾具無 PDB，靠 call 目標 + 線性掃描）；
-類型推斷、結構體恢復、Ghidra 差分 oracle 尚未接入。
+Ghidra / IDA 差分 oracle 已接入。型別推斷、結構體恢復與 GUI/服務面尚未開始。
 
 設計決策與過程記錄在 PR 描述中（設計文件不進倉樹）。
 

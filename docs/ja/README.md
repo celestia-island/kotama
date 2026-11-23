@@ -34,6 +34,12 @@ CLI でもライブラリでもあり、shittim-chest / hikari のビューの�
 `kotama analyze <ファイル>` が ELF/PE ファイルをロード → 関数発見 → 基本ブロック単位の
 デコンパイルまで実行します。
 
+**ネイティブ Windows レーンは実装済み**（2026-11-23、Win10 Pro x64）：ネイティブ host の
+attach/scan/write/freeze、named pipe またはループバック TCP 経由の LoadLibrary 注入、
+PE exception/unwind と MSVC RTTI、RSDS 認証 PDB と dbghelp 照合、GNU/MSVC フィクスチャと
+パッケージング。Windows では `just bench-windows` を実行（`--oracle` で Ghidra、
+`KOTAMA_IDA` と `--ida` で IDA 差分）。
+
 実証済みの範囲：
 
 | 次元 | 現状 |
@@ -46,7 +52,8 @@ CLI でもライブラリでもあり、shittim-chest / hikari のビューの�
 | 検証済み | 24 個のマトリクスフィクスチャ + `/bin/true`、`/bin/ls` など strip されたシステムバイナリ |
 
 既知の限界（P1 の範囲）：PE の正確な関数境界は PDB に依存（現在の mingw フィクスチャには PDB がなく、
-call 先 + 線形走査でカバー）。型推論・構造体復元・Ghidra 差分オラクルは未接続です。
+call 先 + 線形走査でカバー）。Ghidra / IDA 差分オラクルは接続済みです。型推論・
+構造体復元・GUI/サービス面は未着手です。
 
 設計決定と経過の記録は PR の説明に残します（設計ドキュメントはソースツリーに入れません）。
 
