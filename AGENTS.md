@@ -26,8 +26,8 @@
 `just gate` = `cargo fmt --check` → `cargo clippy --workspace --all-targets -- -D warnings` →
 `cargo test --workspace` → `cargo deny check licenses bans sources`。
 
-CI 目前是空转：仓未推远端，`ci.yml` 仅 `workflow_dispatch`；`depspec-lint` / `family-versions` /
-`verify-versions` 只在 `master` 推送时跑。
+`ci.yml` 仅 `workflow_dispatch`（编译 + deny 道，自托管 runner）；`depspec-lint` / `family-versions` /
+`verify-versions` 在 `master` 推送时跑。
 
 ## 代码边界（crate 契约）
 

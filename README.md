@@ -35,6 +35,8 @@ Both a CLI and a library — and a view inside shittim-chest / hikari.
 `kotama analyze <file>` loads an ELF/PE file → discovers functions → decompiles them to
 basic-block-level pseudo-C.
 
+Next up: the native-Windows bench phase — a real-machine e2e lane plus native injection and host paths (the wine lanes stay for compatibility). Tasks are tracked in PR #1.
+
 Proven scope:
 
 | Dimension | State |
