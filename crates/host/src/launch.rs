@@ -5,8 +5,6 @@
 //! （`kotama-payload`），`bootstrap` 只在 `.init_array` 登记，线程连回本监听器。
 //! 只读方法集（Hello / ListModules / ReadMemory）；写方法随宿主 capability 门禁成对开放。
 
-use std::io::Read;
-use std::io::Write;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -15,11 +13,11 @@ use std::process::Command;
 use std::process::Stdio;
 
 use kotama_proto::Capability;
-use kotama_proto::Frame;
 use kotama_proto::Handshake;
 use kotama_proto::Request;
 use kotama_proto::Response;
 
+use crate::wire;
 use crate::HostError;
 
 /// 一次 own-launch 会话的报告。
@@ -87,7 +85,7 @@ pub fn launch(payload: &str, command: &[String]) -> Result<Launched, HostError> 
         socket,
     };
     // 握手：版本不匹配 = 拒绝（无回退）。
-    let ack = request(
+    let ack = wire::request(
         &mut launched.stream,
         &Request::Hello(Handshake {
             proto_version: kotama_proto::PROTO_VERSION,
@@ -127,7 +125,7 @@ pub fn launch(payload: &str, command: &[String]) -> Result<Launched, HostError> 
 /// # Errors
 /// 任一请求失败。
 pub fn probe(launched: &mut Launched, command: &[String]) -> Result<LaunchReport, HostError> {
-    let modules = match request(&mut launched.stream, &Request::ListModules)? {
+    let modules = match wire::request(&mut launched.stream, &Request::ListModules)? {
         Response::Modules(modules) => modules,
         Response::Error { code, message } => {
             return Err(HostError::Proc(format!("list_modules: {code} {message}")))
@@ -149,7 +147,7 @@ pub fn probe(launched: &mut Launched, command: &[String]) -> Result<LaunchReport
         .map(|module| module.base);
 
     let image_magic = image_base.and_then(|base| {
-        match request(
+        match wire::request(
             &mut launched.stream,
             &Request::ReadMemory {
                 address: base,
@@ -195,30 +193,6 @@ fn accept_with_timeout(
             Err(err) => return Err(HostError::Proc(format!("accept: {err}"))),
         }
     }
-}
-
-fn request<S: Read + Write>(stream: &mut S, request: &Request) -> Result<Response, HostError> {
-    send_frame(stream, &Frame::Request(request.clone()))?;
-    match recv_frame(stream) {
-        Some(Frame::Response(response)) => Ok(response),
-        _ => Err(HostError::Proc("frame stream closed".into())),
-    }
-}
-
-fn send_frame<S: Write>(stream: &mut S, frame: &Frame) -> Result<(), HostError> {
-    let bytes = kotama_proto::encode(frame).map_err(|e| HostError::Proc(format!("encode: {e}")))?;
-    stream
-        .write_all(&(bytes.len() as u32).to_le_bytes())
-        .and_then(|()| stream.write_all(&bytes))
-        .map_err(|e| HostError::Proc(format!("send: {e}")))
-}
-
-fn recv_frame<S: Read>(stream: &mut S) -> Option<Frame> {
-    let mut length = [0u8; 4];
-    stream.read_exact(&mut length).ok()?;
-    let mut bytes = vec![0u8; u32::from_le_bytes(length) as usize];
-    stream.read_exact(&mut bytes).ok()?;
-    kotama_proto::decode(&bytes).ok()
 }
 
 #[cfg(test)]
@@ -320,7 +294,7 @@ pub fn launch_wine(
         stream,
         port,
     };
-    match request(
+    match wire::request(
         &mut launched.stream,
         &Request::Hello(Handshake {
             proto_version: kotama_proto::PROTO_VERSION,
@@ -349,7 +323,7 @@ pub fn launch_wine(
 /// # Errors
 /// 请求失败。
 pub fn probe_wine(launched: &mut WineLaunched) -> Result<LaunchReport, HostError> {
-    let modules = match request(&mut launched.stream, &Request::ListModules)? {
+    let modules = match wire::request(&mut launched.stream, &Request::ListModules)? {
         Response::Modules(modules) => modules,
         Response::Error { code, message } => {
             return Err(HostError::Proc(format!("list_modules: {code} {message}")))

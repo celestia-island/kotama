@@ -1,20 +1,26 @@
 #![allow(unsafe_code)] // C ABI 边界；安全论据见各 SAFETY 注。
 
-//! Windows 载荷注册与传输：`DllMain` 登记 + `CreateThread` + **TCP 回环**连接宿主。
+//! Windows 载荷注册与传输：DllMain 登记 + CreateThread +
+//! **命名管道（KOTAMA_PAYLOAD_PIPE，原生默认）** / **回环 TCP（KOTAMA_PAYLOAD_TCP，wine）**。
 //!
-//! 为什么 TCP 而不是命名管道：载荷要在 wine 下被 Linux 宿主**原生验证**——wine 把
-//! winsock 如实映射到宿主 TCP，宿主 `TcpListener::accept` 直连；命名管道在 wine 里的
-//! 实现宿主侧无入口。原生 Windows 落地时如需管道形态，传输层是可替换的（协议层在
-//! crate 根，传输无关）。
+//! 车道选择：环境里设了 KOTAMA_PAYLOAD_PIPE 就走管道，否则退回 KOTAMA_PAYLOAD_TCP。
+//! 宿主每次只设一个：原生 Windows 用管道（见 host 的 pipe 模块），wine 用 TCP——wine
+//! 把 winsock 如实映射到宿主 TCP，而命名管道在 wine 里没有宿主侧入口。协议帧在两侧
+//! 完全一致（crate 根的 serve/dispatch 与 kotama-proto），传输层只提供 Read + Write。
 //!
-//! DllMain 纪律（仓内 AGENTS）：`DLL_PROCESS_ATTACH` 只 `CreateThread`——不在 loader
-//! lock 里碰 std 锁；WinSock 初始化在工作线程。
+//! DllMain 纪律（仓内 AGENTS）：DLL_PROCESS_ATTACH 只 CreateThread——不在 loader
+//! lock 里碰 std 锁；WinSock 初始化 / 管道连接都在工作线程。
 
 use std::io::Read;
 use std::io::Write;
 
 use windows_sys::core::BOOL;
+use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::FALSE;
+use windows_sys::Win32::Foundation::GENERIC_READ;
+use windows_sys::Win32::Foundation::GENERIC_WRITE;
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::TRUE;
 use windows_sys::Win32::Networking::WinSock::connect;
 use windows_sys::Win32::Networking::WinSock::recv;
@@ -30,10 +36,14 @@ use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN;
 use windows_sys::Win32::Networking::WinSock::SOCKET;
 use windows_sys::Win32::Networking::WinSock::SOCK_STREAM;
 use windows_sys::Win32::Networking::WinSock::WSADATA;
+use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+use windows_sys::Win32::Storage::FileSystem::ReadFile;
+use windows_sys::Win32::Storage::FileSystem::WriteFile;
+use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::CreateThread;
 
-/// 登记点：`DllMain`。attach 只起线程；detach 不做事（宿主收线 = 静默退出）。
+/// 登记点：DllMain。attach 只起线程；detach 不做事（宿主收线 = 静默退出）。
 #[no_mangle]
 pub extern "system" fn DllMain(
     _instance: *mut core::ffi::c_void,
@@ -58,8 +68,14 @@ pub extern "system" fn DllMain(
     FALSE
 }
 
-/// 工作线程入口：WinSock → 连宿主 → 进协议循环。
+/// 工作线程入口：选传输（管道优先）→ 连宿主 → 进协议循环。
 unsafe extern "system" fn agent_thread(_param: *mut core::ffi::c_void) -> u32 {
+    if let Ok(name) = std::env::var("KOTAMA_PAYLOAD_PIPE") {
+        if let Some(mut stream) = PipeAgent::connect(&name) {
+            super::serve(&mut stream);
+        }
+        return 0;
+    }
     let Ok(port) = std::env::var("KOTAMA_PAYLOAD_TCP") else {
         return 0; // 不是 kotama 拉起的进程。
     };
@@ -74,7 +90,93 @@ unsafe extern "system" fn agent_thread(_param: *mut core::ffi::c_void) -> u32 {
     0
 }
 
-/// 极薄的 winsock TCP 客户端（实现 Read/Write 即可复用协议层）。
+/// 命名管道客户端（同步 I/O；实现 Read + Write 即可复用协议层）。
+struct PipeAgent {
+    handle: HANDLE,
+}
+
+impl PipeAgent {
+    /// 连 \\.\pipe\...（重试窗口给宿主 CreateNamedPipeW 留时间）。
+    fn connect(name: &str) -> Option<Self> {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        for _ in 0..200 {
+            // SAFETY: wide 是 NUL 结尾管道名；OPEN_EXISTING + 空模板参数；句柄判非法。
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle != INVALID_HANDLE_VALUE {
+                return Some(Self { handle });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        None
+    }
+}
+
+impl Drop for PipeAgent {
+    fn drop(&mut self) {
+        // SAFETY: handle 由 PipeAgent 独占；CloseHandle 只关一次。
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+impl Read for PipeAgent {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        let mut read = 0u32;
+        // SAFETY: 同步管道句柄；缓冲区指针/长度匹配，read 是有效输出位置。
+        let ok = unsafe {
+            ReadFile(
+                self.handle,
+                buffer.as_mut_ptr(),
+                length,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || read == 0 {
+            return Err(std::io::Error::other("named pipe read failed"));
+        }
+        Ok(read as usize)
+    }
+}
+
+impl Write for PipeAgent {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        let mut written = 0u32;
+        // SAFETY: 同上；buffer 指针只读、长度匹配。
+        let ok = unsafe {
+            WriteFile(
+                self.handle,
+                buffer.as_ptr(),
+                length,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || written == 0 {
+            return Err(std::io::Error::other("named pipe write failed"));
+        }
+        Ok(written as usize)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(()) // 字节流管道无用户态缓冲。
+    }
+}
+
+/// 极薄的 winsock TCP 客户端（wine 车道；实现 Read/Write 即可复用协议层）。
 struct TcpAgent {
     descriptor: SOCKET,
 }

@@ -40,6 +40,7 @@ use windows_sys::Win32::System::Memory::PAGE_WRITECOPY;
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 use windows_sys::Win32::System::SystemInformation::SYSTEM_INFO;
 use windows_sys::Win32::System::Threading::OpenProcess;
+use windows_sys::Win32::System::Threading::PROCESS_CREATE_THREAD;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION;
 use windows_sys::Win32::System::Threading::PROCESS_VM_READ;
@@ -53,6 +54,8 @@ use crate::TargetProcess;
 
 const READ_ACCESS: u32 = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ;
 const WRITE_ACCESS: u32 = READ_ACCESS | PROCESS_VM_OPERATION | PROCESS_VM_WRITE;
+/// 远程注入用权限位：写内存 + VirtualAllocEx + CreateRemoteThread 各一项。
+const INJECT_ACCESS: u32 = WRITE_ACCESS | PROCESS_CREATE_THREAD;
 
 impl TargetProcess {
     /// 以查询 + 只读内存权限打开一个原生 Windows 进程。
@@ -175,6 +178,13 @@ impl TargetProcess {
 /// 打开独立写句柄。Windows 句柄权限不能在打开后升级，所以 with_write 必须重开。
 pub(crate) fn open_writer(pid: i32) -> Result<OwnedHandle, HostError> {
     open_handle(pid, WRITE_ACCESS)
+}
+
+/// 打开独立注入句柄（PROCESS_CREATE_THREAD + 写内存权限）。
+///
+/// 只有显式授权过的会话（control::Session::with_injection）才会走到这里。
+pub(crate) fn open_injector(pid: i32) -> Result<OwnedHandle, HostError> {
+    open_handle(pid, INJECT_ACCESS)
 }
 
 fn open_handle(pid: i32, access: u32) -> Result<OwnedHandle, HostError> {
@@ -391,7 +401,7 @@ fn is_executable(protection: u32) -> bool {
     )
 }
 
-fn last_error(context: &str) -> HostError {
+pub(crate) fn last_error(context: &str) -> HostError {
     HostError::Win32(format!("{context}: {}", std::io::Error::last_os_error()))
 }
 

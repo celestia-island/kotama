@@ -8,17 +8,26 @@
 //!   `AddressSpace::read` 是纯切片借用，scan/discover/decomp 跑同一条静态管线。
 //!
 //! 地址约定：RVA = 进程绝对地址 − 映像基址，与静态侧（文件映像归一）同口径——
-//! 内容寻址身份因此跨静态/活体成立。写内存与冻结仍由 `control::Session` 的
-//! capability 门禁显式开放；远程注入、Windows trace 与外部栈回溯不属本阶段。
+//! 内容寻址身份因此跨静态/活体成立。写内存、冻结与远程注入仍由
+//! `control::Session` 的 capability 门禁显式开放；Windows trace 与外部栈回溯
+//! 不属本阶段。
+//!
+//! Windows 原生车道的传输有两种：命名管道（默认，见 [`pipe`]）与回环 TCP（保留给
+//! wine）。两者与 Linux 的 unix socket 共用 [`wire`] 的帧编解码与只读巡检步骤。
 
 pub mod control;
+#[cfg(target_os = "windows")]
+pub mod inject;
 #[cfg(target_os = "linux")]
 pub mod launch;
+#[cfg(target_os = "windows")]
+pub mod pipe;
 pub mod scanner;
 #[cfg(target_os = "linux")]
 pub mod trace;
 #[cfg(target_os = "windows")]
 mod windows;
+pub mod wire;
 
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -50,6 +59,8 @@ pub enum HostError {
     Win32(String),
     /// PE 头解析失败。
     PeParse(String),
+    /// 远程注入前置校验失败或远程线程未按预期完成。
+    Inject(String),
     /// 写操作未获授权（capability 门禁；负对照钉的就是它）。
     CapabilityDenied(&'static str),
 }
@@ -61,6 +72,7 @@ impl std::fmt::Display for HostError {
             Self::Proc(msg) => write!(f, "proc: {msg}"),
             Self::Win32(msg) => write!(f, "win32: {msg}"),
             Self::PeParse(msg) => write!(f, "pe parse: {msg}"),
+            Self::Inject(msg) => write!(f, "inject: {msg}"),
             Self::CapabilityDenied(msg) => write!(f, "capability denied: {msg}"),
         }
     }
