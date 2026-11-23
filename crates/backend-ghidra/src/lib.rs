@@ -9,11 +9,13 @@
 //! 输出双方独有集合（各截前 25 条）供人工/智能体裁定「谁错」。
 //!
 //! 环境发现（都不设也能跑，只要路径在默认位）：
-//! - `KOTAMA_GHIDRA_HOME`：Ghidra 安装目录（默认扫 `/mnt/work/ghidra/ghidra_*` 取字典序最大）。
-//! - `KOTAMA_JDK_HOME`：JDK 目录（默认 `/mnt/work/jdk`；Ghidra 12.2 要 JDK 25）。
+//! - `KOTAMA_GHIDRA_HOME`：Ghidra 安装目录（Linux 默认扫 `/mnt/work/ghidra/ghidra_*`
+//!   取字典序最大；Windows 必须显式设置）。
+//! - `KOTAMA_JDK_HOME`：JDK 目录（Linux 默认 `/mnt/work/jdk`；Ghidra 12.2 要 JDK 25）。
 //! - `KOTAMA_GHIDRA_SCRIPTS`：postScript 目录（默认相对仓根 `support/ghidra`）。
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -124,9 +126,9 @@ impl GhidraOracle {
             OracleError::Environment(format!("mkdir {}: {e}", project_dir.display()))
         })?;
         let listing = work_root.join("functions.txt");
-        let headless = self.ghidra_home.join("support").join("analyzeHeadless");
+        let path = path_with_jdk(&self.jdk_home)?;
 
-        let status = Command::new(&headless)
+        let status = headless_command(&self.ghidra_home, &self.jdk_home)
             .arg(&project_dir)
             .arg("KotamaOracle")
             .arg("-import")
@@ -138,14 +140,7 @@ impl GhidraOracle {
             .arg(&listing)
             .arg("-deleteProject")
             .env("JAVA_HOME", &self.jdk_home)
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    self.jdk_home.join("bin").display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
+            .env("PATH", path)
             .output()
             .map_err(|e| OracleError::Run {
                 code: -1,
@@ -236,43 +231,161 @@ fn parse_function_list(path: &Path) -> Result<Vec<GhidraFunction>, OracleError> 
     Ok(out)
 }
 
+/// 当前平台的 Ghidra headless 启动器。
+///
+/// Windows 的 zip 同时带 POSIX shell 脚本与 `.bat`；必须选后者，不能直接执行无扩展名脚本。
+fn analyze_headless(ghidra_home: &Path) -> PathBuf {
+    let name = if cfg!(windows) {
+        "analyzeHeadless.bat"
+    } else {
+        "analyzeHeadless"
+    };
+    ghidra_home.join("support").join(name)
+}
+
+/// 当前平台的 Java 可执行文件。
+fn java_executable(jdk_home: &Path) -> PathBuf {
+    let name = if cfg!(windows) { "java.exe" } else { "java" };
+    jdk_home.join("bin").join(name)
+}
+
+/// 创建 headless 命令；Windows 批处理显式经 `cmd.exe` 启动。
+///
+/// Ghidra 12.2 的 `launch.bat` 用 `for /f` 捕获 `LaunchSupport` 输出的 JDK 路径。
+/// 非 ASCII 路径会在这一步错码，因此只有这种路径直接调用同一个官方
+/// `AnalyzeHeadless` 入口；ASCII 路径仍走标准 `analyzeHeadless.bat`。
+fn headless_command(ghidra_home: &Path, jdk_home: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        if !jdk_home.as_os_str().is_ascii() {
+            direct_headless_command(ghidra_home, jdk_home)
+        } else {
+            let mut command = Command::new("cmd.exe");
+            command
+                .arg("/D")
+                .arg("/S")
+                .arg("/C")
+                .arg(analyze_headless(ghidra_home));
+            command
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = jdk_home;
+        Command::new(analyze_headless(ghidra_home))
+    }
+}
+
+/// Windows 非 ASCII JDK 路径的 headless 入口，复刻 `launch.bat` 的必要 JVM 参数。
+#[cfg(windows)]
+fn direct_headless_command(ghidra_home: &Path, jdk_home: &Path) -> Command {
+    let mut command = Command::new(java_executable(jdk_home));
+    for argument in [
+        "-Djava.system.class.loader=ghidra.GhidraClassLoader",
+        "-Dfile.encoding=UTF8",
+        "-Duser.country=US",
+        "-Duser.language=en",
+        "-Dsun.java2d.opengl=false",
+        "-Dsun.java2d.d3d=false",
+        "-Dlog4j.skipJansi=true",
+        "-Xshare:off",
+        "-XX:+UseCompactObjectHeaders",
+        "--enable-native-access=ALL-UNNAMED",
+        "--sun-misc-unsafe-memory-access=allow",
+        "-XX:ParallelGCThreads=2",
+        "-XX:CICompilerCount=2",
+        "-Xmx2G",
+    ] {
+        command.arg(argument);
+    }
+    command
+        .arg("-cp")
+        .arg(
+            ghidra_home
+                .join("Ghidra")
+                .join("Framework")
+                .join("Utility")
+                .join("lib")
+                .join("Utility.jar"),
+        )
+        .arg("ghidra.Ghidra")
+        .arg("ghidra.app.util.headless.AnalyzeHeadless");
+    command
+}
+
+/// 把所选 JDK 放到 `PATH` 最前，并用平台规则保留原条目（Windows `;`，Unix `:`）。
+fn path_with_jdk(jdk_home: &Path) -> Result<OsString, OracleError> {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let paths = std::iter::once(jdk_home.join("bin")).chain(std::env::split_paths(&existing));
+    std::env::join_paths(paths)
+        .map_err(|error| OracleError::Environment(format!("construct PATH: {error}")))
+}
+
 fn resolve_ghidra_home() -> Result<PathBuf, OracleError> {
     if let Ok(home) = std::env::var("KOTAMA_GHIDRA_HOME") {
         let path = PathBuf::from(home);
-        if path.join("support").join("analyzeHeadless").exists() {
+        let headless = analyze_headless(&path);
+        if headless.is_file() {
             return Ok(path);
         }
         return Err(OracleError::Environment(format!(
-            "KOTAMA_GHIDRA_HOME={path:?} has no support/analyzeHeadless"
+            "KOTAMA_GHIDRA_HOME={path:?} has no {}",
+            headless.display()
         )));
     }
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir("/mnt/work/ghidra")
-        .map_err(|e| OracleError::Environment(format!("/mnt/work/ghidra: {e}")))?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("ghidra_"))
-        })
-        .collect();
-    candidates.sort();
-    candidates
-        .into_iter()
-        .next_back()
-        .ok_or_else(|| OracleError::Environment("no /mnt/work/ghidra/ghidra_*".into()))
+    #[cfg(windows)]
+    {
+        Err(OracleError::Environment(
+            "set KOTAMA_GHIDRA_HOME to the native Windows Ghidra installation".into(),
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir("/mnt/work/ghidra")
+            .map_err(|e| OracleError::Environment(format!("/mnt/work/ghidra: {e}")))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("ghidra_"))
+            })
+            .collect();
+        candidates.sort();
+        candidates
+            .into_iter()
+            .next_back()
+            .ok_or_else(|| OracleError::Environment("no /mnt/work/ghidra/ghidra_*".into()))
+    }
 }
 
 fn resolve_jdk_home() -> Result<PathBuf, OracleError> {
     if let Ok(home) = std::env::var("KOTAMA_JDK_HOME") {
-        return Ok(PathBuf::from(home));
+        let path = PathBuf::from(home);
+        let java = java_executable(&path);
+        if java.is_file() {
+            return Ok(path);
+        }
+        return Err(OracleError::Environment(format!(
+            "KOTAMA_JDK_HOME={path:?} has no {}",
+            java.display()
+        )));
     }
-    let default = PathBuf::from("/mnt/work/jdk");
-    if default.join("bin").join("java").exists() {
-        return Ok(default);
+    #[cfg(windows)]
+    {
+        Err(OracleError::Environment(
+            "set KOTAMA_JDK_HOME to a native Windows JDK 25 installation".into(),
+        ))
     }
-    Err(OracleError::Environment(
-        "no JDK at /mnt/work/jdk (set KOTAMA_JDK_HOME)".into(),
-    ))
+    #[cfg(not(windows))]
+    {
+        let default = PathBuf::from("/mnt/work/jdk");
+        if java_executable(&default).is_file() {
+            return Ok(default);
+        }
+        Err(OracleError::Environment(
+            "no JDK at /mnt/work/jdk (set KOTAMA_JDK_HOME)".into(),
+        ))
+    }
 }
 
 fn resolve_scripts_dir() -> Result<PathBuf, OracleError> {
@@ -343,6 +456,114 @@ mod tests {
     fn empty_sets_are_full_agreement() {
         let report = differential(&[], &[], 25);
         assert_eq!(report.jaccard, 1.0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_uses_batch_launcher_through_cmd() {
+        let headless = analyze_headless(Path::new(r"C:\tools\ghidra"));
+        assert!(headless.ends_with(Path::new("support").join("analyzeHeadless.bat")));
+        assert_eq!(
+            java_executable(Path::new(r"C:\tools\jdk")),
+            Path::new(r"C:\tools\jdk").join("bin").join("java.exe")
+        );
+
+        let command = headless_command(Path::new(r"C:\tools\ghidra"), Path::new(r"C:\tools\jdk"));
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("cmd.exe"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[..3], ["/D", "/S", "/C"]);
+        assert_eq!(args[3], headless.as_os_str());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_ascii_jdk_path_bypasses_batch_encoding_bug() {
+        let ghidra = Path::new(r"D:\工具\ghidra");
+        let jdk = Path::new(r"D:\工具\jdk");
+        let command = headless_command(ghidra, jdk);
+        assert_eq!(command.get_program(), java_executable(jdk).as_os_str());
+
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new(
+            "-Djava.system.class.loader=ghidra.GhidraClassLoader"
+        )));
+        let classpath = args
+            .iter()
+            .position(|arg| *arg == "-cp")
+            .expect("classpath argument");
+        assert_eq!(
+            args[classpath + 1],
+            ghidra
+                .join("Ghidra")
+                .join("Framework")
+                .join("Utility")
+                .join("lib")
+                .join("Utility.jar")
+                .as_os_str()
+        );
+        assert_eq!(args[args.len() - 2], "ghidra.Ghidra");
+        assert_eq!(
+            args[args.len() - 1],
+            "ghidra.app.util.headless.AnalyzeHeadless"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_uses_shell_launcher_directly() {
+        let headless = analyze_headless(Path::new("/opt/ghidra"));
+        assert!(headless.ends_with(Path::new("support").join("analyzeHeadless")));
+        assert_eq!(
+            java_executable(Path::new("/opt/jdk")),
+            Path::new("/opt/jdk").join("bin").join("java")
+        );
+
+        let command = headless_command(Path::new("/opt/ghidra"), Path::new("/opt/jdk"));
+        assert_eq!(command.get_program(), headless.as_os_str());
+        assert_eq!(command.get_args().count(), 0);
+    }
+
+    #[test]
+    fn jdk_path_precedes_and_preserves_existing_entries() {
+        let jdk = if cfg!(windows) {
+            Path::new(r"C:\tools\jdk with spaces")
+        } else {
+            Path::new("/opt/jdk with spaces")
+        };
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let existing_entries: Vec<_> = std::env::split_paths(&existing).collect();
+
+        let joined = path_with_jdk(jdk).expect("platform PATH encoding");
+        let entries: Vec<_> = std::env::split_paths(&joined).collect();
+        assert_eq!(entries.first(), Some(&jdk.join("bin")));
+        assert_eq!(&entries[1..], existing_entries.as_slice());
+    }
+
+    /// 原生 Windows + 真实 Ghidra 的 PE 车道；普通 cargo test 不要求安装 Ghidra。
+    #[cfg(windows)]
+    #[test]
+    fn live_windows_pe_function_list() {
+        if std::env::var_os("KOTAMA_GHIDRA_E2E").is_none() {
+            eprintln!("skip: set KOTAMA_GHIDRA_E2E=1 to run the native Ghidra oracle");
+            return;
+        }
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/x86_64-windows-gnu/-O2/loops.exe");
+        assert!(fixture.is_file(), "fixture missing: {}", fixture.display());
+        let oracle = GhidraOracle::from_env().expect("native Ghidra environment");
+        let work_root =
+            std::env::temp_dir().join(format!("kotama-oracle-live-{}", std::process::id()));
+        let result = oracle.function_list(&fixture, &work_root);
+        let _ = std::fs::remove_dir_all(&work_root);
+        let functions = result.expect("headless function list");
+
+        // 不断言 CRT 全量函数数；只钉住夹具自身入口与 RVA 归一化。
+        assert!(
+            functions
+                .iter()
+                .any(|function| function.rva == 0x1000 && function.name == "main"),
+            "main at RVA 0x1000 missing: {functions:?}"
+        );
     }
 
     #[test]
