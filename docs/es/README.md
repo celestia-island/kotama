@@ -50,7 +50,7 @@ Alcance demostrado:
 | Límites | Primero los límites exactos (longitudes de símbolos, `.pdata`); los inferidos se refinan con barrido lineal — los bloques de cola compartidos ya no truncan funciones reales |
 | Decompilación | Bloques básicos + comentarios con anclas de dirección; **las tablas de salto de los switch densos se recuperan** (10/10 ramas en la matriz ELF64, confianza 100%) |
 | Determinismo | Misma entrada, salida byte a byte idéntica en cada ejecución (la condición previa para el diff y la reutilización de conocimiento) |
-| Verificado en | 24 objetivos de la matriz de fixtures más binarios del sistema despojados como `/bin/true` y `/bin/ls` |
+| Verificado en | la matriz de fixtures completa más binarios del sistema despojados como `/bin/true` y `/bin/ls` |
 
 Límites conocidos: los límites exactos de funciones PE dependen de PDB (zig -g genera el PDB
 acompañante; sin él los cubren destinos de llamada + barrido lineal); los oráculos Ghidra/IDA ya

@@ -55,7 +55,7 @@ Proven scope:
 | Boundaries | Exact boundaries first (symbol lengths, exception directory, PDB); inferred boundaries refined by linear sweep — shared tail blocks no longer truncate real functions |
 | Decompilation | Basic blocks + address-anchor comments; **jump tables of dense switches are recovered** (10/10 branches on the ELF64 fixture matrix, 100% confidence) |
 | Determinism | Same input, byte-identical output on every run (the precondition for diffing and knowledge reuse) |
-| Verified on | 24 fixture-matrix targets plus stripped system binaries such as `/bin/true` and `/bin/ls` |
+| Verified on | the full fixture matrix plus stripped system binaries such as `/bin/true` and `/bin/ls` |
 
 Known limits: type inference and struct recovery are still P1; PDB-less PE boundaries rely on
 the exception directory plus call targets; the generic vtable scan stays narrower than MSVC

@@ -51,7 +51,7 @@
 | 边界 | 精确边界优先（符号长度、exception directory、PDB）；推断边界用线性扫描精化，共享尾块不再切断真函数 |
 | 反编译 | 基本块 + 地址锚注释；**稠密 switch 的跳转表可恢复**（ELF64 夹具 10/10 分支、置信度 100%） |
 | 确定性 | 同一输入两次输出逐字节相同（差分与知识库复用的前提） |
-| 已验证 | 24 个矩阵夹具 + `/bin/true`、`/bin/ls` 等 strip 系统二进制 |
+| 已验证 | 完整矩阵夹具 + `/bin/true`、`/bin/ls` 等 strip 系统二进制 |
 
 已知边界：类型推断与结构体恢复仍属 P1；无 PDB 的 PE 边界依赖 exception directory + call 目标；
 通用 vtable 扫描仍窄于 MSVC RTTI；Windows 注入仅 x64→x64；`--pid` attach 限同用户、目标未设

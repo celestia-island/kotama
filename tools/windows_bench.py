@@ -247,6 +247,9 @@ def main() -> int:
         run_step("real Ghidra PE oracle", [
             "cargo", "test", "-p", "kotama-backend-ghidra", "--", "--test-threads=1",
         ], oracle_env, timeout = 2400)
+        run_step("real Ghidra differential", [
+            sys.executable, "tools/ghidra_crosscheck.py",
+        ], oracle_env, timeout = 2400)
     if args.ida:
         if not env.get("KOTAMA_IDA"):
             raise SystemExit("windows-bench: --ida requires KOTAMA_IDA=<idat.exe>")

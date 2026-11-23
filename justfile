@@ -42,3 +42,7 @@ pdb-crosscheck:
 # Cross-check function discovery against an IDA headless oracle.
 ida-crosscheck:
     python tools/ida_crosscheck.py
+
+# Run the real Ghidra differential on a PDB-less fixture.
+ghidra-crosscheck:
+    python tools/ghidra_crosscheck.py

@@ -50,7 +50,7 @@ Périmètre démontré :
 | Frontières | D'abord les frontières exactes (longueurs de symboles, `.pdata`) ; les inférées sont affinées par balayage linéaire — les blocs de queue partagés ne tronquent plus les vraies fonctions |
 | Décompilation | Blocs de base + commentaires avec ancres d'adresse ; **les tables de saut des switch denses sont récupérées** (10/10 branches sur la matrice ELF64, confiance 100 %) |
 | Déterminisme | Même entrée, sortie identique octet par octet à chaque exécution (le prérequis du diff et de la réutilisation des connaissances) |
-| Vérifié sur | 24 cibles de la matrice de fixtures plus des binaires système dénudés comme `/bin/true` et `/bin/ls` |
+| Vérifié sur | la matrice de fixtures complète plus des binaires système dénudés comme `/bin/true` et `/bin/ls` |
 
 Limites connues : les frontières exactes des fonctions PE dépendent du PDB (zig -g génère le PDB
 compagnon ; sans lui, cibles d'appel + balayage linéaire les couvrent) ;

@@ -127,6 +127,9 @@ fn stack_snapshot(_max_frames: u32) -> Result<Vec<kotama_proto::ThreadStack>, St
 /// 单帧上限；peer 给的 u32 不能触发无界分配（与宿主侧一致）。
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
+/// 单次 ReadMemory 上限；请求长度本身来自 peer，不能直接用于分配。
+const MAX_READ_LEN: u32 = 64 * 1024 * 1024;
+
 /// 传输帧（4 字节 LE 长度前缀 + msgpack；与宿主侧共用语义）。
 pub(crate) fn send_frame<S>(stream: &mut S, frame: &Frame) -> Result<(), std::io::Error>
 where
@@ -197,6 +200,9 @@ fn list_modules() -> Result<Vec<kotama_proto::ModuleInfo>, String> {
 
 #[cfg(target_os = "linux")]
 fn read_self(address: u64, length: u32) -> Result<Vec<u8>, String> {
+    if length > MAX_READ_LEN {
+        return Err(format!("read length {length} exceeds limit {MAX_READ_LEN}"));
+    }
     use std::os::unix::fs::FileExt;
     let file = std::fs::File::open("/proc/self/mem").map_err(|e| e.to_string())?;
     let mut buffer = vec![0u8; length as usize];
@@ -248,6 +254,9 @@ fn running_under_wine() -> bool {
 
 #[cfg(target_os = "windows")]
 fn read_self(address: u64, length: u32) -> Result<Vec<u8>, String> {
+    if length > MAX_READ_LEN {
+        return Err(format!("read length {length} exceeds limit {MAX_READ_LEN}"));
+    }
     // SAFETY: ReadProcessMemory 读自身句柄、目标缓冲长度匹配；返回值判定覆盖。
     unsafe {
         let current = windows_sys::Win32::System::Threading::GetCurrentProcess();
