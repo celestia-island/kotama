@@ -1,4 +1,4 @@
-<p align="center"><img src="res/logo.webp" alt="Kotama" width="180"/></p>
+<p align="center"><img src="https://raw.githubusercontent.com/celestia-island/celestia-island.github.io/main/res/logos/kotama.webp" alt="Kotama" width="180"/></p>
 
 <h1 align="center">Kotama</h1>
 
