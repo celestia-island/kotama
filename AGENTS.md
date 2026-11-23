@@ -75,6 +75,22 @@
   再重建软链。**容器车道命令带 `--offline --locked`**（工作区标准），不带时新依赖会去解析
   DNS 直接红。
 
+- **Windows 原生台架（2026-11-23，Win10 Pro x64）**：
+  - Ghidra 12.2 = `D:\源代码\工程项目\celestia\_scratch\kotama-tools\ghidra_12.2_PUBLIC`；
+    Temurin 25 = `D:\源代码\工程项目\celestia\_scratch\kotama-tools\jdk25\jdk-25.0.5.1+2`；
+    zig 0.17.1 = `D:\源代码\工程项目\celestia\_scratch\kotama-tools\zig-x86_64-windows-0.17.1\zig.exe`。
+    分别经 `KOTAMA_GHIDRA_HOME` / `KOTAMA_JDK_HOME` / `KOTAMA_ZIG` 注入，不改全局 `JAVA_HOME`。
+  - Ghidra 12.2 的 `launch.bat` 会错码非 ASCII JDK 路径；backend 对这种路径直调官方
+    `AnalyzeHeadless` 主类。Ghidra home 本身在非 ASCII 路径时还会出现 log4j XML include 警告，
+    本机实测退出码与函数清单正常，但不能把该警告写成已修复。
+  - IDA Professional 9.1 = `C:\Program Files\IDA Professional 9.1\idat.exe`，只作独立进程差分参照，
+    不进依赖树；IDAPython 9.1 的函数迭代器是 `idautils.Functions()`。
+  - MSVC 由 `tools/build_fixtures.py` 经 vswhere + `VsDevCmd.bat` 自动发现（VS 2026 + WinSDK）；
+    `python tools/build_fixtures.py --targets x86_64-windows-msvc x86-windows-msvc --run` 出
+    x64/x86、O2/Od、`/Zi` + 伴生 PDB 并原生运行。Windows smoke 只执行 `.exe`。
+  - 一键验收 = `just bench-windows`；追加 `--oracle` 纳入真实 Ghidra PE 差分。常驻 CI runner
+    尚未注册（2026-11-23 用户裁决），本机通过不等于常驻 CI 项完成。
+
 ## 版本声明
 
 两段式（`^1` / `^0.1`）；禁三段式、`~` 区间、`^*`、`^0.*`、裸 `*`、`latest`。`devDependencies` 是唯一槽位豁免。

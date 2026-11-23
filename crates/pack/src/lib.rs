@@ -4,8 +4,8 @@
 //! manifest 不是摆设，`live launch --preload dist/<triple>/…so` 用的是 pack 出来的那颗。
 //!
 //! 支持面：`x86_64-linux-gnu` / `i686-linux-gnu` 走 Rust cdylib；
-//! `x86_64-pc-windows-gnu` 走 zig cc 的 C agent + `kotama_load.exe`。其它目标显式拒绝，
-//! 不产出空产物假装可用；MSVC 与 32 位 Windows 打包在对应工具链接入后再开放。
+//! `x86_64-pc-windows-gnu` 走 zig cc 的 C agent + `kotama_load.exe`；
+//! `x86_64/i686-pc-windows-msvc` 走 Rust cdylib。其它目标显式拒绝，不产出空产物假装可用。
 //!
 //! manifest 确定性：无时间戳、字段排序稳定、符号表升序——同源码两次 pack 逐字节相同
 //! （除编译器自身非确定性外；`sha256` 如实记录产物）。
@@ -100,7 +100,12 @@ fn target_plan(target: &str) -> Result<(PayloadKind, &'static str), PackError> {
     match target {
         "x86_64-unknown-linux-gnu" => Ok((PayloadKind::RustCdylib, "libkotama_payload.so")),
         "i686-unknown-linux-gnu" => Ok((PayloadKind::RustCdylib, "libkotama_payload.so")),
-        "x86_64-pc-windows-gnu" => Ok((PayloadKind::CWindowsAgent, "kotama_agent.dll")),
+        "x86_64-pc-windows-gnu" | "i686-pc-windows-gnu" => {
+            Ok((PayloadKind::CWindowsAgent, "kotama_agent.dll"))
+        }
+        "x86_64-pc-windows-msvc" | "i686-pc-windows-msvc" => {
+            Ok((PayloadKind::RustCdylib, "kotama_payload.dll"))
+        }
         other => Err(PackError::Unsupported {
             target: other.to_string(),
             reason: "linux-gnu (rust cdylib) and x86_64-pc-windows-gnu (C agent) only".into(),
@@ -198,15 +203,27 @@ pub fn pack_target(
         size_bytes: bytes.len() as u64,
         sha256,
         abi_version: kotama::ABI_VERSION,
-        proto_version: 2,
-        capabilities: vec!["list-modules", "read-memory"],
-        entry: "init_array",
+        proto_version: kotama_proto::PROTO_VERSION,
+        capabilities: payload_capabilities(),
+        entry: if target.ends_with("-pc-windows-msvc") {
+            "dllmain+loadlibrary"
+        } else {
+            "init_array"
+        },
         exports,
     };
     let manifest_path = out_dir.join("manifest.json");
     let json = serde_json::to_string_pretty(&manifest).map_err(|e| PackError::Io(e.to_string()))?;
     std::fs::write(&manifest_path, json + "\n").map_err(|e| PackError::Io(e.to_string()))?;
     Ok(manifest)
+}
+
+/// manifest 能力与载荷握手共用同一份声明，写/冻结不随只读包静默开放。
+fn payload_capabilities() -> Vec<&'static str> {
+    kotama_proto::READ_ONLY_CAPABILITIES
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect()
 }
 
 /// 构建脚本解释器：Windows 的 `python3` 常是商店占位符，优先用可配置的 `python`。
@@ -230,12 +247,24 @@ fn pack_windows_agent(
     // 父进程 dentry 缓存可能仍缺席，实踩多次）。绕法：让脚本产出到本地 /tmp，
     // 由本进程拷贝进 dist —— 读的是 /tmp，写的是 dist，无跨进程可见性问题。
     let script = repo_root.join("tools/build_windows_agent.py");
-    let staging = std::env::temp_dir().join(format!("kotama-win-agent-{target}"));
+    static NEXT_STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = std::env::temp_dir().join(format!(
+        "kotama-win-agent-{target}-{}-{sequence}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| PackError::Io(e.to_string()))?;
 
+    let zig_target = match target {
+        "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
+        "i686-pc-windows-gnu" => "x86-windows-gnu",
+        _ => unreachable!("target_plan admitted a non-windows-gnu C agent"),
+    };
     let output = std::process::Command::new(python_launcher())
         .arg(&script)
+        .arg("--target")
+        .arg(zig_target)
         .arg("--out-dir")
         .arg(&staging)
         .current_dir(repo_root)
@@ -307,8 +336,8 @@ fn pack_windows_agent(
         size_bytes: bytes.len() as u64,
         sha256,
         abi_version: kotama::ABI_VERSION,
-        proto_version: 2,
-        capabilities: vec!["list-modules", "read-memory"],
+        proto_version: kotama_proto::PROTO_VERSION,
+        capabilities: payload_capabilities(),
         entry: "dllmain+loadlibrary",
         exports,
     };
@@ -348,16 +377,36 @@ pub fn default_target() -> &'static str {
 mod tests {
     use super::*;
 
+    /// Windows 会锁定正在执行/装载的 PE；真机 pack e2e 共用 dist，必须进程内串行。
+    #[cfg(target_os = "windows")]
+    static PACK_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn windows_target_routes_to_the_c_agent() {
         // windows 载荷是 C agent（zig cc 构建），不是 rust cdylib；未知 triple 仍拒绝。
-        let (kind, name) = target_plan("x86_64-pc-windows-gnu").unwrap();
-        assert_eq!(kind, PayloadKind::CWindowsAgent);
-        assert_eq!(name, "kotama_agent.dll");
+        for target in ["x86_64-pc-windows-gnu", "i686-pc-windows-gnu"] {
+            let (kind, name) = target_plan(target).unwrap();
+            assert_eq!(kind, PayloadKind::CWindowsAgent);
+            assert_eq!(name, "kotama_agent.dll");
+        }
         assert!(matches!(
             target_plan("aarch64-unknown-linux-gnu"),
             Err(PackError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn msvc_targets_map_to_the_rust_payload() {
+        for target in ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"] {
+            let (kind, name) = target_plan(target).unwrap();
+            assert_eq!(kind, PayloadKind::RustCdylib);
+            assert_eq!(name, "kotama_payload.dll");
+        }
+    }
+
+    #[test]
+    fn manifest_capabilities_come_from_the_wire_declaration() {
+        assert_eq!(payload_capabilities(), ["list-modules", "read-memory"]);
     }
 
     #[test]
@@ -421,6 +470,87 @@ mod tests {
         );
     }
 
+    /// 32 位 windows-gnu pack e2e：在 64 位 Windows 的 WOW64 下装载并运行 32 位 spin。
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn pack_windows_gnu_x86_artifact_loads_natively() {
+        if std::env::var_os("KOTAMA_PACK_E2E").is_none() {
+            eprintln!("skip: set KOTAMA_PACK_E2E=1 to run the 32-bit Windows pack e2e");
+            return;
+        }
+        let _serial = PACK_E2E_LOCK.lock().expect("pack e2e lock");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let dist = repo.join("dist");
+        let manifest = pack_target(&repo, &dist, "i686-pc-windows-gnu").expect("pack x86");
+        let out_dir = dist.join(&manifest.target);
+        let fixture = repo
+            .join("fixtures/generated/x86-windows-gnu/-O2/spin.exe")
+            .canonicalize()
+            .expect("32-bit fixture missing: run tools/build_fixtures.py first");
+        let output = std::process::Command::new(out_dir.join("kotama_load.exe"))
+            .arg(out_dir.join(&manifest.file))
+            .arg("--")
+            .arg(&fixture)
+            .arg("1")
+            .output()
+            .expect("run the 32-bit loader");
+        assert!(
+            output.status.success(),
+            "32-bit loader failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("spin: "));
+    }
+
+    /// MSVC pack e2e：构建 Rust cdylib，并复用 windows-gnu loader 做原生 LoadLibrary 回归。
+    /// 这里验证的是 loader 自身内的载荷登记，不冒充对 spin.exe 的远程注入。
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn pack_windows_msvc_artifact_loads_natively() {
+        if std::env::var_os("KOTAMA_PACK_E2E").is_none() {
+            eprintln!("skip: set KOTAMA_PACK_E2E=1 to run the MSVC pack e2e");
+            return;
+        }
+        let _serial = PACK_E2E_LOCK.lock().expect("pack e2e lock");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let dist = repo.join("dist");
+        let manifest = pack_target(&repo, &dist, "x86_64-pc-windows-msvc").expect("pack msvc");
+        assert_eq!(manifest.proto_version, kotama_proto::PROTO_VERSION);
+        assert_eq!(manifest.entry, "dllmain+loadlibrary");
+        let agent = dist.join(&manifest.target).join(&manifest.file);
+        assert!(agent.is_file());
+
+        // loader 属于 windows-gnu C agent 包；缺了就通过公开 pack 入口补建。
+        let gnu_target = "x86_64-pc-windows-gnu";
+        let loader = dist.join(gnu_target).join("kotama_load.exe");
+        if !loader.is_file() {
+            pack_target(&repo, &dist, gnu_target).expect("pack loader lane");
+        }
+        let fixture = repo
+            .join("fixtures/generated/x86_64-windows-gnu/-O2/spin.exe")
+            .canonicalize()
+            .expect("fixture missing: run tools/build_fixtures.py first");
+        let output = std::process::Command::new(&loader)
+            .arg(&agent)
+            .arg("--")
+            .arg(&fixture)
+            .arg("1")
+            .output()
+            .expect("load the MSVC Rust payload");
+        assert!(
+            output.status.success(),
+            "loader failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("spin: "));
+    }
+
     /// Windows pack e2e（`KOTAMA_PACK_E2E=1` + `KOTAMA_ZIG`）：重新打包 C agent，
     /// 校验 manifest 哈希，再用产出的 loader 在原生 Windows 真机 LoadLibrary 并拉起 spin。
     #[cfg(target_os = "windows")]
@@ -430,12 +560,14 @@ mod tests {
             eprintln!("skip: set KOTAMA_PACK_E2E=1 to run the Windows pack e2e");
             return;
         }
+        let _serial = PACK_E2E_LOCK.lock().expect("pack e2e lock");
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .unwrap();
         let dist = repo.join("dist");
         let manifest = pack_target(&repo, &dist, "x86_64-pc-windows-gnu").expect("pack");
+        assert_eq!(manifest.proto_version, kotama_proto::PROTO_VERSION);
         let out_dir = dist.join(&manifest.target);
         let agent = out_dir.join(&manifest.file);
         let loader = out_dir.join("kotama_load.exe");

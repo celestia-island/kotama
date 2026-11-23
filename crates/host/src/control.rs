@@ -9,9 +9,14 @@
 //! 冻结 = host 侧高频重写线程（P3 形态；P4 的进程内冻结随载荷车道接管）。注意冻结线程
 //! Drop 即停、写失败（目标退出）即退——不留僵尸线程。
 
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::OwnedHandle;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,11 +26,16 @@ use crate::scanner::Value;
 use crate::HostError;
 use crate::TargetProcess;
 
+#[cfg(target_os = "linux")]
+type Writer = File;
+#[cfg(target_os = "windows")]
+type Writer = OwnedHandle;
+
 /// 带能力门禁的会话。
 pub struct Session {
     process: TargetProcess,
     /// `Some` = 写能力已授予（读写模式句柄）。
-    writer: Option<File>,
+    writer: Option<Writer>,
 }
 
 impl Session {
@@ -38,16 +48,20 @@ impl Session {
         }
     }
 
-    /// 显式授予写能力的会话：`/proc/<pid>/mem` 以读写模式重开。
+    /// 显式授予写能力的会话：Linux 重开 `/proc/<pid>/mem`，Windows 另开带
+    /// `PROCESS_VM_WRITE|PROCESS_VM_OPERATION` 的进程句柄。
     ///
     /// # Errors
     /// 重开失败 = 权限不满足（或进程已消失）。
     pub fn with_write(process: TargetProcess) -> Result<Self, HostError> {
+        #[cfg(target_os = "linux")]
         let writer = OpenOptions::new()
             .read(true)
             .write(true)
             .open(format!("/proc/{}/mem", process.pid()))
             .map_err(|e| HostError::Process(format!("open mem rw pid {}: {e}", process.pid())))?;
+        #[cfg(target_os = "windows")]
+        let writer = crate::windows::open_writer(process.pid())?;
         Ok(Self {
             process,
             writer: Some(writer),
@@ -75,9 +89,7 @@ impl Session {
             .writer
             .as_ref()
             .ok_or(HostError::CapabilityDenied("write requires an explicitly granted session (with_write); read-only sessions never write"))?;
-        writer
-            .write_all_at(bytes, address)
-            .map_err(|e| HostError::Proc(format!("write {address:#x}+{}: {e}", bytes.len())))
+        write_at(writer, address, bytes)
     }
 
     /// 冻结一个值：后台线程按 `interval_ms` 周期重写。
@@ -96,19 +108,19 @@ impl Session {
         let initial = encode_value(&value);
         self.write_bytes(address, &initial)?;
 
-        let writer = self
-            .writer
-            .as_ref()
-            .ok_or(HostError::CapabilityDenied("unreachable: checked above"))?
-            .try_clone()
-            .map_err(|e| HostError::Proc(format!("clone mem handle: {e}")))?;
+        let writer = clone_writer(
+            self.writer
+                .as_ref()
+                .ok_or(HostError::CapabilityDenied("unreachable: checked above"))?,
+            self.process.pid(),
+        )?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
         let join = std::thread::spawn(move || {
             let interval = Duration::from_millis(interval_ms.max(1));
             while !stop_flag.load(Ordering::Relaxed) {
                 std::thread::sleep(interval);
-                if writer.write_all_at(&initial, address).is_err() {
+                if write_at(&writer, address, &initial).is_err() {
                     break; // 目标退出 / 权限消失：安静收工。
                 }
             }
@@ -133,6 +145,31 @@ impl Drop for FreezeHandle {
             let _ = join.join();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn write_at(writer: &Writer, address: u64, bytes: &[u8]) -> Result<(), HostError> {
+    writer
+        .write_all_at(bytes, address)
+        .map_err(|e| HostError::Proc(format!("write {address:#x}+{}: {e}", bytes.len())))
+}
+
+#[cfg(target_os = "windows")]
+fn write_at(writer: &Writer, address: u64, bytes: &[u8]) -> Result<(), HostError> {
+    crate::windows::write_memory(writer, address, bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn clone_writer(writer: &Writer, _pid: i32) -> Result<Writer, HostError> {
+    writer
+        .try_clone()
+        .map_err(|e| HostError::Proc(format!("clone mem handle: {e}")))
+}
+
+#[cfg(target_os = "windows")]
+fn clone_writer(_writer: &Writer, pid: i32) -> Result<Writer, HostError> {
+    // OwnedHandle 没有 try_clone；为冻结线程独立 OpenProcess，生命周期互不借用。
+    crate::windows::open_writer(pid)
 }
 
 /// 值 → 字节（写入用）。

@@ -1,0 +1,25 @@
+name: 功能建议
+description: 提议符合 kotama 阶段与伦理边界的能力
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述使用场景、目标平台与现有缺口。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 说明 API/CLI 形态、确定性或 capability 影响，以及可验证的验收标准。
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: 边界确认
+      options:
+        - label: 该建议只面向授权目标，且不涉及免杀、反检测、持久化、凭据窃取或反作弊绕过。
+          required: true

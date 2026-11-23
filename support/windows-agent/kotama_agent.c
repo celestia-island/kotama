@@ -20,7 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define PROTO_VERSION 2
+#define PROTO_VERSION 3
 #define ABI_VERSION 1
 
 // Growable output buffer.
@@ -317,6 +317,14 @@ static void respond_error(Buf *out, const char *message)
     mp_str(out, message);
 }
 
+// wine exports wine_get_version from ntdll; native Windows does not. This is
+// only for honest ModuleKind reporting, never for capability or detection logic.
+static int running_under_wine(void)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll != NULL && GetProcAddress(ntdll, "wine_get_version") != NULL;
+}
+
 // Decode one request and build its response.
 static void handle(Reader *reader, Buf *out)
 {
@@ -360,7 +368,7 @@ static void handle(Reader *reader, Buf *out)
         mp_array(out, 4);
         mp_uint(out, base);
         mp_uint(out, 0);
-        mp_str(out, "WinePe");
+        mp_str(out, running_under_wine() ? "WinePe" : "NativePe");
         mp_str(out, "");
         return;
     }

@@ -241,6 +241,7 @@ dependencies = [
  "kotama-proto",
  "kotama-scan",
  "libc",
+ "windows-sys",
 ]
 
 [[package]]
@@ -261,6 +262,7 @@ dependencies = [
  "kotama",
  "kotama-host",
  "kotama-image",
+ "kotama-proto",
  "serde",
  "serde_json",
  "sha2",

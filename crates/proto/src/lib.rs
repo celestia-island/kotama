@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// 协议版本（结构不兼容变更时递增；握手不匹配 = 拒绝，无回退）。
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 3;
 
 /// 一个会话端点声明的能力。写类能力（写内存 / 冻结 / 注入）在 P3 随门禁引入，
 /// 这里先占只读集合，让握手形状稳定下来。
@@ -28,6 +28,23 @@ pub enum Capability {
     /// 冻结一个值（P3 起入表；默认不授）。
     Freeze,
 }
+
+impl Capability {
+    /// manifest / CLI 共用的稳定短名。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ListModules => "list-modules",
+            Self::ReadMemory => "read-memory",
+            Self::WriteMemory => "write-memory",
+            Self::Freeze => "freeze",
+        }
+    }
+}
+
+/// 当前载荷与 manifest 共同声明的只读能力集；写/冻结必须走显式门禁，不在此列。
+pub const READ_ONLY_CAPABILITIES: &[Capability] =
+    &[Capability::ListModules, Capability::ReadMemory];
 
 /// 握手载荷。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -49,7 +66,7 @@ pub struct ModuleInfo {
     pub size: u64,
     /// 模块种类。
     pub kind: ModuleKind,
-    /// 来源路径（ELF 的映射文件；wine 宿主 PE 为 exe 路径或空）。
+    /// 来源路径（ELF 的映射文件；wine PE 可能为空；原生 PE 为 Win32 全路径）。
     pub path: String,
 }
 
@@ -60,6 +77,8 @@ pub enum ModuleKind {
     Elf,
     /// wine 宿主内的 PE 映像（wine 进程就是 Linux 进程，`/proc/<pid>/mem` 直读）。
     WinePe,
+    /// 原生 Windows 进程内的 PE 映像（Toolhelp / Win32 活体车道）。
+    NativePe,
 }
 
 /// 宿主 → 目标侧的请求。
@@ -138,7 +157,7 @@ mod tests {
         Frame::Request(Request::Hello(Handshake {
             proto_version: PROTO_VERSION,
             abi_version: kotama::ABI_VERSION,
-            capabilities: vec![Capability::ListModules, Capability::ReadMemory],
+            capabilities: READ_ONLY_CAPABILITIES.to_vec(),
         }))
     }
 
@@ -146,6 +165,29 @@ mod tests {
     fn frame_roundtrip() {
         let bytes = encode(&sample_frame()).unwrap();
         assert_eq!(decode(&bytes).unwrap(), sample_frame());
+    }
+
+    #[test]
+    fn read_only_capability_names_are_stable() {
+        let names: Vec<&str> = READ_ONLY_CAPABILITIES
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect();
+        assert_eq!(names, ["list-modules", "read-memory"]);
+        assert_eq!(Capability::WriteMemory.as_str(), "write-memory");
+        assert_eq!(Capability::Freeze.as_str(), "freeze");
+    }
+
+    #[test]
+    fn native_pe_module_roundtrip() {
+        let frame = Frame::Response(Response::Modules(vec![ModuleInfo {
+            base: 0x140000000,
+            size: 0x9000,
+            kind: ModuleKind::NativePe,
+            path: r"C:\fixtures\spin.exe".into(),
+        }]));
+        let bytes = encode(&frame).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), frame);
     }
 
     #[test]

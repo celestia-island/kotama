@@ -1,0 +1,51 @@
+name: Bug 报告
+description: 报告可复现的 kotama 缺陷
+title: "[Bug]: "
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 说明实际行为与预期行为。
+      placeholder: 在 master 的 <commit> 上，执行 … 时得到 …，预期 …
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现
+      description: 给出命令、最小夹具或测试步骤；不要上传无授权或含私密信息的目标。
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: kotama 提交或版本
+      placeholder: 例如 1642297
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 宿主平台
+      options:
+        - Windows 10 / x64
+        - Windows 11 / x64
+        - Linux / x64
+        - Linux / x86
+        - 其它（请在描述中说明）
+    validations:
+      required: true
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: 目标授权
+      options:
+        - label: 该问题只涉及仓库夹具、自有软件/设备或我明确获授权的研究样本。
+          required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与输出
+      description: 附相关尾部即可；移除凭据、内网地址与私有路径。
+      render: text

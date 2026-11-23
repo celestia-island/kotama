@@ -30,3 +30,7 @@ licenses:
 
 # One-shot gate.
 gate: fmt lint test licenses
+
+# Native Windows bench: fixtures, gate, pack/load and live e2e.
+bench-windows *args:
+    python tools/windows_bench.py {{args}}

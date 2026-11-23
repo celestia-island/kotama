@@ -9,7 +9,6 @@ use std::process::ExitCode;
 use kotama::ABI_VERSION;
 use kotama_backend_ghidra::GhidraOracle;
 use kotama_decomp::decompile_function_bounded;
-#[cfg(target_os = "linux")]
 use kotama_host::TargetProcess;
 use kotama_image::LoadedModule;
 use kotama_scan::call_graph;
@@ -29,13 +28,13 @@ Commands:
                              --limit <N>        how many functions to decompile (default 8)
                              --xref             also emit the function-level call graph
   oracle <path>            Run Ghidra headless and diff its function list against ours
-  live attach <pid>        List modules of a running process (ELF + wine-hosted PE)
-  live analyze <pid>       Parse the first wine PE module live and discover functions
+  live attach <pid>        List modules of a running process (ELF + wine/native PE)
+  live analyze <pid>       Parse the first wine/native PE module live and discover functions
   live scan <pid> --exact u32:N|f32:F|bytes:HEX [--then unchanged|changed|increased|decreased --times N]
                              Scan live memory (writable regions) and narrow
   live write <pid> <addr> u32:N|... --write   Write memory (requires --write)
-  live trace <pid> <addr-hex> [--seconds N]  INT3 breakpoint hit counting
-  live launch --preload <so> -- <cmd...>    Own-launch with the payload agent
+  live trace <pid> <addr-hex> [--seconds N]  INT3 breakpoint hit counting (Linux)
+  live launch --preload <so> -- <cmd...>    Own-launch with the payload agent (Linux)
   live freeze <pid> <addr> u32:N --seconds N --write   Pin a value
   export <path>            Emit annotation scripts for other RE tools
                              --format idc|idapython|rizin   (required)
@@ -62,7 +61,6 @@ fn main() -> ExitCode {
         Some("analyze") => analyze(&args.collect::<Vec<_>>()),
         Some("oracle") => oracle(&args.collect::<Vec<_>>()),
         Some("export") => export(&args.collect::<Vec<_>>()),
-        #[cfg(target_os = "linux")]
         Some("live") => live(&args.collect::<Vec<_>>()),
         Some("pack") => pack(&args.collect::<Vec<_>>()),
         Some(command) => {
@@ -228,8 +226,7 @@ struct FunctionJson {
 }
 
 /// 找伴生 PDB：zig/mingw 产出 `<stem>.pdb`（替换扩展名），MSVC 也常见 `<file>.pdb`。
-/// `live`：活体只读车道（Linux；wine 宿主 PE 一等公民）。
-#[cfg(target_os = "linux")]
+/// `live`：活体会话（Linux /proc+wine 与原生 Windows 共用 host facade）。
 fn live(args: &[String]) -> ExitCode {
     let mut iter = args.iter();
     let Some(sub) = iter.next() else {
@@ -274,13 +271,27 @@ fn live(args: &[String]) -> ExitCode {
             let args: Vec<String> = iter.cloned().collect();
             live_freeze(open_process(), &args)
         }
+        #[cfg(target_os = "linux")]
         "trace" => {
             let args: Vec<String> = iter.cloned().collect();
             live_trace(open_process(), &args)
         }
+        #[cfg(not(target_os = "linux"))]
+        "trace" => {
+            eprintln!("kotama: live trace is currently Linux-only");
+            ExitCode::FAILURE
+        }
+        #[cfg(target_os = "linux")]
         "launch" => {
             let args: Vec<String> = iter.cloned().collect();
             live_launch(&args)
+        }
+        #[cfg(not(target_os = "linux"))]
+        "launch" => {
+            eprintln!(
+                "kotama: live launch is currently Linux-only; use the Windows injection lane"
+            );
+            ExitCode::FAILURE
         }
         "attach" => match open_process().modules() {
             Ok(modules) => {
@@ -299,6 +310,7 @@ fn live(args: &[String]) -> ExitCode {
                         kind: match m.kind {
                             kotama_proto::ModuleKind::Elf => "elf",
                             kotama_proto::ModuleKind::WinePe => "wine-pe",
+                            kotama_proto::ModuleKind::NativePe => "native-pe",
                         },
                         path: m.path.clone(),
                     })
@@ -319,8 +331,8 @@ fn live(args: &[String]) -> ExitCode {
         },
         "analyze" => {
             let process = open_process();
-            let Ok(image) = process.wine_pe(None) else {
-                eprintln!("kotama: no wine PE module in pid {pid}");
+            let Ok(image) = process.pe_image(None) else {
+                eprintln!("kotama: no PE module in pid {pid}");
                 return ExitCode::from(2);
             };
             let functions = kotama_scan::discover_with(
@@ -417,12 +429,7 @@ fn live_launch(args: &[String]) -> ExitCode {
         capabilities: report
             .capabilities
             .iter()
-            .map(|capability| match capability {
-                kotama_proto::Capability::ListModules => "list-modules",
-                kotama_proto::Capability::ReadMemory => "read-memory",
-                kotama_proto::Capability::WriteMemory => "write-memory",
-                kotama_proto::Capability::Freeze => "freeze",
-            })
+            .map(|capability| capability.as_str())
             .collect(),
         module_count: report.module_count,
         image_base: report.image_base.map(|base| format!("0x{base:x}")),
@@ -520,7 +527,6 @@ fn live_trace(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode 
 }
 
 /// 解析值规格：`u32:123` / `i32:-5` / `u64:8` / `f32:1.5` / `bytes:deadbeef`。
-#[cfg(target_os = "linux")]
 fn parse_value_spec(spec: &str) -> Result<kotama_host::scanner::Value, String> {
     let (kind, raw) = spec
         .split_once(':')
@@ -557,7 +563,6 @@ fn parse_value_spec(spec: &str) -> Result<kotama_host::scanner::Value, String> {
 }
 
 /// `live scan`：首扫 + 可选续扫链，输出命中 JSON。
-#[cfg(target_os = "linux")]
 fn live_scan(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
     use kotama_host::scanner;
     let mut exact: Option<kotama_host::scanner::Value> = None;
@@ -646,7 +651,6 @@ fn live_scan(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
 }
 
 /// `live write`：需要 `--write` 显式授权（否则 exit 3）。
-#[cfg(target_os = "linux")]
 fn live_write(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
     let address = match args
         .first()
@@ -700,7 +704,6 @@ fn live_write(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode 
 }
 
 /// `live freeze`：钉住一个值 `--seconds` 秒（需要 `--write`）。
-#[cfg(target_os = "linux")]
 fn live_freeze(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
     let address = match args
         .first()

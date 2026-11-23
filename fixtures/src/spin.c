@@ -12,10 +12,17 @@
 #define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
 
+/* MSVC 没有 GNU __attribute__((used))；这里只在非 MSVC 车道保留该标记。 */
+#ifdef _MSC_VER
+#define KOTAMA_USED
+#else
+#define KOTAMA_USED __attribute__((used))
+#endif
+
 static int hot_counter = 0;
 
 /* 活体扫描的锚点函数：计数器在栈外，肉眼/扫描都能看到它在变。 */
-__attribute__((used)) static int tick(int i) {
+KOTAMA_USED static int tick(int i) {
     hot_counter += i & 3;
     return hot_counter;
 }

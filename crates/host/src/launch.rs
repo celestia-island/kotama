@@ -92,7 +92,7 @@ pub fn launch(payload: &str, command: &[String]) -> Result<Launched, HostError> 
         &Request::Hello(Handshake {
             proto_version: kotama_proto::PROTO_VERSION,
             abi_version: kotama::ABI_VERSION,
-            capabilities: vec![Capability::ListModules, Capability::ReadMemory],
+            capabilities: kotama_proto::READ_ONLY_CAPABILITIES.to_vec(),
         }),
     )?;
     match ack {
@@ -165,7 +165,7 @@ pub fn probe(launched: &mut Launched, command: &[String]) -> Result<LaunchReport
     // 声明的静态能力集即可（与 payload 源一致）。
     Ok(LaunchReport {
         pid: launched.child.id() as i32,
-        capabilities: vec![Capability::ListModules, Capability::ReadMemory],
+        capabilities: kotama_proto::READ_ONLY_CAPABILITIES.to_vec(),
         module_count,
         image_base,
         image_magic,
@@ -325,7 +325,7 @@ pub fn launch_wine(
         &Request::Hello(Handshake {
             proto_version: kotama_proto::PROTO_VERSION,
             abi_version: kotama::ABI_VERSION,
-            capabilities: vec![Capability::ListModules, Capability::ReadMemory],
+            capabilities: kotama_proto::READ_ONLY_CAPABILITIES.to_vec(),
         }),
     )? {
         Response::HelloAck(_) => Ok(launched),
@@ -358,7 +358,7 @@ pub fn probe_wine(launched: &mut WineLaunched) -> Result<LaunchReport, HostError
     };
     Ok(LaunchReport {
         pid: launched.child.id() as i32,
-        capabilities: vec![Capability::ListModules, Capability::ReadMemory],
+        capabilities: kotama_proto::READ_ONLY_CAPABILITIES.to_vec(),
         module_count: modules.len(),
         image_base: modules.first().map(|module| module.base),
         image_magic: None,

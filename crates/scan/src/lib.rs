@@ -22,9 +22,13 @@ use iced_x86::OpKind;
 use kotama::AddressSpace;
 use kotama_image::Arch;
 use kotama_image::Container;
+use kotama_image::DataDirectory;
+use kotama_image::ExceptionFunction;
 use kotama_image::LoadedModule;
+use kotama_image::RuntimeFunction;
 use kotama_image::SectionInfo;
 use kotama_image::SymbolInfo;
+use kotama_image::UnwindInfo;
 
 pub use kotama::Evidence;
 pub use kotama::FunctionEntry;
@@ -83,22 +87,51 @@ pub struct ScanView<'a> {
 /// 确定性：同一 [`LoadedModule`] 两次调用返回逐字段相同的结果。
 #[must_use]
 pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
-    discover_with(
-        ScanView {
-            container: module.container,
-            arch: module.arch,
-            entry_rva: module.entry_rva,
-            sections: &module.sections,
-            symbols: &module.symbols,
-            dynamic_symbols: &module.dynamic_symbols,
-            debug_functions: &module.debug_functions,
-        },
-        &module.address_space(),
-    )
+    let view = ScanView {
+        container: module.container,
+        arch: module.arch,
+        entry_rva: module.entry_rva,
+        sections: &module.sections,
+        symbols: &module.symbols,
+        dynamic_symbols: &module.dynamic_symbols,
+        debug_functions: &module.debug_functions,
+    };
+    discover_impl(view, &module.address_space(), module.exception_directory)
+}
+
+/// 提取静态 PE64 的完整异常目录与 `.xdata` 事实，供反编译 sidecar 使用。
+///
+/// 结果按完整 RUNTIME_FUNCTION 排序去重；同一份坏输入不会依赖节遍历顺序。
+#[must_use]
+pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
+    let exception_directory = module.exception_directory;
+    let space = module.address_space();
+    let view = ViewAdapter {
+        container: module.container,
+        arch: module.arch,
+        entry_rva: module.entry_rva,
+        sections: &module.sections,
+        symbols: &module.symbols,
+        dynamic_symbols: &module.dynamic_symbols,
+        debug_functions: &module.debug_functions,
+        space: &space,
+    };
+    exception_functions_impl(&view, exception_directory)
 }
 
 /// 同一条发现管线，吃任意 [`ScanView`] + 地址空间（活体进程走这里）。
+///
+/// 活体视图尚未携带数据目录时，保留 `.pdata` 节回退；静态 [`discover`] 优先使用
+/// PE exception directory。
 pub fn discover_with(view: ScanView<'_>, space: &dyn AddressSpace) -> Vec<FunctionEntry> {
+    discover_impl(view, space, None)
+}
+
+fn discover_impl(
+    view: ScanView<'_>,
+    space: &dyn AddressSpace,
+    exception_directory: Option<DataDirectory>,
+) -> Vec<FunctionEntry> {
     let module = ViewAdapter {
         container: view.container,
         arch: view.arch,
@@ -152,15 +185,14 @@ pub fn discover_with(view: ScanView<'_>, space: &dyn AddressSpace) -> Vec<Functi
         entry.evidence.insert(Evidence::Dynsym);
     }
 
-    // 3) PE64 .pdata：编译器自记的函数边界。
-    if module.container == Container::Pe64 {
-        for (begin, end) in pdata_entries(&module) {
-            let entry = table.entry(u64::from(begin)).or_default();
-            if entry.size.is_none() {
-                entry.size = Some(u64::from(end.saturating_sub(begin)));
-            }
-            entry.evidence.insert(Evidence::Pdata);
+    // 3) PE64 exception directory：编译器自记的函数边界；节名仅是活体兼容回退。
+    for exception in exception_functions_impl(&module, exception_directory) {
+        let runtime = exception.runtime;
+        let entry = table.entry(u64::from(runtime.begin_rva)).or_default();
+        if entry.size.is_none() {
+            entry.size = Some(u64::from(runtime.end_rva.saturating_sub(runtime.begin_rva)));
         }
+        entry.evidence.insert(Evidence::Pdata);
     }
 
     // 4) 入口点。
@@ -594,24 +626,120 @@ pub fn vtables(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable
     out
 }
 
-/// 解析 PE64 `.pdata` 的 `(BeginAddress, EndAddress)` 列表（EndAddress 不含）。
-fn pdata_entries(module: &ViewAdapter<'_>) -> Vec<(u32, u32)> {
-    let Some(section) = module.sections.iter().find(|s| s.name == ".pdata") else {
+const RUNTIME_FUNCTION_SIZE: u64 = 12;
+const UNW_FLAG_EHANDLER: u8 = 1;
+const UNW_FLAG_UHANDLER: u8 = 2;
+const UNW_FLAG_CHAININFO: u8 = 4;
+
+/// 读取 PE64 exception directory；没有目录时才按 `.pdata` 节名回退。
+fn runtime_functions(
+    module: &ViewAdapter<'_>,
+    directory: Option<DataDirectory>,
+) -> Vec<RuntimeFunction> {
+    if module.container != Container::Pe64 {
+        return Vec::new();
+    }
+    let directory = directory.or_else(|| {
+        module
+            .sections
+            .iter()
+            .find(|section| section.name == ".pdata")
+            .map(|section| DataDirectory {
+                rva: section.rva,
+                size: section.size,
+            })
+    });
+    let Some(directory) = directory else {
         return Vec::new();
     };
     let space = module.address_space();
-    let count = (section.size / 12).min(u64::from(u32::MAX));
-    let Some(bytes) = space.read(section.rva, usize::try_from(count * 12).unwrap_or(0)) else {
+    // 数据目录的声明尺寸可能含尾部填充；截到可读段尾，避免一条坏尾记录抹掉整表。
+    let available = space
+        .segment_at(directory.rva)
+        .map_or(directory.size, |segment| {
+            segment.end().saturating_sub(directory.rva)
+        });
+    let count = directory.size.min(available) / RUNTIME_FUNCTION_SIZE;
+    let Ok(length) = usize::try_from(count * RUNTIME_FUNCTION_SIZE) else {
         return Vec::new();
     };
-    bytes
+    let Some(bytes) = space.read(directory.rva, length) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RuntimeFunction> = bytes
         .as_chunks::<12>()
         .0
         .iter()
         .filter_map(|entry| {
-            let begin = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
-            let end = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
-            (begin != 0 && end > begin).then_some((begin, end))
+            let begin_rva = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            let end_rva = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+            let unwind_info_rva = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]);
+            (begin_rva != 0 && end_rva > begin_rva).then_some(RuntimeFunction {
+                begin_rva,
+                end_rva,
+                unwind_info_rva,
+            })
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn read_u32(space: &dyn AddressSpace, rva: u32) -> Option<u32> {
+    let bytes = space.read(u64::from(rva), 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// 解析 UNWIND_INFO 头与对齐后的 handler/chained 尾随记录。
+fn unwind_info(space: &dyn AddressSpace, rva: u32) -> Option<UnwindInfo> {
+    if rva == 0 {
+        return None;
+    }
+    let header = space.read(u64::from(rva), 4)?;
+    let version = header[0] & 0x07;
+    let flags = header[0] >> 3;
+    let unwind_code_count = header[2];
+    // UNWIND_CODE 是 u16；尾随 handler/RUNTIME_FUNCTION 按 4 字节对齐。
+    let trailing_offset = (4usize + usize::from(unwind_code_count) * 2 + 3) & !3;
+    let trailing_rva = rva.checked_add(u32::try_from(trailing_offset).ok()?)?;
+    let mut handler_rva = None;
+    let mut chained = None;
+    if flags & UNW_FLAG_CHAININFO != 0 {
+        let begin_rva = read_u32(space, trailing_rva)?;
+        let end_rva = read_u32(space, trailing_rva.checked_add(4)?)?;
+        let unwind_info_rva = read_u32(space, trailing_rva.checked_add(8)?)?;
+        chained = (begin_rva != 0 && end_rva > begin_rva).then_some(RuntimeFunction {
+            begin_rva,
+            end_rva,
+            unwind_info_rva,
+        });
+    } else if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+        let handler = read_u32(space, trailing_rva)?;
+        handler_rva = (handler != 0).then_some(handler);
+    }
+    Some(UnwindInfo {
+        version,
+        flags,
+        prolog_size: header[1],
+        unwind_code_count,
+        frame_register: header[3] & 0x0f,
+        frame_offset: header[3] >> 4,
+        handler_rva,
+        chained,
+    })
+}
+
+fn exception_functions_impl(
+    module: &ViewAdapter<'_>,
+    directory: Option<DataDirectory>,
+) -> Vec<ExceptionFunction> {
+    let space = module.address_space();
+    runtime_functions(module, directory)
+        .into_iter()
+        .map(|runtime| ExceptionFunction {
+            runtime,
+            unwind: unwind_info(space, runtime.unwind_info_rva),
         })
         .collect()
 }
@@ -668,7 +796,16 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/generated")
             .join(rel);
-        path.exists().then_some(path)
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            );
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -703,13 +840,36 @@ mod tests {
     }
 
     #[test]
+    fn real_pe64_exception_facts_include_xdata() {
+        let Some(path) = fixture("x86_64-windows-gnu/-O2/loops.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert!(module.exception_directory.is_some());
+        let facts = exception_functions(&module);
+        assert!(!facts.is_empty());
+        assert!(facts.iter().any(|fact| fact.unwind.is_some()));
+        assert!(facts
+            .iter()
+            .all(|fact| fact.runtime.end_rva > fact.runtime.begin_rva));
+        assert_eq!(facts, exception_functions(&module));
+    }
+
+    #[test]
     fn stripped_elf_still_finds_entry_and_call_targets() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let host_sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/generated/host-samples/true");
-        if !path.exists() {
-            eprintln!("skip: host samples not built");
+        if cfg!(target_os = "windows") && !host_sample.exists() {
+            // /bin/true 是 Linux 宿主样本，Windows 夹具车道不伪造它；这是平台 lane-skip，
+            // 不影响 KOTAMA_REQUIRE_FIXTURES 对可生成矩阵的强制要求。Linux CI 缺它仍失败。
+            eprintln!("lane-skip: Linux host-samples/true is unavailable on native Windows");
             return;
         }
+        let Some(path) = fixture("host-samples/true") else {
+            eprintln!("skip: host samples not built");
+            return;
+        };
         let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
         let functions = discover(&module);
         assert!(functions
@@ -809,6 +969,176 @@ mod tests {
         assert!(tables
             .iter()
             .all(|t| t.targets.iter().all(|target| entries.contains(target))));
+    }
+
+    struct SyntheticSpace {
+        base: u64,
+        bytes: Vec<u8>,
+        segments: Vec<kotama::Segment>,
+    }
+
+    impl SyntheticSpace {
+        fn write(&mut self, rva: u64, bytes: &[u8]) {
+            let offset = usize::try_from(rva - self.base).unwrap();
+            self.bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
+        }
+    }
+
+    impl AddressSpace for SyntheticSpace {
+        fn segments(&self) -> &[kotama::Segment] {
+            &self.segments
+        }
+
+        fn read(&self, rva: u64, len: usize) -> Option<&[u8]> {
+            self.segments
+                .iter()
+                .find(|segment| segment.contains(rva, len))?;
+            let start = usize::try_from(rva.checked_sub(self.base)?).ok()?;
+            self.bytes.get(start..start.checked_add(len)?)
+        }
+    }
+
+    fn synthetic_exception_input(flags: u8) -> (SyntheticSpace, Vec<SectionInfo>, DataDirectory) {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x3000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+                segment(0x3000, 0x1000, false),
+            ],
+        };
+        space.write(0x2000, &0x1000u32.to_le_bytes());
+        space.write(0x2004, &0x1040u32.to_le_bytes());
+        space.write(0x2008, &0x3000u32.to_le_bytes());
+        // Version=1，一个 unwind code，frame register=5 / offset=1。
+        space.write(0x3000, &[(flags << 3) | 1, 4, 1, 0x15, 0, 0]);
+        if flags & UNW_FLAG_CHAININFO != 0 {
+            space.write(0x3008, &0x1040u32.to_le_bytes());
+            space.write(0x300c, &0x1060u32.to_le_bytes());
+            space.write(0x3010, &0u32.to_le_bytes());
+        } else {
+            space.write(0x3008, &0x1040u32.to_le_bytes());
+        }
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 12,
+                // 故意不用 .pdata：只有 exception directory 能找到它。
+                name: ".exception".into(),
+                executable: false,
+            },
+            SectionInfo {
+                rva: 0x3000,
+                size: 0x1000,
+                name: ".xdata".into(),
+                executable: false,
+            },
+        ];
+        (
+            space,
+            sections,
+            DataDirectory {
+                rva: 0x2000,
+                size: 12,
+            },
+        )
+    }
+
+    fn synthetic_adapter<'a>(
+        sections: &'a [SectionInfo],
+        space: &'a dyn AddressSpace,
+    ) -> ViewAdapter<'a> {
+        ViewAdapter {
+            container: Container::Pe64,
+            arch: Arch::X86_64,
+            entry_rva: None,
+            sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+            space,
+        }
+    }
+
+    #[test]
+    fn exception_facts_preserve_runtime_and_aligned_handler() {
+        let (space, sections, directory) = synthetic_exception_input(UNW_FLAG_EHANDLER);
+        let adapter = synthetic_adapter(&sections, &space);
+        let facts = exception_functions_impl(&adapter, Some(directory));
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].runtime,
+            RuntimeFunction {
+                begin_rva: 0x1000,
+                end_rva: 0x1040,
+                unwind_info_rva: 0x3000,
+            }
+        );
+        let unwind = facts[0].unwind.unwrap();
+        assert_eq!(unwind.version, 1);
+        assert_eq!(unwind.flags, UNW_FLAG_EHANDLER);
+        assert_eq!(unwind.prolog_size, 4);
+        assert_eq!(unwind.unwind_code_count, 1);
+        assert_eq!(unwind.frame_register, 5);
+        assert_eq!(unwind.frame_offset, 1);
+        assert_eq!(unwind.handler_rva, Some(0x1040));
+        assert_eq!(unwind.chained, None);
+        assert_eq!(facts, exception_functions_impl(&adapter, Some(directory)));
+    }
+
+    #[test]
+    fn exception_facts_decode_chained_runtime_function() {
+        let (space, sections, directory) = synthetic_exception_input(UNW_FLAG_CHAININFO);
+        let adapter = synthetic_adapter(&sections, &space);
+        let facts = exception_functions_impl(&adapter, Some(directory));
+        let unwind = facts[0].unwind.unwrap();
+        assert_eq!(unwind.handler_rva, None);
+        assert_eq!(
+            unwind.chained,
+            Some(RuntimeFunction {
+                begin_rva: 0x1040,
+                end_rva: 0x1060,
+                unwind_info_rva: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn discovery_uses_exception_directory_not_pdata_section_name() {
+        let (space, sections, directory) = synthetic_exception_input(UNW_FLAG_EHANDLER);
+        let view = ScanView {
+            container: Container::Pe64,
+            arch: Arch::X86_64,
+            entry_rva: None,
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_impl(view, &space, Some(directory));
+        let function = functions
+            .iter()
+            .find(|function| function.rva == 0x1000)
+            .unwrap();
+        assert_eq!(function.size, 0x40);
+        assert!(!function.size_inferred);
+        assert!(function.evidence.contains(&Evidence::Pdata));
     }
 
     #[test]

@@ -17,7 +17,6 @@
 use std::io::Read;
 use std::io::Write;
 
-use kotama_proto::Capability;
 use kotama_proto::Frame;
 use kotama_proto::Handshake;
 use kotama_proto::Request;
@@ -64,7 +63,7 @@ pub(crate) fn dispatch(request: Request) -> Response {
             Response::HelloAck(Handshake {
                 proto_version: kotama_proto::PROTO_VERSION,
                 abi_version: kotama::ABI_VERSION,
-                capabilities: vec![Capability::ListModules, Capability::ReadMemory],
+                capabilities: kotama_proto::READ_ONLY_CAPABILITIES.to_vec(),
             })
         }
         Request::ListModules => match list_modules() {
@@ -173,9 +172,31 @@ fn list_modules() -> Result<Vec<kotama_proto::ModuleInfo>, String> {
     Ok(vec![kotama_proto::ModuleInfo {
         base,
         size: 0,
-        kind: kotama_proto::ModuleKind::WinePe,
+        kind: if running_under_wine() {
+            kotama_proto::ModuleKind::WinePe
+        } else {
+            kotama_proto::ModuleKind::NativePe
+        },
         path: String::new(),
     }])
+}
+
+#[cfg(target_os = "windows")]
+fn running_under_wine() -> bool {
+    // wine 在 ntdll 暴露 wine_get_version；原生 Windows 没有该导出。这里只用于
+    // 如实标记模块容器，不参与检测规避或能力开关。
+    let ntdll_name: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+    // SAFETY: 两个名称均为 NUL 结尾；句柄只在成功时传给 GetProcAddress。
+    unsafe {
+        let ntdll =
+            windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(ntdll_name.as_ptr());
+        !ntdll.is_null()
+            && windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                ntdll,
+                c"wine_get_version".as_ptr().cast(),
+            )
+            .is_some()
+    }
 }
 
 #[cfg(target_os = "windows")]
