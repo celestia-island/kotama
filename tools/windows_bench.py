@@ -66,6 +66,9 @@ def main() -> int:
             sys.executable, "tools/build_fixtures.py", "--targets",
             "x86_64-windows-msvc", "x86-windows-msvc", "--run",
         ], env)
+        run_step("dbghelp versus pdb-crate cross-check", [
+            sys.executable, "tools/pdb_crosscheck.py",
+        ], env)
 
     run_step("just gate with required fixtures", ["just", "gate"], env)
     if not args.skip_pack:
