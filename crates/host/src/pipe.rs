@@ -24,6 +24,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
 use windows_sys::Win32::Foundation::ERROR_IO_PENDING;
 use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
@@ -32,6 +33,8 @@ use windows_sys::Win32::Foundation::FALSE;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::Storage::FileSystem::WriteFile;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_FIRST_PIPE_INSTANCE;
@@ -53,6 +56,10 @@ use crate::HostError;
 
 /// 管道缓冲区（协议帧小，64 KiB 足够一次往返；超长帧由宿主分片）。
 const PIPE_BUFFER: u32 = 64 * 1024;
+/// 单次重叠读写的等待上限；防止已连接的静默客户端无限挂住调用。
+const PIPE_IO_TIMEOUT_MS: u32 = 30_000;
+/// 只允许 SYSTEM 与创建者（当前用户）访问；远端客户端另有 PIPE_REJECT_REMOTE_CLIENTS。
+const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;OW)";
 
 /// 一次性命名管道服务端：创建 → accept（可超时）→ 得到一个字节流。
 pub struct NamedPipeServer {
@@ -91,7 +98,28 @@ impl NamedPipeServer {
 
     fn with_name(name: String) -> Result<Self, HostError> {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: wide 是 NUL 结尾的有效管道名；安全属性 NULL = 默认（当前用户）；
+        let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: sddl 是 NUL 结尾的 SDDL；descriptor 由 API 分配，成功时后面 LocalFree。
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(crate::windows::last_error(
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            ));
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: FALSE,
+        };
+        // SAFETY: wide 是 NUL 结尾的有效管道名；attributes 的 SDDL 只授予 SYSTEM + creator owner；
         // nMaxInstances = 1（单客户端）；缓冲区与超时均为值参数。
         let raw = unsafe {
             CreateNamedPipeW(
@@ -102,12 +130,21 @@ impl NamedPipeServer {
                 PIPE_BUFFER,
                 PIPE_BUFFER,
                 0,
-                std::ptr::null(),
+                &attributes,
             )
         };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(crate::windows::last_error(&format!(
-                "CreateNamedPipeW {name}"
+        let create_error = if raw == INVALID_HANDLE_VALUE {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        // SAFETY: descriptor 由成功转换返回，调用方独占；LocalFree 释放其内存。
+        unsafe {
+            LocalFree(descriptor);
+        }
+        if let Some(error) = create_error {
+            return Err(HostError::Win32(format!(
+                "CreateNamedPipeW {name}: {error}"
             )));
         }
         // SAFETY: raw 是刚返回的有效独占句柄。
@@ -260,6 +297,7 @@ impl PipeConnection {
             self.event.as_raw_handle(),
             &mut overlapped,
             completed,
+            PIPE_IO_TIMEOUT_MS,
         )
     }
 }
@@ -287,6 +325,7 @@ fn finish_io(
     event: HANDLE,
     overlapped: &mut OVERLAPPED,
     completed: i32,
+    timeout_ms: u32,
 ) -> std::io::Result<usize> {
     let mut transferred = 0u32;
     if completed == 0 {
@@ -297,12 +336,13 @@ fn finish_io(
         if error.raw_os_error().map(|code| code as u32) != Some(ERROR_IO_PENDING) {
             return Err(error);
         }
-        // SAFETY: event 与 overlapped 属于同一次已提交的重叠 I/O；u32::MAX = INFINITE。
-        let waited = unsafe { WaitForSingleObject(event, u32::MAX) };
+        // SAFETY: event 与 overlapped 属于同一次已提交的重叠 I/O；有限超时防止静默客户端挂死。
+        let waited = unsafe { WaitForSingleObject(event, timeout_ms) };
         if waited != WAIT_OBJECT_0 {
-            return Err(std::io::Error::other(format!(
-                "named pipe overlapped wait failed: status {waited}"
-            )));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("named pipe overlapped wait failed: status {waited}"),
+            ));
         }
     }
     // SAFETY: overlapped 用于上面那次 I/O 调用，句柄存活；FALSE = 不等待。

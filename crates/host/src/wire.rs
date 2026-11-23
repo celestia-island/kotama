@@ -200,3 +200,17 @@ where
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_frame_is_rejected_before_allocation() {
+        let length = u32::try_from(MAX_FRAME_LEN + 1).expect("limit fits u32");
+        let mut cursor = Cursor::new(length.to_le_bytes().to_vec());
+        let error = recv_frame(&mut cursor).expect_err("oversized frame accepted");
+        assert!(error.to_string().contains("frame too large"), "{error}");
+    }
+}

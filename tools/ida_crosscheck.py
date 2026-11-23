@@ -117,7 +117,10 @@ def main() -> int:
             if log.is_file():
                 print(log.read_text(encoding = "utf-8", errors = "replace")[-4000:])
             return 1
-        ida_log = log.read_text(encoding = "utf-8", errors = "replace") if log.is_file() else ""
+        if not log.is_file():
+            print("FAIL: IDA did not produce the -L log; refusing a vacuous PDB check")
+            return 1
+        ida_log = log.read_text(encoding = "utf-8", errors = "replace")
         if "PDB: loading" in ida_log or "PDB: loaded" in ida_log:
             print("FAIL: IDA loaded a PDB from the supposedly PDB-less copy")
             print(ida_log[-2000:])
