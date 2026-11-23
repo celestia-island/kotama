@@ -64,7 +64,7 @@ Les décisions de conception et les registres de processus vivent dans les descr
 
 | Domaine | Contenu | Étape |
 | --- | --- | --- |
-| Statique | chargement → découverte → décompilation en blocs de base ✅ / inférence de types · structs · oracle différentiel | P0 ✅ / P1 |
+| Statique | chargement → découverte → décompilation en blocs de base → preuves SEH/RTTI/PDB et différentiel Ghidra/IDA ✅ / inférence de types · structs | P0 ✅ / P1 |
 | Dynamique | injection (Windows / Linux) → mémoire / pile / instantanés → scan / gel → hook / trace | P2–P4 |
 | Empaquetage | `hooks.toml` + sources de hooks → bibliothèques d'injection par plateforme + manifestes (ABI / capacités / empreintes) | P4 |
 | Surface | services (REST / WS / MCP) + interface web hikari + nœuds distants evernight | P5–P6 |

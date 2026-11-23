@@ -78,20 +78,26 @@ pub extern "system" fn DllMain(
 /// 工作线程入口：选传输（管道优先）→ 连宿主 → 进协议循环。
 unsafe extern "system" fn agent_thread(_param: *mut core::ffi::c_void) -> u32 {
     if let Ok(name) = std::env::var("KOTAMA_PAYLOAD_PIPE") {
-        if let Some(mut stream) = PipeAgent::connect(&name) {
-            super::serve(&mut stream);
-        }
-        return 0;
-    }
-    if let Ok(port) = std::env::var("KOTAMA_PAYLOAD_TCP") {
-        if let Ok(port) = port.parse::<u16>() {
-            if let Some(mut stream) = TcpAgent::connect(port) {
+        let name = name.trim();
+        if !name.is_empty() {
+            if let Some(mut stream) = PipeAgent::connect(name) {
                 super::serve(&mut stream);
             }
+            return 0;
         }
-        return 0;
     }
-    // 两者都没设：按自身 pid 回落到确定性管道名（attach 到既有进程的注入）。
+    if let Ok(port) = std::env::var("KOTAMA_PAYLOAD_TCP") {
+        let port = port.trim();
+        if !port.is_empty() {
+            if let Ok(port) = port.parse::<u16>() {
+                if let Some(mut stream) = TcpAgent::connect(port) {
+                    super::serve(&mut stream);
+                }
+            }
+            return 0;
+        }
+    }
+    // 两者都没设（或为空）：按自身 pid 回落到确定性管道名（attach 到既有进程的注入）。
     let name = format!(r"\\.\pipe\kotama-{}", std::process::id());
     if let Some(mut stream) = PipeAgent::connect(&name) {
         super::serve(&mut stream);

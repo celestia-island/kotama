@@ -385,6 +385,60 @@ fn live_e2e_attach_then_inject_over_default_pid_pipe() {
     drop(session);
 }
 
+/// Rust payload + 空传输环境：必须忽略空值并回落到 PID 管道。
+#[test]
+fn live_e2e_attach_rust_payload_ignores_empty_transport_env() {
+    if !live_enabled() {
+        return;
+    }
+    let spin = spin_fixture();
+    let payload = repo_root().join("dist/x86_64-pc-windows-msvc/kotama_payload.dll");
+    assert!(
+        payload.is_file(),
+        "MSVC payload missing: run the pack lane first ({})",
+        payload.display()
+    );
+    let child = ChildGuard(
+        Command::new(&spin)
+            .arg("30")
+            .env("KOTAMA_PAYLOAD_PIPE", "")
+            .env_remove("KOTAMA_PAYLOAD_TCP")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn spin.exe with an empty transport variable"),
+    );
+    let pid = child.0.id() as i32;
+    let (target, spin_base) = wait_for_main_module(pid, "spin.exe");
+    let server = NamedPipeServer::for_pid(pid).expect("deterministic default pipe");
+    let session = Session::with_injection(TargetProcess::open(pid).expect("open inject target"))
+        .expect("explicit injection grant");
+    let report = session
+        .inject(&payload, Duration::from_secs(15))
+        .expect("inject the Rust payload");
+    let modules = target.modules().expect("host module table");
+    let agent_base = find_module_base(&modules, "kotama_payload.dll")
+        .expect("injected Rust payload must be visible through Toolhelp");
+    assert_eq!(agent_base, report.module_base);
+
+    let mut pipe = server
+        .accept(Duration::from_secs(20))
+        .expect("Rust payload did not use the default pid pipe");
+    let ack = wire::handshake(&mut pipe).expect("handshake");
+    assert_eq!(ack.proto_version, kotama_proto::PROTO_VERSION);
+    let payload_modules = wire::list_modules(&mut pipe).expect("payload module list");
+    assert_eq!(payload_modules[0].base, spin_base);
+    let magic = wire::read_memory(&mut pipe, spin_base, 2).expect("payload read of image head");
+    assert_eq!(&magic, b"MZ");
+    eprintln!(
+        "# attach rust empty env: pid={pid} spin_base={spin_base:#x} agent_base={agent_base:#x} proto={} magic={:02x?}",
+        ack.proto_version,
+        magic
+    );
+    drop(pipe);
+    drop(session);
+}
+
 /// kotama_load.exe 回归：只证明 loader 自身进程内的载荷可用，并断言子进程退出码。
 ///
 /// 这里**不**声称载荷进了子进程：载荷上报的主映像基址必须等于 kotama_load.exe 自己

@@ -58,7 +58,7 @@ Ghidra / IDA 差分 oracle 已接入。型別推斷、結構體恢復與 GUI/服
 
 | 塊 | 內容 | 階段 |
 | --- | --- | --- |
-| 靜態 | 載入 → 函式發現 → 基本塊反編譯 ✅ / 類型推斷 · 結構體 · 差分 oracle | P0 ✅ / P1 |
+| 靜態 | 載入 → 函式發現 → 基本塊反編譯 → SEH/RTTI/PDB 證據與 Ghidra/IDA 差分 ✅ / 類型推斷 · 結構體 | P0 ✅ / P1 |
 | 動態 | 注入（Windows / Linux 雙線）→ 記憶體/堆疊/快照 → 掃描/凍結 → hook / trace | P2–P4 |
 | 打包 | `hooks.toml` + hook 原始碼 → 各平台注入庫 + 清單（ABI / 能力 / 摘要） | P4 |
 | 面 | 服務（REST / WS / MCP）+ hikari web UI + evernight 遠端節點 | P5–P6 |

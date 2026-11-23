@@ -122,6 +122,61 @@ def cli_attach_smoke(env: dict[str, str]) -> None:
             child.wait()
 
 
+def cli_attach_case(label, command, payload, extra_env, env):
+    child_env = env.copy()
+    child_env.pop("KOTAMA_PAYLOAD_PIPE", None)
+    child_env.pop("KOTAMA_PAYLOAD_TCP", None)
+    child_env.update(extra_env)
+    child = subprocess.Popen(
+        command, cwd = REPO, env = child_env,
+        stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(0.5)
+        cli = [
+            "cargo", "run", "--quiet", "-p", "kotama-cli", "--", "live", "inject",
+            "--payload", str(payload), "--pid", str(child.pid),
+        ]
+        print("+ " + label + ": " + " ".join(cli), flush = True)
+        completed = subprocess.run(
+            cli, cwd = REPO, env = env, capture_output = True,
+            text = True, encoding = "utf-8", timeout = 180,
+        )
+        if completed.returncode != 0:
+            print(completed.stdout + completed.stderr)
+            raise SystemExit("windows-bench: CLI attach " + label + " failed with " + str(completed.returncode))
+        report = json.loads(completed.stdout)
+        if report.get("proto_version") != 3:
+            raise SystemExit("windows-bench: CLI attach " + label + " proto mismatch: " + str(report))
+        if report.get("payload_main_base") != report.get("target_main_base"):
+            raise SystemExit("windows-bench: CLI attach " + label + " main base mismatch: " + str(report))
+        if report.get("image_magic") != "4d5a":
+            raise SystemExit("windows-bench: CLI attach " + label + " did not read MZ: " + str(report))
+        print("# cli attach " + label + ": pid=" + str(report.get("pid")) + " base=" + str(report.get("payload_main_base")), flush = True)
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout = 5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+
+
+def cli_attach_matrix(env):
+    agent = REPO / "dist" / "x86_64-pc-windows-gnu" / "kotama_agent.dll"
+    rust_payload = REPO / "dist" / "x86_64-pc-windows-msvc" / "kotama_payload.dll"
+    spin = REPO / "fixtures" / "generated" / "x86_64-windows-gnu" / "-O2" / "spin.exe"
+    for path in (agent, rust_payload, spin):
+        if not path.is_file():
+            raise SystemExit("windows-bench: CLI attach input missing: " + str(path))
+    print("\n=== windows-bench: CLI attach matrix ===", flush = True)
+    cli_attach_case("spin/c-agent", [str(spin), "30"], agent, {}, env)
+    cli_attach_case("spin/rust-empty-env", [str(spin), "30"], rust_payload, {"KOTAMA_PAYLOAD_PIPE": ""}, env)
+    pwsh = shutil.which("pwsh")
+    if pwsh:
+        cli_attach_case("pwsh/low-base-exe", [pwsh, "-NoProfile", "-Command", "Start-Sleep 30"], agent, {}, env)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog = "windows_bench")
     parser.add_argument("--zig", help = "path to zig 0.17.1 (or set KOTAMA_ZIG)")
@@ -180,6 +235,7 @@ def main() -> int:
         ], live_env)
         cli_injection_smoke(env)
         cli_attach_smoke(env)
+        cli_attach_matrix(env)
 
     run_step("just gate with required fixtures", ["just", "gate"], env)
     if args.oracle:

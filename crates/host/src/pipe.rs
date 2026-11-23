@@ -39,6 +39,7 @@ use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
 use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
+use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE;
 use windows_sys::Win32::System::Pipes::PIPE_REJECT_REMOTE_CLIENTS;
 use windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE;
@@ -58,6 +59,7 @@ pub struct NamedPipeServer {
     handle: OwnedHandle,
     event: OwnedHandle,
     name: String,
+    expected_client: Option<u32>,
 }
 
 impl NamedPipeServer {
@@ -77,7 +79,14 @@ impl NamedPipeServer {
     /// # Errors
     /// 名字已被占用（另一个会话正在注入同一 pid）或 CreateNamedPipeW 失败。
     pub fn for_pid(pid: i32) -> Result<Self, HostError> {
-        Self::with_name(format!(r"\\.\pipe\kotama-{pid}"))
+        let mut server = Self::with_name(format!(r"\\.\pipe\kotama-{pid}"))?;
+        server.expect_client(pid);
+        Ok(server)
+    }
+
+    /// 只接受来自指定 PID 的客户端连接（防止同机其他进程抢先连接）。
+    pub fn expect_client(&mut self, pid: i32) {
+        self.expected_client = u32::try_from(pid).ok();
     }
 
     fn with_name(name: String) -> Result<Self, HostError> {
@@ -116,6 +125,7 @@ impl NamedPipeServer {
             handle,
             event,
             name,
+            expected_client: None,
         })
     }
 
@@ -180,6 +190,25 @@ impl NamedPipeServer {
                         self.name
                     )))
                 }
+            }
+        }
+        if let Some(expected) = self.expected_client {
+            let mut client_pid = 0u32;
+            // SAFETY: handle 已连接；client_pid 是可写栈变量。
+            let ok = unsafe {
+                GetNamedPipeClientProcessId(self.handle.as_raw_handle(), &mut client_pid)
+            };
+            if ok == 0 {
+                return Err(crate::windows::last_error(&format!(
+                    "GetNamedPipeClientProcessId {}",
+                    self.name
+                )));
+            }
+            if client_pid != expected {
+                return Err(HostError::Win32(format!(
+                    "named pipe {}: client pid {client_pid} != target pid {expected}",
+                    self.name
+                )));
             }
         }
         Ok(PipeConnection {
@@ -400,6 +429,16 @@ mod tests {
             server.accept(Duration::from_millis(150)),
             Err(HostError::Win32(_))
         ));
+    }
+
+    #[test]
+    fn client_pid_mismatch_is_rejected() {
+        let server = NamedPipeServer::for_pid(999_999).expect("server");
+        let name = server.name().to_string();
+        let client = std::thread::spawn(move || client_open(&name));
+        let result = server.accept(Duration::from_secs(5));
+        assert!(result.is_err(), "a client from another pid was accepted");
+        let _ = client.join();
     }
 
     #[test]

@@ -54,7 +54,8 @@
 | 已验证 | 24 个矩阵夹具 + `/bin/true`、`/bin/ls` 等 strip 系统二进制 |
 
 已知边界：类型推断与结构体恢复仍属 P1；无 PDB 的 PE 边界依赖 exception directory + call 目标；
-通用 vtable 扫描仍窄于 MSVC RTTI；Windows 注入仅 x64→x64；GUI/服务面尚未开始。
+通用 vtable 扫描仍窄于 MSVC RTTI；Windows 注入仅 x64→x64；`--pid` attach 限同用户、目标未设
+`KOTAMA_PAYLOAD_*`，并按 `.exe` 路径解析主镜像；GUI/服务面尚未开始。
 
 设计决策与过程记录在 PR 描述中（设计文档不进仓树）。
 

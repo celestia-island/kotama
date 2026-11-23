@@ -18,7 +18,8 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_IMAGE = REPO / "fixtures/generated/x86_64-windows-msvc/-O0/loops.exe"
+DEFAULT_IMAGE = REPO / "fixtures/generated/x86_64-windows-gnu/-O0/loops.exe"
+MIN_JACCARD = 0.95
 ANCHORS = ("sum_squares", "count_down", "main", "mainCRTStartup")
 
 
@@ -66,7 +67,7 @@ def main() -> int:
         raise SystemExit("ida_crosscheck: IDA headless lane requires Windows")
     image = args.image.resolve()
     if not image.is_file():
-        raise SystemExit(f"missing fixture: {image}; run tools/build_fixtures.py --targets x86_64-windows-msvc --run")
+        raise SystemExit(f"missing fixture: {image}; run tools/build_fixtures.py --run")
     ida = find_ida(args.ida)
     script = REPO / "support/ida/KotamaFunctionList.py"
 
@@ -105,9 +106,9 @@ def main() -> int:
     print(f"ida={len(theirs)} kotama={len(ours)} matched={matched} jaccard={jaccard:.6f}")
 
     failures = 0
-    if jaccard < 0.90:
+    if jaccard < MIN_JACCARD:
         failures += 1
-        print(f"FAIL: RVA agreement below 0.90; only_ida={sorted(set(theirs) - set(ours))[:20]} only_kotama={sorted(set(ours) - set(theirs))[:20]}")
+        print(f"FAIL: RVA agreement below {MIN_JACCARD}; only_ida={sorted(set(theirs) - set(ours))[:20]} only_kotama={sorted(set(ours) - set(theirs))[:20]}")
     for name in ANCHORS:
         mine = sorted((rva, size) for rva, (symbol, size) in ours.items() if symbol == name)
         reference = sorted((rva, size) for rva, (symbol, size) in theirs.items() if symbol == name)

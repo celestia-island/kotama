@@ -639,6 +639,10 @@ fn live_inject(args: &[String]) -> ExitCode {
             eprintln!("kotama: --pid uses the deterministic named pipe; --transport tcp needs a launched target");
             return ExitCode::from(2);
         }
+        if let Err(err) = TargetProcess::open(pid) {
+            eprintln!("kotama: cannot open pid {pid}: {err}");
+            return ExitCode::FAILURE;
+        }
         let server = match NamedPipeServer::for_pid(pid) {
             Ok(server) => server,
             Err(err) => {
@@ -704,6 +708,13 @@ fn live_inject(args: &[String]) -> ExitCode {
             }
         };
         let pid = child.0.id() as i32;
+        let lane = match lane {
+            Lane::Pipe(mut server) => {
+                server.expect_client(pid);
+                Lane::Pipe(server)
+            }
+            other => other,
+        };
         let image_name = Path::new(&command[0])
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -716,14 +727,17 @@ fn live_inject(args: &[String]) -> ExitCode {
         if let Ok(process) = TargetProcess::open(pid) {
             if let Ok(modules) = process.modules() {
                 let module = if image_name.is_empty() {
-                    modules.first()
+                    process.main_module().ok()
                 } else {
-                    modules.iter().find(|module| {
-                        Path::new(&module.path)
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| name.eq_ignore_ascii_case(&image_name))
-                    })
+                    modules
+                        .iter()
+                        .find(|module| {
+                            Path::new(&module.path)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.eq_ignore_ascii_case(&image_name))
+                        })
+                        .cloned()
                 };
                 if let Some(module) = module {
                     break (process, module.base);
@@ -817,6 +831,10 @@ fn live_inject(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if payload_main != main_base {
+        eprintln!("kotama: payload main base does not match the target image");
+        return ExitCode::FAILURE;
+    }
 
     #[derive(Serialize)]
     struct InjectJson {
@@ -857,10 +875,6 @@ fn live_inject(args: &[String]) -> ExitCode {
             eprintln!("kotama: {err}");
             return ExitCode::FAILURE;
         }
-    }
-    if payload_main != main_base {
-        eprintln!("kotama: payload main base does not match the target image");
-        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }

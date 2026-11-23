@@ -154,6 +154,20 @@ impl TargetProcess {
         Ok(modules)
     }
 
+    /// 取进程主镜像（按 `.exe` 路径识别，而不是排序后的最低基址）。
+    ///
+    /// # Errors
+    /// 模块枚举失败，或进程没有任何模块。
+    pub fn main_module(&self) -> Result<ModuleInfo, HostError> {
+        let modules = self.modules()?;
+        modules
+            .iter()
+            .find(|module| module.path.to_ascii_lowercase().ends_with(".exe"))
+            .or_else(|| modules.first())
+            .cloned()
+            .ok_or_else(|| HostError::Process(format!("pid {} has no modules", self.pid)))
+    }
+
     /// 取主 EXE（或指定基址）的原生 PE 活体映像，供同一静态发现管线使用。
     ///
     /// # Errors
@@ -489,6 +503,18 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn main_module_selects_the_exe() {
+        let process = TargetProcess::open(std::process::id() as i32).expect("open self");
+        let main = process.main_module().expect("main module");
+        assert!(
+            main.path.to_ascii_lowercase().ends_with(".exe"),
+            "main module path is not an exe: {}",
+            main.path
+        );
+        assert_ne!(main.base, 0, "main module base is zero");
     }
 
     /// 原生只读闭环：Toolhelp 主映像 → ProcessImage → 静态/活体身份与发现一致。

@@ -17,6 +17,9 @@ use kotama_proto::ThreadStack;
 
 use crate::HostError;
 
+/// 一帧的最大长度；peer 给的 u32 不能直接触发无界分配。
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
 /// 发送一帧：4 字节 LE 长度前缀 + msgpack 载荷。
 ///
 /// # Errors
@@ -27,6 +30,12 @@ where
 {
     let bytes =
         kotama_proto::encode(frame).map_err(|error| HostError::Proc(format!("encode: {error}")))?;
+    if bytes.len() > MAX_FRAME_LEN {
+        return Err(HostError::Proc(format!(
+            "frame too large: {} bytes (limit {MAX_FRAME_LEN})",
+            bytes.len()
+        )));
+    }
     let length = u32::try_from(bytes.len())
         .map_err(|_| HostError::Proc(format!("frame too large: {} bytes", bytes.len())))?;
     stream
@@ -50,7 +59,14 @@ where
         .read_exact(&mut length)
         .map_err(|error| HostError::Proc(format!("recv length: {error}")))?;
     let length = u32::from_le_bytes(length);
-    let mut bytes = vec![0u8; length as usize];
+    let length = usize::try_from(length)
+        .map_err(|_| HostError::Proc(format!("frame length does not fit usize: {length}")))?;
+    if length > MAX_FRAME_LEN {
+        return Err(HostError::Proc(format!(
+            "frame too large: {length} bytes (limit {MAX_FRAME_LEN})"
+        )));
+    }
+    let mut bytes = vec![0u8; length];
     stream
         .read_exact(&mut bytes)
         .map_err(|error| HostError::Proc(format!("recv frame: {error}")))?;

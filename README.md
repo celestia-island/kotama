@@ -59,7 +59,8 @@ Proven scope:
 
 Known limits: type inference and struct recovery are still P1; PDB-less PE boundaries rely on
 the exception directory plus call targets; the generic vtable scan stays narrower than MSVC
-RTTI; Windows injection is x64-to-x64; the GUI/service surface is not started.
+RTTI; Windows injection is x64-to-x64; `--pid` attach is same-user, expects no `KOTAMA_PAYLOAD_*`
+in the target, and resolves the main `.exe` by path; the GUI/service surface is not started.
 
 Design decisions and process records live in pull-request descriptions (design documents do
 not enter the source tree).

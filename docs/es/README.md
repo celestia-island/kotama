@@ -64,7 +64,7 @@ Las decisiones de diseño y los registros de proceso viven en las descripciones 
 
 | Área | Contenido | Etapa |
 | --- | --- | --- |
-| Estático | carga → descubrimiento → decompilación de bloques básicos ✅ / inferencia de tipos · structs · oráculo diferencial | P0 ✅ / P1 |
+| Estático | carga → descubrimiento → decompilación de bloques básicos → evidencia SEH/RTTI/PDB y diferencial Ghidra/IDA ✅ / inferencia de tipos · structs | P0 ✅ / P1 |
 | Dinámico | inyección (Windows / Linux) → memoria / pila / instantáneas → escaneo / congelación → hook / trace | P2–P4 |
 | Empaquetado | `hooks.toml` + fuentes de hooks → librerías de inyección por plataforma + manifiestos (ABI / capacidades / resúmenes) | P4 |
 | Superficie | servicios (REST / WS / MCP) + interfaz web hikari + nodos remotos evernight | P5–P6 |
