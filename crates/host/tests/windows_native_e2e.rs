@@ -333,6 +333,58 @@ fn live_e2e_launch_then_inject_over_named_pipe() {
     drop(session);
 }
 
+/// 已运行目标 + 无传输环境：payload 按自身 pid 回落到 `\\.\pipe\kotama-<pid>`。
+#[test]
+fn live_e2e_attach_then_inject_over_default_pid_pipe() {
+    if !live_enabled() {
+        return;
+    }
+    let spin = spin_fixture();
+    let dll = agent_dll();
+    let child = ChildGuard(
+        Command::new(&spin)
+            .arg("30")
+            .env_remove("KOTAMA_PAYLOAD_PIPE")
+            .env_remove("KOTAMA_PAYLOAD_TCP")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn spin.exe without transport environment"),
+    );
+    let pid = child.0.id() as i32;
+    let (target, spin_base) = wait_for_main_module(pid, "spin.exe");
+
+    let server = NamedPipeServer::for_pid(pid).expect("deterministic default pipe");
+    let pipe_name = server.name().to_string();
+    assert!(pipe_name.ends_with(&format!("kotama-{pid}")));
+    let session = Session::with_injection(TargetProcess::open(pid).expect("open inject target"))
+        .expect("explicit injection grant");
+    let report = session
+        .inject(&dll, Duration::from_secs(15))
+        .expect("inject into an already-running target");
+    let modules = target.modules().expect("host module table");
+    let agent_base = find_module_base(&modules, "kotama_agent.dll")
+        .expect("injected payload must be visible through Toolhelp");
+    assert_eq!(agent_base, report.module_base);
+
+    let mut pipe = server
+        .accept(Duration::from_secs(20))
+        .expect("payload did not connect over the default pid pipe");
+    let ack = wire::handshake(&mut pipe).expect("handshake");
+    assert_eq!(ack.proto_version, kotama_proto::PROTO_VERSION);
+    let payload_modules = wire::list_modules(&mut pipe).expect("payload module list");
+    assert_eq!(payload_modules[0].base, spin_base);
+    let magic = wire::read_memory(&mut pipe, spin_base, 2).expect("payload read of image head");
+    assert_eq!(&magic, b"MZ");
+    eprintln!(
+        "# attach: pid={pid} pipe={pipe_name} spin_base={spin_base:#x} agent_base={agent_base:#x} proto={} magic={:02x?}",
+        ack.proto_version,
+        magic
+    );
+    drop(pipe);
+    drop(session);
+}
+
 /// kotama_load.exe 回归：只证明 loader 自身进程内的载荷可用，并断言子进程退出码。
 ///
 /// 这里**不**声称载荷进了子进程：载荷上报的主映像基址必须等于 kotama_load.exe 自己

@@ -39,8 +39,8 @@ Commands:
   live trace <pid> <addr-hex> [--seconds N]  INT3 breakpoint hit counting (Linux)
   live launch --preload <so> -- <cmd...>    Own-launch with the payload agent (Linux)
   live freeze <pid> <addr> u32:N --seconds N --write   Pin a value
-  live inject --payload <dll> [--transport pipe|tcp] -- <cmd...>
-                             Launch a target, inject, handshake (Windows)
+  live inject --payload <dll> [--transport pipe|tcp] [--pid <pid> | -- <cmd...>]
+                             Launch or attach, inject, handshake (Windows)
   export <path>            Emit annotation scripts for other RE tools
                              --format idc|idapython|rizin   (required)
   serve                    Start the service surface (web UI + MCP)       (not wired yet)
@@ -583,6 +583,7 @@ fn live_inject(args: &[String]) -> ExitCode {
 
     let mut payload: Option<String> = None;
     let mut transport = String::from("pipe");
+    let mut attach_pid: Option<i32> = None;
     let mut command: Vec<String> = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -590,6 +591,19 @@ fn live_inject(args: &[String]) -> ExitCode {
             "--payload" => payload = iter.next().cloned(),
             "--transport" => {
                 transport = iter.next().cloned().unwrap_or_default();
+            }
+            "--pid" => {
+                let Some(raw) = iter.next() else {
+                    eprintln!("kotama: --pid wants a number");
+                    return ExitCode::from(2);
+                };
+                match raw.parse::<i32>() {
+                    Ok(pid) => attach_pid = Some(pid),
+                    Err(_) => {
+                        eprintln!("kotama: pid must be a number, got {raw:?}");
+                        return ExitCode::from(2);
+                    }
+                }
             }
             "--" => {
                 command.extend(iter.cloned());
@@ -616,84 +630,115 @@ fn live_inject(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if command.is_empty() {
-        eprintln!("kotama: live inject wants a target after --");
-        return ExitCode::from(2);
-    }
-
-    let (lane, env_key, env_value) = match transport.as_str() {
-        "pipe" => match NamedPipeServer::new() {
-            Ok(server) => {
-                let name = server.name().to_string();
-                (Lane::Pipe(server), "KOTAMA_PAYLOAD_PIPE", name)
-            }
+    let (lane, child, pid, image_name) = if let Some(pid) = attach_pid {
+        if !command.is_empty() {
+            eprintln!("kotama: --pid and a launch command are mutually exclusive");
+            return ExitCode::from(2);
+        }
+        if transport != "pipe" {
+            eprintln!("kotama: --pid uses the deterministic named pipe; --transport tcp needs a launched target");
+            return ExitCode::from(2);
+        }
+        let server = match NamedPipeServer::for_pid(pid) {
+            Ok(server) => server,
             Err(err) => {
-                eprintln!("kotama: named pipe: {err}");
+                eprintln!("kotama: default pipe for pid {pid}: {err}");
                 return ExitCode::FAILURE;
             }
-        },
-        "tcp" => match TcpListener::bind(("127.0.0.1", 0)) {
-            Ok(listener) => match listener.local_addr() {
-                Ok(address) => (
-                    Lane::Tcp(listener),
-                    "KOTAMA_PAYLOAD_TCP",
-                    address.port().to_string(),
-                ),
+        };
+        (Lane::Pipe(server), None, pid, String::new())
+    } else {
+        if command.is_empty() {
+            eprintln!("kotama: live inject wants --pid <pid> or a target after --");
+            return ExitCode::from(2);
+        }
+        let (lane, env_key, env_value) = match transport.as_str() {
+            "pipe" => match NamedPipeServer::new() {
+                Ok(server) => {
+                    let name = server.name().to_string();
+                    (Lane::Pipe(server), "KOTAMA_PAYLOAD_PIPE", name)
+                }
                 Err(err) => {
-                    eprintln!("kotama: tcp address: {err}");
+                    eprintln!("kotama: named pipe: {err}");
                     return ExitCode::FAILURE;
                 }
             },
+            "tcp" => match TcpListener::bind(("127.0.0.1", 0)) {
+                Ok(listener) => match listener.local_addr() {
+                    Ok(address) => (
+                        Lane::Tcp(listener),
+                        "KOTAMA_PAYLOAD_TCP",
+                        address.port().to_string(),
+                    ),
+                    Err(err) => {
+                        eprintln!("kotama: tcp address: {err}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                Err(err) => {
+                    eprintln!("kotama: tcp listener: {err}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                eprintln!("kotama: --transport wants pipe or tcp, got {other:?}");
+                return ExitCode::from(2);
+            }
+        };
+        let child = match Command::new(&command[0])
+            .args(&command[1..])
+            .env(env_key, &env_value)
+            .env_remove(if env_key == "KOTAMA_PAYLOAD_PIPE" {
+                "KOTAMA_PAYLOAD_TCP"
+            } else {
+                "KOTAMA_PAYLOAD_PIPE"
+            })
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => ChildGuard(child),
             Err(err) => {
-                eprintln!("kotama: tcp listener: {err}");
+                eprintln!("kotama: cannot launch target: {err}");
                 return ExitCode::FAILURE;
             }
-        },
-        other => {
-            eprintln!("kotama: --transport wants pipe or tcp, got {other:?}");
-            return ExitCode::from(2);
-        }
+        };
+        let pid = child.0.id() as i32;
+        let image_name = Path::new(&command[0])
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (lane, Some(child), pid, image_name)
     };
-
-    let child = match Command::new(&command[0])
-        .args(&command[1..])
-        .env(env_key, &env_value)
-        .env_remove(if env_key == "KOTAMA_PAYLOAD_PIPE" {
-            "KOTAMA_PAYLOAD_TCP"
-        } else {
-            "KOTAMA_PAYLOAD_PIPE"
-        })
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => ChildGuard(child),
-        Err(err) => {
-            eprintln!("kotama: cannot launch target: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pid = child.0.id() as i32;
-    let image_name = Path::new(&command[0])
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let _child = child;
     let deadline = Instant::now() + Duration::from_secs(20);
     let (target, main_base) = loop {
         if let Ok(process) = TargetProcess::open(pid) {
             if let Ok(modules) = process.modules() {
-                if let Some(module) = modules.iter().find(|module| {
-                    Path::new(&module.path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case(&image_name))
-                }) {
+                let module = if image_name.is_empty() {
+                    modules.first()
+                } else {
+                    modules.iter().find(|module| {
+                        Path::new(&module.path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&image_name))
+                    })
+                };
+                if let Some(module) = module {
                     break (process, module.base);
                 }
             }
         }
         if Instant::now() >= deadline {
-            eprintln!("kotama: pid {pid} never exposed {image_name}");
+            eprintln!(
+                "kotama: pid {pid} never exposed {}",
+                if image_name.is_empty() {
+                    "a main module"
+                } else {
+                    image_name.as_str()
+                }
+            );
             return ExitCode::FAILURE;
         }
         std::thread::sleep(Duration::from_millis(50));

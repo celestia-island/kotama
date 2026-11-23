@@ -325,12 +325,22 @@ static int send_frame(Channel *channel, Buf *buffer)
 }
 
 // Open the host channel: KOTAMA_PAYLOAD_PIPE first (native Windows), then
-// KOTAMA_PAYLOAD_TCP (wine). The host sets exactly one of the two.
+// KOTAMA_PAYLOAD_TCP (wine). If neither is set, fall back to the deterministic
+// pipe name for this PID so an already-running target can be injected without
+// inheriting a transport environment variable.
 static int channel_open(Channel *channel)
 {
     char pipe_name[512];
     DWORD length =
         GetEnvironmentVariableA("KOTAMA_PAYLOAD_PIPE", pipe_name, (DWORD)sizeof(pipe_name));
+    char port_text[16];
+    DWORD tcp_length =
+        GetEnvironmentVariableA("KOTAMA_PAYLOAD_TCP", port_text, (DWORD)sizeof(port_text));
+    if(length == 0 && tcp_length == 0) {
+        snprintf(pipe_name, sizeof(pipe_name), "\\\\.\\pipe\\kotama-%lu",
+                 (unsigned long)GetCurrentProcessId());
+        length = (DWORD)strlen(pipe_name);
+    }
     if(length > 0 && length < sizeof(pipe_name)) {
         channel->is_pipe = 1;
         channel->sock = INVALID_SOCKET;
@@ -346,8 +356,7 @@ static int channel_open(Channel *channel)
         return 0;
     }
 
-    char port_text[16];
-    if(GetEnvironmentVariableA("KOTAMA_PAYLOAD_TCP", port_text, (DWORD)sizeof(port_text)) == 0) {
+    if(tcp_length == 0) {
         return 0;
     }
     int port = atoi(port_text);

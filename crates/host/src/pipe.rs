@@ -66,7 +66,21 @@ impl NamedPipeServer {
     /// # Errors
     /// CreateNamedPipeW 或 CreateEventW 失败（名字被抢占 / 资源不足）。
     pub fn new() -> Result<Self, HostError> {
-        let name = unique_name();
+        Self::with_name(unique_name())
+    }
+
+    /// 为既有目标 PID 建一个确定性管道名 `\\\\.\\pipe\\kotama-<pid>`。
+    ///
+    /// 目标是已经在运行、无法再注入环境变量的进程时，payload 会用自身 pid
+    /// 构造同一个名字回落连接；宿主必须在注入前先建好这个服务端实例。
+    ///
+    /// # Errors
+    /// 名字已被占用（另一个会话正在注入同一 pid）或 CreateNamedPipeW 失败。
+    pub fn for_pid(pid: i32) -> Result<Self, HostError> {
+        Self::with_name(format!(r"\\.\pipe\kotama-{pid}"))
+    }
+
+    fn with_name(name: String) -> Result<Self, HostError> {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: wide 是 NUL 结尾的有效管道名；安全属性 NULL = 默认（当前用户）；
         // nMaxInstances = 1（单客户端）；缓冲区与超时均为值参数。

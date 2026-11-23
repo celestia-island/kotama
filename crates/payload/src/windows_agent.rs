@@ -3,7 +3,8 @@
 //! Windows 载荷注册与传输：DllMain 登记 + CreateThread +
 //! **命名管道（KOTAMA_PAYLOAD_PIPE，原生默认）** / **回环 TCP（KOTAMA_PAYLOAD_TCP，wine）**。
 //!
-//! 车道选择：环境里设了 KOTAMA_PAYLOAD_PIPE 就走管道，否则退回 KOTAMA_PAYLOAD_TCP。
+//! 车道选择：KOTAMA_PAYLOAD_PIPE → KOTAMA_PAYLOAD_TCP；两者都没设时回落到按自身 pid
+//! 推导的 `\\.\pipe\kotama-<pid>`，用于注入既有进程（宿主无法再改目标环境）。
 //! 宿主每次只设一个：原生 Windows 用管道（见 host 的 pipe 模块），wine 用 TCP——wine
 //! 把 winsock 如实映射到宿主 TCP，而命名管道在 wine 里没有宿主侧入口。协议帧在两侧
 //! 完全一致（crate 根的 serve/dispatch 与 kotama-proto），传输层只提供 Read + Write。
@@ -82,17 +83,19 @@ unsafe extern "system" fn agent_thread(_param: *mut core::ffi::c_void) -> u32 {
         }
         return 0;
     }
-    let Ok(port) = std::env::var("KOTAMA_PAYLOAD_TCP") else {
-        return 0; // 不是 kotama 拉起的进程。
-    };
-    let Ok(port): Result<u16, _> = port.parse() else {
+    if let Ok(port) = std::env::var("KOTAMA_PAYLOAD_TCP") {
+        if let Ok(port) = port.parse::<u16>() {
+            if let Some(mut stream) = TcpAgent::connect(port) {
+                super::serve(&mut stream);
+            }
+        }
         return 0;
-    };
-    let mut stream = match TcpAgent::connect(port) {
-        Some(stream) => stream,
-        None => return 0,
-    };
-    super::serve(&mut stream);
+    }
+    // 两者都没设：按自身 pid 回落到确定性管道名（attach 到既有进程的注入）。
+    let name = format!(r"\\.\pipe\kotama-{}", std::process::id());
+    if let Some(mut stream) = PipeAgent::connect(&name) {
+        super::serve(&mut stream);
+    }
     0
 }
 
