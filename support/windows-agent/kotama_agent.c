@@ -504,6 +504,15 @@ static void handle(Reader *reader, Buf *out)
         return;
     }
 
+    // StackSnapshot is a Windows Rust-payload capability (self-captured stack via
+    // RtlCaptureStackBackTrace). This C agent never declared it in HelloAck, so a
+    // host that honours the handshake must not send it; if one does anyway the
+    // honest answer is a refusal, not a fake snapshot.
+    if(strcmp(name, "StackSnapshot") == 0) {
+        respond_error(out, "stack-snapshot is not supported by the C payload; it never declares that capability");
+        return;
+    }
+
     respond_error(out, "unknown method");
 }
 

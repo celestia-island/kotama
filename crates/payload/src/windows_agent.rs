@@ -20,6 +20,7 @@ use windows_sys::Win32::Foundation::FALSE;
 use windows_sys::Win32::Foundation::GENERIC_READ;
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::TRUE;
 use windows_sys::Win32::Networking::WinSock::connect;
@@ -40,8 +41,13 @@ use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::Storage::FileSystem::WriteFile;
 use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
+use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleExW;
+use windows_sys::Win32::System::LibraryLoader::GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
+use windows_sys::Win32::System::LibraryLoader::GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::CreateThread;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 /// 登记点：DllMain。attach 只起线程；detach 不做事（宿主收线 = 静默退出）。
 #[no_mangle]
@@ -253,5 +259,77 @@ impl Write for TcpAgent {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(()) // TCP 流无用户态缓冲。
+    }
+}
+
+/// 自抓栈最多抓取的帧数（`RtlCaptureStackBackTrace` 的实现上限是 62）。
+const MAX_CAPTURE_FRAMES: u32 = 62;
+
+/// `max_frames` 为 0 时的默认帧数。
+const DEFAULT_CAPTURE_FRAMES: u32 = 32;
+
+/// 自抓**当前（服务）线程**的栈：`RtlCaptureStackBackTrace` 取 VA → 模块基址 → RVA。
+///
+/// 不做符号化：dbghelp 是进程级、单线程的状态机，在目标进程里 `SymInitializeW` 会和
+/// 目标自己的符号处理器抢同一份全局状态（目标本身可能就是调试器 / 带 dbghelp 的程序）。
+/// 因此本函数只回 `module_base + module_rva`（+ 原 VA 作诊断）；符号化由宿主在场外对同一
+/// 份 Toolhelp 模块表做（见 `kotama_host::stack` 的 `SymFromAddrW` 车道）。
+///
+/// # Errors
+/// 目前不返回错误：抓不到帧就回空帧表（宿主可据此判空）。签名保留 `Result` 是为了
+/// 将来加「先决条件检查」（例如拒绝在 loader lock 上车道的调用）。
+pub(crate) fn capture_thread_stack(
+    max_frames: u32,
+) -> Result<Vec<kotama_proto::ThreadStack>, String> {
+    let requested = if max_frames == 0 {
+        DEFAULT_CAPTURE_FRAMES
+    } else {
+        max_frames.min(MAX_CAPTURE_FRAMES)
+    };
+    let mut slots: Vec<*mut core::ffi::c_void> = vec![std::ptr::null_mut(); requested as usize];
+    // SAFETY: slots 是可写指针数组且长度 = framestocapture；framestoskip = 0（本帧就是最内
+    // 一帧）；backtracehash 传 NULL 表示不需要哈希。返回值是实际写入的帧数（≤ 请求数）。
+    let captured =
+        unsafe { RtlCaptureStackBackTrace(0, requested, slots.as_mut_ptr(), std::ptr::null_mut()) };
+    let mut frames = Vec::with_capacity(captured as usize);
+    for slot in slots.iter().take(captured as usize) {
+        let address = *slot as u64;
+        if address == 0 {
+            continue;
+        }
+        let module_base = module_base_for(address);
+        frames.push(kotama_proto::StackFrame {
+            address,
+            module_base,
+            module_rva: if module_base == 0 {
+                0
+            } else {
+                address.saturating_sub(module_base)
+            },
+            symbol: String::new(),
+            displacement: 0,
+        });
+    }
+    // SAFETY: GetCurrentThreadId 无参数，返回当前（服务）线程 id。
+    let thread_id = unsafe { GetCurrentThreadId() };
+    Ok(vec![kotama_proto::ThreadStack { thread_id, frames }])
+}
+
+/// 一个地址所属模块的加载基址；0 = 不属于任何已加载模块。
+fn module_base_for(address: u64) -> u64 {
+    let mut module: HMODULE = std::ptr::null_mut();
+    // SAFETY: FROM_ADDRESS 时 lpmodulename 被解释为目标地址（只读，不解引用）；
+    // UNCHANGED_REFCOUNT 不增加模块引用计数，因此无需配对 FreeLibrary。
+    let ok = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            address as usize as *const u16,
+            &mut module,
+        )
+    };
+    if ok == 0 {
+        0
+    } else {
+        module as usize as u64
     }
 }

@@ -7,11 +7,13 @@
 use std::io::Read;
 use std::io::Write;
 
+use kotama_proto::Capability;
 use kotama_proto::Frame;
 use kotama_proto::Handshake;
 use kotama_proto::ModuleInfo;
 use kotama_proto::Request;
 use kotama_proto::Response;
+use kotama_proto::ThreadStack;
 
 use crate::HostError;
 
@@ -144,6 +146,41 @@ where
         }
         other => Err(HostError::Proc(format!(
             "unexpected read memory reply: {other:?}"
+        ))),
+    }
+}
+
+/// 让载荷自抓**它自己**服务线程的栈（`StackSnapshot` 能力）。
+///
+/// 能力门禁在宿主侧：载荷没在 `HelloAck` 里声明 `StackSnapshot` 就直接
+/// [`HostError::CapabilityDenied`]，**不**把请求发给不认识它的旧载荷（C agent）。
+/// 这一步也顺手钉住「加法能力靠握手声明」的语义：能力表是唯一判据。
+///
+/// 返回帧序由内向外，模块以加载基址标识（`module_base + module_rva`）；符号化是宿主
+/// 的事（载荷内不初始化 dbghelp，免得和目标自己的符号处理器抢进程级状态）。
+///
+/// # Errors
+/// 载荷未声明该能力、请求失败或对端返回错误。
+pub fn stack_snapshot<S>(
+    stream: &mut S,
+    handshake: &Handshake,
+    max_frames: u32,
+) -> Result<Vec<ThreadStack>, HostError>
+where
+    S: Read + Write,
+{
+    if !handshake.supports(Capability::StackSnapshot) {
+        return Err(HostError::CapabilityDenied(
+            "payload did not declare capability stack-snapshot in the handshake; refusing to send a request it cannot serve",
+        ));
+    }
+    match request(stream, &Request::StackSnapshot { max_frames })? {
+        Response::Stacks(stacks) => Ok(stacks),
+        Response::Error { code, message } => {
+            Err(HostError::Proc(format!("stack snapshot: {code} {message}")))
+        }
+        other => Err(HostError::Proc(format!(
+            "unexpected stack snapshot reply: {other:?}"
         ))),
     }
 }

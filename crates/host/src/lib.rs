@@ -9,8 +9,8 @@
 //!
 //! 地址约定：RVA = 进程绝对地址 − 映像基址，与静态侧（文件映像归一）同口径——
 //! 内容寻址身份因此跨静态/活体成立。写内存、冻结与远程注入仍由
-//! `control::Session` 的 capability 门禁显式开放；Windows trace 与外部栈回溯
-//! 不属本阶段。
+//! `control::Session` 的 capability 门禁显式开放；Windows 外部栈回溯（Toolhelp 线程 +
+//! StackWalk64 + dbghelp 符号）见 [`stack`]，它只做短暂挂起、**不是**冻结机制。
 //!
 //! Windows 原生车道的传输有两种：命名管道（默认，见 [`pipe`]）与回环 TCP（保留给
 //! wine）。两者与 Linux 的 unix socket 共用 [`wire`] 的帧编解码与只读巡检步骤。
@@ -23,6 +23,8 @@ pub mod launch;
 #[cfg(target_os = "windows")]
 pub mod pipe;
 pub mod scanner;
+#[cfg(target_os = "windows")]
+pub mod stack;
 #[cfg(target_os = "linux")]
 pub mod trace;
 #[cfg(target_os = "windows")]
@@ -63,6 +65,8 @@ pub enum HostError {
     Inject(String),
     /// 写操作未获授权（capability 门禁；负对照钉的就是它）。
     CapabilityDenied(&'static str),
+    /// 外部栈回溯失败（线程枚举 / 挂起恢复 / StackWalk64 / dbghelp 符号会话）。
+    Stack(String),
 }
 
 impl std::fmt::Display for HostError {
@@ -74,6 +78,7 @@ impl std::fmt::Display for HostError {
             Self::PeParse(msg) => write!(f, "pe parse: {msg}"),
             Self::Inject(msg) => write!(f, "inject: {msg}"),
             Self::CapabilityDenied(msg) => write!(f, "capability denied: {msg}"),
+            Self::Stack(msg) => write!(f, "stack: {msg}"),
         }
     }
 }

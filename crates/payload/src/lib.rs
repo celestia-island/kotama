@@ -10,7 +10,9 @@
 //! 的 wine 实现宿主侧无入口，纯原生 Windows 再评估。
 //!
 //! P2/P3 口径只实现**只读**方法：`Hello` / `ListModules` / `ReadMemory`；`WriteMemory`
-//! 显式回「未随门禁开放」，与宿主 capability 门禁成对。
+//! 显式回「未随门禁开放」，与宿主 capability 门禁成对。Windows 载荷另加**加法**能力
+//! `StackSnapshot`（`RtlCaptureStackBackTrace` 自抓服务线程栈，只回 module+RVA，符号化
+//! 留给宿主）；Linux 载荷不声明该能力，宿主因此不会发。
 
 #![allow(unsafe_code)] // 平台原语与 C ABI 边界；逐调用 SAFETY 注。
 
@@ -63,7 +65,7 @@ pub(crate) fn dispatch(request: Request) -> Response {
             Response::HelloAck(Handshake {
                 proto_version: kotama_proto::PROTO_VERSION,
                 abi_version: kotama::ABI_VERSION,
-                capabilities: kotama_proto::READ_ONLY_CAPABILITIES.to_vec(),
+                capabilities: capabilities(),
             })
         }
         Request::ListModules => match list_modules() {
@@ -84,7 +86,42 @@ pub(crate) fn dispatch(request: Request) -> Response {
             code: -32004,
             message: "payload write lane ships with the host capability gate (P4)".into(),
         },
+        Request::StackSnapshot { max_frames } => match stack_snapshot(max_frames) {
+            Ok(stacks) => Response::Stacks(stacks),
+            Err(message) => Response::Error {
+                code: -32005,
+                message,
+            },
+        },
     }
+}
+
+/// 本载荷在握手里声明的能力集。
+///
+/// Windows 载荷额外声明 `StackSnapshot`（自抓服务线程栈）；Linux 载荷没有该实现，
+/// 不声明——能力表必须诚实，宿主据 [`kotama_proto::Handshake::supports`] 决定发不发。
+#[cfg(target_os = "windows")]
+fn capabilities() -> Vec<kotama_proto::Capability> {
+    let mut capabilities = kotama_proto::READ_ONLY_CAPABILITIES.to_vec();
+    capabilities.push(kotama_proto::Capability::StackSnapshot);
+    capabilities
+}
+
+/// 非 Windows 载荷：只读能力集，不含 `StackSnapshot`。
+#[cfg(target_os = "linux")]
+fn capabilities() -> Vec<kotama_proto::Capability> {
+    kotama_proto::READ_ONLY_CAPABILITIES.to_vec()
+}
+
+#[cfg(target_os = "windows")]
+fn stack_snapshot(max_frames: u32) -> Result<Vec<kotama_proto::ThreadStack>, String> {
+    windows_agent::capture_thread_stack(max_frames)
+}
+
+/// 没有自抓能力的平台如实拒绝（而不是假装成功）。
+#[cfg(target_os = "linux")]
+fn stack_snapshot(_max_frames: u32) -> Result<Vec<kotama_proto::ThreadStack>, String> {
+    Err("stack snapshot is a windows payload capability; this payload does not declare it".into())
 }
 
 /// 传输帧（4 字节 LE 长度前缀 + msgpack；与宿主侧共用语义）。
