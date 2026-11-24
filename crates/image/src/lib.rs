@@ -946,6 +946,25 @@ mod tests {
     }
 
     #[test]
+    fn pe_exports_are_loaded_as_dynamic_symbols() {
+        let Some(path) = fixture("x86-windows-gnu/-O2/exports.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let module = LoadedModule::parse(&data).unwrap();
+        assert_eq!(module.container, Container::Pe32);
+        assert!(
+            module
+                .dynamic_symbols
+                .iter()
+                .any(|symbol| symbol.name == "fixture_exported"),
+            "exports missing: {:?}",
+            module.dynamic_symbols
+        );
+    }
+
+    #[test]
     fn module_id_is_stable_and_content_addressed() {
         let Some(path) = fixture("x86_64-linux-gnu/-O2/switch") else {
             eprintln!("skip: fixtures not built");
