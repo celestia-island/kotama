@@ -1728,6 +1728,7 @@ fn is_packed_thunk_tail(bytes: &[u8], tail: usize) -> bool {
 ///   所以要求前面是结构性代码边界（见 `has_structural_boundary`），且跳转目标落在执行节内。
 /// - 跳转 stub：16 对齐、前置对齐填充的单条 `jmp rel32`——编译器把函数体放到下一个
 ///   16 字节边界时留下的入口，IDA 也把它列为 5 字节函数。
+/// - 导入跳转 stub：`jmp [IAT]`（`FF 25`），槽位在非执行节，前面是 ret / int3 或另一个 stub。
 ///
 /// thunk 存在的意义就是跳到目标，所以目标也是函数起点。
 fn thunk_targets(
@@ -1735,6 +1736,11 @@ fn thunk_targets(
     exec_ranges: &[(u64, u64)],
 ) -> (BTreeSet<u64>, BTreeSet<u64>) {
     let space = module.address_space();
+    let image_base = if module.image_base != 0 {
+        module.image_base
+    } else {
+        pe_image_base(space, module.container).unwrap_or(0)
+    };
     let mut starts = BTreeSet::new();
     let mut jumps = BTreeSet::new();
     for (start, size) in exec_ranges {
@@ -1763,6 +1769,26 @@ fn thunk_targets(
             } else {
                 None
             };
+            // 导入跳转 stub：jmp [IAT 槽]（x64 rip 相对，x86 绝对 VA），槽位落在非执行节；
+            // 前面是 ret / int3 填充或另一个 stub（导入表按 6 字节连排）。IDA 把它们列为函数。
+            if window[0] == 0xFF && window[1] == 0x25 {
+                let slot = rel32_at(window, 1).and_then(|disp| {
+                    if module.arch.bitness() == 64 {
+                        Some(i64::try_from(rva + 6).ok()? + i64::from(disp))
+                    } else {
+                        Some(i64::from(disp as u32) - i64::try_from(image_base).ok()?)
+                    }
+                });
+                let in_data = slot
+                    .and_then(|slot| u64::try_from(slot).ok())
+                    .is_some_and(|slot| !in_exec_range(exec_ranges, slot));
+                let after_stub =
+                    offset >= 6 && bytes[offset - 6] == 0xFF && bytes[offset - 5] == 0x25;
+                if in_data && (matches!(bytes[offset - 1], 0xC3 | 0xCC) || after_stub) {
+                    starts.insert(rva);
+                }
+                continue;
+            }
             let Some((len, rel)) = adjustor.or(stub) else {
                 continue;
             };
@@ -3352,6 +3378,76 @@ mod tests {
         assert!(
             by_rva(0x1027).is_none(),
             "shared tail E must not be a function"
+        );
+    }
+
+    /// 导入跳转 stub：jmp [IAT 槽]，槽位在数据节；槽位落在代码里的同名形态不算。
+    #[test]
+    fn import_jump_stubs_are_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        // ret 之后：两个连排的导入 stub（x86 绝对 VA 指向 .data 里的 IAT 槽）
+        space.write(0x100F, &[0xC3]);
+        space.write(0x1010, &[0xFF, 0x25]);
+        space.write(0x1012, &0x40_2000u32.to_le_bytes());
+        space.write(0x1016, &[0xFF, 0x25]);
+        space.write(0x1018, &0x40_2004u32.to_le_bytes());
+        // 槽位落在代码里：不是导入 stub
+        space.write(0x102F, &[0xC3]);
+        space.write(0x1030, &[0xFF, 0x25]);
+        space.write(0x1032, &0x40_1010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".idata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        for rva in [0x1010u64, 0x1016] {
+            assert!(
+                functions
+                    .iter()
+                    .any(|function| function.rva == rva && function.size == 6),
+                "import stub {rva:#x} not discovered: {functions:?}"
+            );
+        }
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x1030),
+            "jmp into code is not an import stub: {functions:?}"
         );
     }
 
