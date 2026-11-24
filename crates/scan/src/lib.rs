@@ -1235,9 +1235,15 @@ fn frame_prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) 
         };
         let mut offset = usize::try_from((4 - (*start % 4)) % 4).unwrap_or(0);
         while offset + 4 <= bytes.len() {
-            if offset >= 2
+            let padded = offset >= 2
                 && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
-                && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00)
+                && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00);
+            let boundary = offset >= 1
+                && matches!(
+                    bytes[offset - 1],
+                    0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF | 0xCC | 0x90 | 0x00
+                );
+            if (padded || boundary)
                 && bytes[offset] == 0x55
                 && bytes[offset + 1] == 0x8B
                 && bytes[offset + 2] == 0xEC
@@ -1864,6 +1870,7 @@ mod tests {
             &[0x56, 0x8B, 0xF1, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3],
         );
         space.write(0x10E4, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x10E8, &[0x55, 0x8B, 0xEC, 0xC3]);
         space.write(0x10F0, &[0x56, 0x57, 0x8B, 0xF9, 0x8D, 0x77, 0x00, 0xC3]);
         space.write(0x1100, &[0x53, 0x56, 0x57, 0x8B, 0xF9, 0x8B, 0x00, 0xC3]);
         space.write(0x1110, &[0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0xC3]);
@@ -1902,6 +1909,7 @@ mod tests {
                 && prologue_targets.contains(&0x10C0)
                 && prologue_targets.contains(&0x10D0)
                 && prologue_targets.contains(&0x10E4)
+                && prologue_targets.contains(&0x10E8)
                 && prologue_targets.contains(&0x10F0)
                 && prologue_targets.contains(&0x1100)
                 && prologue_targets.contains(&0x1110)
