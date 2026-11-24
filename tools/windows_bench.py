@@ -170,8 +170,18 @@ def cli_attach_matrix(env):
         if not path.is_file():
             raise SystemExit("windows-bench: CLI attach input missing: " + str(path))
     print("\n=== windows-bench: CLI attach matrix ===", flush = True)
+    spin_x86 = REPO / "fixtures" / "generated" / "x86-windows-gnu" / "-O2" / "spin.exe"
+    agent_x86 = REPO / "dist" / "i686-pc-windows-gnu" / "kotama_agent.dll"
+    for path in (spin_x86, agent_x86):
+        if not path.is_file():
+            raise SystemExit(
+                "windows-bench: x86 attach input missing: " + str(path)
+                + " (agent: tools/build_windows_agent.py --target x86-windows-gnu)"
+            )
+    print("\n=== windows-bench: CLI attach matrix ===", flush = True)
     cli_attach_case("spin/c-agent", [str(spin), "30"], agent, {}, env)
     cli_attach_case("spin/rust-empty-env", [str(spin), "30"], rust_payload, {"KOTAMA_PAYLOAD_PIPE": ""}, env)
+    cli_attach_case("spin-x86/i686-c-agent", [str(spin_x86), "30"], agent_x86, {}, env)
     pwsh = shutil.which("pwsh")
     if pwsh:
         cli_attach_case("pwsh/low-base-exe", [pwsh, "-NoProfile", "-Command", "Start-Sleep 30"], agent, {}, env, settle = 2.0)
