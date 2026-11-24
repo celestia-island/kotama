@@ -1776,10 +1776,10 @@ fn thunk_targets(
     (starts, jumps)
 }
 
-/// 按指针宽度（4 字节）对齐、前置 ≥2 字节 `int3` 对齐填充、且能顺序解码到终结符的代码起点。
+/// 按 4 字节对齐、前置 ≥2 字节 `int3` 对齐填充、且能顺序解码到终结符的代码起点。
 ///
 /// [`prologue_targets`] 形状表的泛化：MSVC 把每个函数（包括没有任何引用的 leaf、模板
-/// 实例化、调整 thunk）按 16 字节对齐（COMDAT 折叠后的小函数也会落在 4 字节边界上）并用
+/// 实例化、调整 thunk）对齐到 16 字节，COMDAT 折叠后的小函数落在 4 字节边界上，并用
 /// `int3` 填充，而起点的指令形态无穷无尽。
 /// 只认 `int3`（`90 90` 常是 `mov edx,[eax+1]` 这类指令的 ModRM/disp 字节，
 /// 不是填充），且必须在 256 字节内、不遇非法指令地解码到 ret / 无条件跳转 / 间接跳转
@@ -1793,7 +1793,8 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
         let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
             continue;
         };
-        let alignment = u64::from(module.arch.bitness() / 8);
+        // COMDAT 折叠后的小函数按 4 字节粒度落位，与位宽无关。
+        let alignment = 4u64;
         let mut offset =
             usize::try_from((alignment - (*start % alignment)) % alignment).unwrap_or(0);
         while offset < bytes.len() {
