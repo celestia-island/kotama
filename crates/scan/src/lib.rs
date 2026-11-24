@@ -917,10 +917,8 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
         // 只要连续 8 项都能按 RVA 解释且像函数起点，就整段收下；这能
         // 纠正“错误 VA 目标恰好也像起点”时的逐个值误判。
         let mut run = Vec::new();
-        for chunk in bytes.chunks_exact(4) {
-            let mut raw = [0u8; 4];
-            raw.copy_from_slice(chunk);
-            let value = u64::from(u32::from_le_bytes(raw));
+        for chunk in bytes.as_chunks::<4>().0 {
+            let value = u64::from(u32::from_le_bytes(*chunk));
             if in_exec(value) && looks_like_function_start_weak(space, value) {
                 run.push(value);
             } else {
