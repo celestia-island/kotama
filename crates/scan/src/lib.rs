@@ -272,6 +272,22 @@ fn discover_impl(
             .evidence
             .insert(Evidence::PrologueTarget);
     }
+    // 调整器 thunk / 对齐跳转 stub 的起点是函数，它们 `jmp` 到的目标也是函数。
+    let (thunk_starts, thunk_jumps) = thunk_targets(&module, &exec_ranges);
+    for target in thunk_starts {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
+    }
+    for target in thunk_jumps {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::CallTarget);
+    }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
     let rvas: Vec<u64> = table.keys().copied().collect();
@@ -905,6 +921,11 @@ fn has_code_boundary_before(space: &dyn AddressSpace, rva: u64) -> bool {
     )
 }
 
+/// `sub ecx, [ecx-4]; jmp` 是 MSVC 虚基类调整器 thunk 的开头，不是 padding 噪声。
+fn is_vbtable_thunk(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes[2] == 0xFC && bytes[3] == 0xE9
+}
+
 /// `mov/lea reg, [ebp+disp]` is a frame-relative access, never a function entry.
 fn is_frame_relative_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 2) else {
@@ -935,14 +956,15 @@ fn is_ebp_disp_modrm(byte: u8) -> bool {
 }
 
 /// 明显不是函数起点的字节：ret、int3、null、常见的 padding 噪声形状
-/// `sub ecx, [ecx+disp]`（`2B 49`），以及 frame-relative 访问。
+/// `sub ecx, [ecx+disp]`（`2B 49`，但虚基类调整器 thunk `2B 49 FC E9` 除外），
+/// 以及 frame-relative 访问。
 fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 4) else {
         return false;
     };
     matches!(bytes[0], 0xCC | 0xC3 | 0x00)
         || (bytes[0] == 0x90 && bytes[1] == 0x90)
-        || (bytes[0] == 0x2B && bytes[1] == 0x49)
+        || (bytes[0] == 0x2B && bytes[1] == 0x49 && !is_vbtable_thunk(bytes))
         || (bytes[0] == 0x6A
             && bytes.len() >= 4
             && matches!(bytes[2], 0x8B | 0x8D)
@@ -1504,20 +1526,180 @@ fn byte_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                         && window[1] == 0x03
                         && window[2] == 0x58
                         && window[3] == 0xC3));
-            if !boundary && !hotpatch {
+            // 上一条指令是 `jmp rel8`（尾调用）同样是边界：它的最后一个字节是任意位移。
+            let rva = *start + u64::try_from(offset).unwrap_or(0);
+            let short_jump_target = rva as i64 + i64::from(i8::from_le_bytes([bytes[offset - 1]]));
+            let after_short_jump = offset >= 2
+                && bytes[offset - 2] == 0xEB
+                && short_jump_target >= 0
+                && in_exec_range(exec_ranges, short_jump_target as u64);
+            if !boundary && !hotpatch && !after_short_jump {
                 continue;
             }
-            let lea_push =
-                window[0] == 0x8D && window[1] == 0x41 && window[2] == 0x04 && window[3] == 0x50;
+            // 只有帧序言接受「短跳转之后」这种边界；其余形态仍要求单字节边界。
+            let lea_push = boundary
+                && window[0] == 0x8D
+                && window[1] == 0x41
+                && window[2] == 0x04
+                && window[3] == 0x50;
             let safe_frame = matches!(bytes[offset - 1], 0xC3 | 0xE9 | 0xEB | 0xCC | 0x90 | 0x00);
-            let frame = safe_frame && window[0] == 0x55 && window[1] == 0x8B && window[2] == 0xEC;
-            let tail_thunk = window[0] == 0x83 && window[1] == 0xE9 && window[3] == 0xE9;
+            let frame = (safe_frame || after_short_jump)
+                && window[0] == 0x55
+                && window[1] == 0x8B
+                && window[2] == 0xEC;
+            let tail_thunk =
+                boundary && window[0] == 0x83 && window[1] == 0xE9 && window[3] == 0xE9;
             if hotpatch || boundary_tiny || lea_push || frame || tail_thunk {
                 targets.insert(*start + u64::try_from(offset).unwrap_or(0));
             }
         }
     }
     targets
+}
+
+/// RVA 是否落在任一执行节内。
+fn in_exec_range(exec_ranges: &[(u64, u64)], rva: u64) -> bool {
+    exec_ranges
+        .iter()
+        .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+}
+
+/// MSVC 调整器 thunk：先修正 `ecx`（this 指针）再 `jmp rel32` 跳到真函数。
+/// 返回 (thunk 长度, rel32 所在偏移)；x64 多一个 `48` REX.W 前缀。
+fn adjustor_thunk_shape(window: &[u8]) -> Option<(usize, usize)> {
+    match window {
+        [0x2B, 0x49, 0xFC, 0xE9, ..] => Some((8, 3)),
+        [0x83, 0xC1 | 0xE9, _, 0xE9, ..] => Some((8, 3)),
+        [0x81, 0xC1 | 0xE9, _, _, _, _, 0xE9, ..] => Some((11, 6)),
+        [0x48, 0x2B, 0x49, 0xFC, 0xE9, ..] => Some((9, 4)),
+        [0x48, 0x83, 0xC1 | 0xE9, _, 0xE9, ..] => Some((9, 4)),
+        [0x48, 0x81, 0xC1 | 0xE9, _, _, _, _, 0xE9, ..] => Some((12, 7)),
+        _ => None,
+    }
+}
+
+/// 窗口 `at` 处（`E9` 之后）的 rel32。
+fn rel32_at(window: &[u8], at: usize) -> Option<i32> {
+    let bytes = window.get(at + 1..at + 5)?;
+    Some(i32::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// thunk 之前的结构性代码边界：`int3` / `nop` 对齐填充、`ret`、
+/// `jmp rel8`、`jmp rel32`（目标在节内）或节首。
+///
+/// 只看前一字节不够：`90` / `FF` / `00` 也常是前一条指令的位移字节
+/// （`mov ecx,[ebp-0x70]` 以 `90` 结尾），函数内的 adjustor 尾调用会借此混进来。
+fn has_structural_boundary(
+    bytes: &[u8],
+    offset: usize,
+    rva: u64,
+    exec_ranges: &[(u64, u64)],
+) -> bool {
+    if offset == 0 {
+        return true;
+    }
+    let back = |distance: usize| {
+        offset
+            .checked_sub(distance)
+            .and_then(|index| bytes.get(index))
+            .copied()
+    };
+    let padding = back(1) == Some(0xCC) || (back(1) == Some(0x90) && back(2) == Some(0x90));
+    let terminator = back(1) == Some(0xC3) || back(3) == Some(0xC2) || back(2) == Some(0xEB);
+    let jump = if back(5) == Some(0xE9) {
+        rel32_at(&bytes[offset - 5..], 0).is_some_and(|rel| {
+            i64::try_from(rva)
+                .ok()
+                .and_then(|rva| u64::try_from(rva + i64::from(rel)).ok())
+                .is_some_and(|target| in_exec_range(exec_ranges, target))
+        })
+    } else {
+        back(6) == Some(0xFF) && back(5) == Some(0x25)
+    };
+    padding || terminator || jump
+}
+
+/// 真 thunk 成表排列：后面紧跟对齐填充或下一个 thunk。函数里的 adjustor 尾调用
+/// （`mov ecx,[ebp-0x34]; add ecx,N; jmp`）后面则是普通代码，借此排除。
+fn is_packed_thunk_tail(bytes: &[u8], tail: usize) -> bool {
+    let Some(after) = bytes.get(tail..) else {
+        return true;
+    };
+    let padding = after.first() == Some(&0xCC)
+        || (after.first() == Some(&0x90) && after.get(1) == Some(&0x90));
+    if padding || adjustor_thunk_shape(after).is_some() {
+        return true;
+    }
+    // 同表混排的其它 thunk：导入跳转 / 导入调用 / this 调整后调用 / tiny getter /
+    // 热补丁序言 / 跳转 stub。
+    after.starts_with(&[0xFF, 0x25])
+        || after.starts_with(&[0xFF, 0x15])
+        || after.starts_with(&[0x8D, 0x41, 0x04, 0x50])
+        || (after.starts_with(&[0x8B, 0x41]) && after.get(3) == Some(&0xC3))
+        || after.starts_with(&[0x8B, 0xFF])
+        || after.first() == Some(&0xE9)
+}
+
+/// 调整器 thunk 与 16 对齐跳转 stub：返回 (起点集合, 它们的 `jmp` 目标集合)。
+///
+/// - 调整器 thunk（`sub/add ecx, …; jmp rel32`）是 vtable 项，布局紧凑、常不在
+///   16 字节边界上；它前面几乎总是另一个 thunk 的 `jmp rel32` 或 `int3` 填充，
+///   所以要求前面是结构性代码边界（见 `has_structural_boundary`），且跳转目标落在执行节内。
+/// - 跳转 stub：16 对齐、前置对齐填充的单条 `jmp rel32`——编译器把函数体放到下一个
+///   16 字节边界时留下的入口，IDA 也把它列为 5 字节函数。
+///
+/// thunk 存在的意义就是跳到目标，所以目标也是函数起点。
+fn thunk_targets(
+    module: &ViewAdapter<'_>,
+    exec_ranges: &[(u64, u64)],
+) -> (BTreeSet<u64>, BTreeSet<u64>) {
+    let space = module.address_space();
+    let mut starts = BTreeSet::new();
+    let mut jumps = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        for offset in 0..bytes.len() {
+            let Some(window) = bytes.get(offset..offset + 11) else {
+                break;
+            };
+            let rva = *start + u64::try_from(offset).unwrap_or(0);
+            let adjustor = if has_structural_boundary(bytes, offset, rva, exec_ranges) {
+                adjustor_thunk_shape(window)
+                    .and_then(|(len, at)| rel32_at(window, at).map(|rel| (len, rel)))
+                    .filter(|(len, _)| is_packed_thunk_tail(bytes, offset + len))
+            } else {
+                None
+            };
+            let stub = if window[0] == 0xE9
+                && offset >= 2
+                && rva % 16 == 0
+                && matches!(bytes[offset - 1], 0xCC | 0x90)
+                && matches!(bytes[offset - 2], 0xCC | 0x90)
+            {
+                rel32_at(window, 0).map(|rel| (5usize, rel))
+            } else {
+                None
+            };
+            let Some((len, rel)) = adjustor.or(stub) else {
+                continue;
+            };
+            let next = rva.saturating_add(u64::try_from(len).unwrap_or(0));
+            let jump = i64::try_from(next)
+                .ok()
+                .and_then(|next| u64::try_from(next + i64::from(rel)).ok())
+                .filter(|jump| in_exec_range(exec_ranges, *jump));
+            let Some(jump) = jump else {
+                continue;
+            };
+            starts.insert(rva);
+            if !is_frame_relative_start(space, jump) {
+                jumps.insert(jump);
+            }
+        }
+    }
+    (starts, jumps)
 }
 
 /// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
@@ -2418,6 +2600,171 @@ mod tests {
             !functions.iter().any(|function| function.rva == 0x1010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "non-boundary target was accepted: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn adjustor_thunks_alignment_stubs_and_short_jump_frames_are_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x1000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        space.write(0x1000, &[0xC3]);
+        // 16 对齐、int3 填充的虚基类调整器 thunk：sub ecx,[ecx-4]; jmp 0x1100
+        space.write(0x101E, &[0xCC, 0xCC]);
+        space.write(0x1020, &[0x2B, 0x49, 0xFC, 0xE9]);
+        space.write(0x1024, &(0x1100i32 - 0x1028i32).to_le_bytes());
+        // 紧随其后的非 4 对齐 thunk：前一条是上一个 thunk 的 jmp rel32
+        space.write(0x1028, &[0x83, 0xC1, 0x04, 0xE9]);
+        space.write(0x102C, &(0x1110i32 - 0x1030i32).to_le_bytes());
+        // sub ecx, imm32; jmp 0x1120（同样紧跟上一个 thunk）
+        space.write(0x1030, &[0x81, 0xE9, 0x10, 0x00, 0x00, 0x00, 0xE9]);
+        space.write(0x1037, &(0x1120i32 - 0x103Bi32).to_le_bytes());
+        space.write(0x103B, &[0xCC]);
+        // 16 对齐、前置填充的跳转 stub：jmp 0x1080，其后 11 字节 int3
+        space.write(0x106E, &[0xCC, 0xCC]);
+        space.write(0x1070, &[0xE9, 0x0B, 0x00, 0x00, 0x00]);
+        space.write(0x1075, &[0xCC; 11]);
+        space.write(0x1080, &[0x56, 0x8B, 0xF1, 0xC3]);
+        // 上一条是 jmp rel8 尾调用的帧序言
+        space.write(0x1150, &[0xEB, 0x0E]);
+        space.write(0x1152, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x1160, &[0xC3]);
+        // thunk / stub 的目标函数体
+        space.write(0x1100, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x1110, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x1120, &[0xB8, 0x00, 0x00, 0x00, 0x00, 0xC3]);
+        // 反例：目标不在执行节内的 thunk；无边界的调整器 thunk；非 16 对齐的 stub
+        space.write(0x11A0, &[0xCC]);
+        space.write(0x11A1, &[0x2B, 0x49, 0xFC, 0xE9, 0x00, 0x00, 0x10, 0x00]);
+        // `mov ecx,[ebp-0x70]` 以 0x90 结尾不是边界：这是函数内的 adjustor 尾调用
+        space.write(0x11A8, &[0x8B, 0x4D, 0x90]);
+        space.write(0x11AB, &[0x83, 0xC1, 0x08, 0xE9]);
+        space.write(0x11AF, &(0x1100i32 - 0x11B3i32).to_le_bytes());
+        // ret 之后、后面接普通代码的尾调用同样不是 thunk
+        space.write(0x11C0, &[0xC3]);
+        space.write(0x11C1, &[0x83, 0xC1, 0x04, 0xE9]);
+        space.write(0x11C5, &(0x1100i32 - 0x11CAi32).to_le_bytes());
+        space.write(0x11C9, &[0x8B, 0x45, 0xF0]);
+        space.write(0x11B0, &[0x8B, 0xC1]);
+        space.write(0x11B2, &[0x83, 0xE9, 0x04, 0xE9]);
+        space.write(0x11B6, &(0x1100i32 - 0x11BAi32).to_le_bytes());
+        space.write(0x11D1, &[0xCC, 0xCC]);
+        space.write(0x11D3, &[0xE9, 0x0B, 0x00, 0x00, 0x00]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        let has = |rva: u64, evidence: Evidence| {
+            functions
+                .iter()
+                .any(|function| function.rva == rva && function.evidence.contains(&evidence))
+        };
+        for rva in [0x1020u64, 0x1028, 0x1030, 0x1070, 0x1152] {
+            assert!(
+                has(rva, Evidence::PrologueTarget),
+                "thunk/stub/frame at {rva:#x} not discovered: {functions:?}"
+            );
+        }
+        for rva in [0x1080u64, 0x1100, 0x1110, 0x1120] {
+            assert!(
+                has(rva, Evidence::CallTarget),
+                "thunk target {rva:#x} not discovered: {functions:?}"
+            );
+        }
+        for rva in [0x11A1u64, 0x11AB, 0x11B2, 0x11C1, 0x11D3] {
+            assert!(
+                !functions.iter().any(|function| function.rva == rva),
+                "invalid thunk at {rva:#x} was accepted: {functions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vtable_pointing_at_adjustor_thunk_is_accepted() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0xCC, 0xCC]);
+        space.write(0x1010, &[0x2B, 0x49, 0xFC, 0xE9]);
+        space.write(0x1014, &(0x1100i32 - 0x1018i32).to_le_bytes());
+        space.write(0x1100, &[0x55, 0x8B, 0xEC, 0xC3]);
+        // vtable 指向一个 `sub ecx,[ecx+8]` 开头、后接 ret 的普通函数：仍是噪声形状
+        space.write(0x1020, &[0x2B, 0x49, 0x08, 0xC3]);
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        space.write(0x2004, &0x40_1020u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".rdata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "vtable adjustor thunk was rejected: {functions:?}"
+        );
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x1020
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "sub ecx,[ecx+8] noise was accepted: {functions:?}"
         );
     }
 
