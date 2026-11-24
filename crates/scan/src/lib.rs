@@ -1429,7 +1429,17 @@ fn aligned_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)])
                     || (window[0] == 0x8B
                         && window[1] == 0xFF
                         && window[2] == 0x56
-                        && window[3] == 0x57);
+                        && window[3] == 0x57)
+                    || (window[0] == 0x8B && window[1] == 0x01 && window[2] == 0xC3)
+                    || (window[0] == 0x8B && window[1] == 0xC1 && window[2] == 0xC3)
+                    || (window[0] == 0x33
+                        && window[1] == 0xC0
+                        && window[2] == 0x40
+                        && window[3] == 0xC3)
+                    || (window[0] == 0x6A
+                        && window[1] == 0x03
+                        && window[2] == 0x58
+                        && window[3] == 0xC3);
                 if thunk || hotpatch || common {
                     targets.insert(*start + u64::try_from(offset).unwrap_or(0));
                 }
@@ -2125,6 +2135,10 @@ mod tests {
         space.write(0x1240, &[0x8B, 0xFF, 0x56, 0x8B, 0xF1, 0xC3]);
         space.write(0x1250, &[0x8B, 0xFF, 0x53, 0x56, 0x8B, 0xC1, 0xC3]);
         space.write(0x1260, &[0x8B, 0xFF, 0x56, 0x57, 0x8B, 0xC1, 0xC3]);
+        space.write(0x1270, &[0x8B, 0x01, 0xC3]);
+        space.write(0x1280, &[0x8B, 0xC1, 0xC3]);
+        space.write(0x1290, &[0x33, 0xC0, 0x40, 0xC3]);
+        space.write(0x12A0, &[0x6A, 0x03, 0x58, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -2183,7 +2197,11 @@ mod tests {
                 && prologue_targets.contains(&0x1230)
                 && prologue_targets.contains(&0x1240)
                 && prologue_targets.contains(&0x1250)
-                && prologue_targets.contains(&0x1260),
+                && prologue_targets.contains(&0x1260)
+                && prologue_targets.contains(&0x1270)
+                && prologue_targets.contains(&0x1280)
+                && prologue_targets.contains(&0x1290)
+                && prologue_targets.contains(&0x12A0),
             "prologue targets not discovered: {functions:?}"
         );
     }
