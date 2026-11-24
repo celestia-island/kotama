@@ -1112,7 +1112,11 @@ fn prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTr
                 || (window[0] == 0x51
                     && window[1] == 0x8B
                     && window[2] == 0x44
-                    && window[3] == 0x24);
+                    && window[3] == 0x24)
+                || (window[0] == 0x56
+                    && window[1] == 0x8B
+                    && window[2] == 0xF1
+                    && window[3] == 0xE8);
             if padded && prologue {
                 targets.insert(rva);
             }
@@ -1731,6 +1735,10 @@ mod tests {
         space.write(0x10A0, &[0x51, 0x56, 0x8B, 0xF1, 0xC3]);
         space.write(0x10B0, &[0x56, 0x8D, 0x71, 0xF0, 0xC3]);
         space.write(0x10C0, &[0x51, 0x8B, 0x44, 0x24, 0xC3]);
+        space.write(
+            0x10D0,
+            &[0x56, 0x8B, 0xF1, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3],
+        );
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -1762,7 +1770,8 @@ mod tests {
                 && prologue_targets.contains(&0x1090)
                 && prologue_targets.contains(&0x10A0)
                 && prologue_targets.contains(&0x10B0)
-                && prologue_targets.contains(&0x10C0),
+                && prologue_targets.contains(&0x10C0)
+                && prologue_targets.contains(&0x10D0),
             "prologue targets not discovered: {functions:?}"
         );
     }
