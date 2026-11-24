@@ -819,7 +819,29 @@ fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 2) else {
         return false;
     };
-    matches!(bytes[0], 0xCC | 0xC3 | 0x00) || (bytes[0] == 0x2B && bytes[1] == 0x49)
+    if matches!(bytes[0], 0xCC | 0xC3 | 0x00) || (bytes[0] == 0x2B && bytes[1] == 0x49) {
+        return true;
+    }
+    // `mov/lea reg, [ebp+disp]` is a frame-relative access, never a function entry.
+    matches!(bytes[0], 0x8B | 0x8D)
+        && matches!(
+            bytes[1],
+            0x45 | 0x4D
+                | 0x55
+                | 0x5D
+                | 0x65
+                | 0x6D
+                | 0x75
+                | 0x7D
+                | 0x85
+                | 0x8D
+                | 0x95
+                | 0x9D
+                | 0xA5
+                | 0xAD
+                | 0xB5
+                | 0xBD
+        )
 }
 
 /// 较宽的起点判定：在强序言之外，接受 getter / 常量返回 / 导入 thunk 的常见开头。
@@ -1726,7 +1748,9 @@ mod tests {
         };
         space.write(0x1000, &[0xC3]);
         space.write(0x1010, &[0xCC, 0xCC, 0xCC, 0xCC]);
+        space.write(0x1020, &[0x8D, 0x4D, 0x08, 0xC3]);
         space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        space.write(0x2004, &0x40_1020u32.to_le_bytes());
         let sections = vec![
             SectionInfo {
                 rva: 0x1000,
@@ -1753,8 +1777,10 @@ mod tests {
         };
         let functions = discover_with(view, &space);
         assert!(
-            !functions.iter().any(|function| function.rva == 0x1010
-                && function.evidence.contains(&Evidence::PointerTarget)),
+            !functions
+                .iter()
+                .any(|function| matches!(function.rva, 0x1010 | 0x1020)
+                    && function.evidence.contains(&Evidence::PointerTarget)),
             "degenerate target was accepted: {functions:?}"
         );
     }
