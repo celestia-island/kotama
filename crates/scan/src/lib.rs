@@ -1417,7 +1417,11 @@ fn aligned_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)])
                     || (window[0] == 0x8A
                         && window[1] == 0x44
                         && window[2] == 0x24
-                        && window[3] == 0x04);
+                        && window[3] == 0x04)
+                    || (window[0] == 0x8B
+                        && window[1] == 0xFF
+                        && window[2] == 0x56
+                        && window[3] == 0x8B);
                 if thunk || hotpatch || common {
                     targets.insert(*start + u64::try_from(offset).unwrap_or(0));
                 }
@@ -2110,6 +2114,7 @@ mod tests {
         space.write(0x1210, &[0x56, 0x8B, 0xF1, 0x8B, 0x4C, 0x24, 0x08, 0xC3]);
         space.write(0x1220, &[0x80, 0x79, 0x38, 0x00, 0x74, 0x1B, 0xC3]);
         space.write(0x1230, &[0x53, 0x56, 0x8B, 0xD9, 0xC3]);
+        space.write(0x1240, &[0x8B, 0xFF, 0x56, 0x8B, 0xF1, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -2165,7 +2170,8 @@ mod tests {
                 && prologue_targets.contains(&0x1200)
                 && prologue_targets.contains(&0x1210)
                 && prologue_targets.contains(&0x1220)
-                && prologue_targets.contains(&0x1230),
+                && prologue_targets.contains(&0x1230)
+                && prologue_targets.contains(&0x1240),
             "prologue targets not discovered: {functions:?}"
         );
     }
