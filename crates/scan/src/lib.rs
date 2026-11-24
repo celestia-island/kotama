@@ -802,6 +802,17 @@ fn pe_image_base(space: &dyn AddressSpace, container: Container) -> Option<u64> 
     }
 }
 
+/// 函数起点前应有代码边界：填充、ret 或跳转；避免从指令中间开始。
+fn has_code_boundary_before(space: &dyn AddressSpace, rva: u64) -> bool {
+    let Some(bytes) = space.read(rva.saturating_sub(1), 1) else {
+        return true;
+    };
+    matches!(
+        bytes[0],
+        0xCC | 0x90 | 0x00 | 0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF
+    )
+}
+
 /// 明显不是函数起点的字节：ret、int3、null，以及常见的 padding 噪声形状
 /// `sub ecx, [ecx+disp]`（`2B 49`）。
 fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
@@ -932,7 +943,10 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
             };
             let plausible = looks_like_function_start(space, target)
                 || (prefer_rva && looks_like_function_start_weak(space, target));
-            if target % pointer_size as u64 == 0 && plausible {
+            if target % pointer_size as u64 == 0
+                && plausible
+                && has_code_boundary_before(space, target)
+            {
                 targets.insert(target);
             }
         }
@@ -1002,7 +1016,10 @@ fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BT
                 } else {
                     continue;
                 };
-                if rva % 4 == 0 && looks_like_function_start(space, rva) {
+                if rva % 4 == 0
+                    && looks_like_function_start(space, rva)
+                    && has_code_boundary_before(space, rva)
+                {
                     targets.insert(rva);
                 }
             }
@@ -1698,6 +1715,61 @@ mod tests {
             !functions.iter().any(|function| function.rva == 0x1010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "degenerate target was accepted: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn pointer_target_without_code_boundary_is_rejected() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0x8B, 0x8B]);
+        space.write(0x1010, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "non-boundary target was accepted: {functions:?}"
         );
     }
 
