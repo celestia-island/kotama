@@ -337,7 +337,8 @@ fn discover_impl(
         );
     }
     let known_starts: BTreeSet<u64> = rvas.iter().copied().collect();
-    let mut out = refine_bodies(&module, &exec_ranges, rvas, &table);
+    let call_sites = direct_call_sites(&module, &exec_ranges);
+    let mut out = refine_bodies(&module, &exec_ranges, rvas, &table, &call_sites);
     expand_inferred_sizes(&module, &exec_ranges, &known_starts, &mut out);
     out.sort_by_key(|entry| entry.rva);
     out
@@ -357,6 +358,7 @@ fn refine_bodies(
     exec_ranges: &[(u64, u64)],
     rvas: Vec<u64>,
     table: &BTreeMap<u64, Builder>,
+    call_sites: &BTreeMap<u64, BTreeSet<u64>>,
 ) -> Vec<FunctionEntry> {
     let space = module.address_space();
     let bitness = module.arch.bitness();
@@ -434,8 +436,13 @@ fn refine_bodies(
             if next >= section_limit {
                 break;
             }
+            // 被别的函数直接 call 的候选即使能 fall-through 到达，也是独立函数（IDA 同样切分）；
+            // 只有函数内部的 call 才允许吸收。
+            let called_from_outside = call_sites
+                .get(&next)
+                .is_some_and(|sites| sites.iter().any(|site| !(start..next).contains(site)));
             match table.get(&next) {
-                Some(absorbed) if absorbed.size.is_none() => {
+                Some(absorbed) if absorbed.size.is_none() && !called_from_outside => {
                     merged.extend(absorbed.evidence.iter().copied());
                     consumed += 1;
                 }
@@ -1843,6 +1850,35 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
     }
     false
 }
+/// 直接（rel）call 的位置 → 目标，按目标归组（用于判断候选是否被外部函数调用）。
+fn direct_call_sites(
+    module: &ViewAdapter<'_>,
+    exec_ranges: &[(u64, u64)],
+) -> BTreeMap<u64, BTreeSet<u64>> {
+    let mut sites: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    let bitness = module.arch.bitness();
+    let space = module.address_space();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut decoder = Decoder::with_ip(bitness, bytes, *start, DecoderOptions::NONE);
+        let mut buffer = Instruction::default();
+        while decoder.can_decode() {
+            decoder.decode_out(&mut buffer);
+            if buffer.flow_control() != FlowControl::Call {
+                continue;
+            }
+            if let Some(target) = direct_near_target(&buffer) {
+                if in_exec_range(exec_ranges, target) && !is_frame_relative_start(space, target) {
+                    sites.entry(target).or_default().insert(buffer.ip());
+                }
+            }
+        }
+    }
+    sites
+}
+
 fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
     let bitness = module.arch.bitness();
@@ -3246,6 +3282,77 @@ mod tests {
                 "non-code or fake padding at {rva:#x} was accepted: {functions:?}"
             );
         }
+    }
+
+    /// 被别的函数直接 call 的候选，即使前一函数无终结符地 fall-through 到它，也是独立函数；
+    /// 只被本函数内部 call 的共享尾块仍被吸收。
+    #[test]
+    fn externally_called_fallthrough_candidates_are_split() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0xCC; 0x1000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        // A：push ecx; push edx; 无终结符直接落到 B
+        space.write(0x1000, &[0x51, 0x52]);
+        // B：xor eax,eax; pop edx; pop ecx; ret（被 C 外部 call）
+        space.write(0x1002, &[0x33, 0xC0, 0x5A, 0x59, 0xC3]);
+        // C：call B; ret
+        space.write(0x1010, &[0xE8]);
+        space.write(0x1011, &((0x1002i32 - 0x1015i32).to_le_bytes()));
+        space.write(0x1015, &[0xC3]);
+        // D：call 内部尾块 E; push; pop —— 无终结符直接落到 E，E 只被 D 自己调用
+        space.write(0x1020, &[0xE8]);
+        space.write(0x1021, &((0x1027i32 - 0x1025i32).to_le_bytes()));
+        space.write(0x1025, &[0x50, 0x58]);
+        space.write(0x1027, &[0x33, 0xC0, 0x40, 0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        let by_rva = |rva: u64| functions.iter().find(|function| function.rva == rva);
+        let a = by_rva(0x1000).expect("A");
+        assert_eq!(
+            a.size, 2,
+            "A must stop where the externally called B begins"
+        );
+        assert!(
+            by_rva(0x1002)
+                .is_some_and(|function| function.evidence.contains(&Evidence::CallTarget)),
+            "externally called B must be its own function: {functions:?}"
+        );
+        let d = by_rva(0x1020).expect("D");
+        assert!(
+            d.size == 0xB,
+            "internally called tail E stays absorbed into D (size {:x})",
+            d.size
+        );
+        assert!(
+            by_rva(0x1027).is_none(),
+            "shared tail E must not be a function"
+        );
     }
 
     #[test]
