@@ -1389,11 +1389,24 @@ fn aligned_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)])
             if boundary {
                 let window = &bytes[offset..offset + 5];
                 let thunk = window[0] == 0x83 && window[1] == 0xE9 && window[3] == 0xE9;
-                let hotpatch = window[0] == 0x8B
+                let hotpatch = (window[0] == 0x8B
                     && window[1] == 0xFF
                     && window[2] == 0x55
                     && window[3] == 0x8B
-                    && window[4] == 0xEC;
+                    && window[4] == 0xEC)
+                    || (window[0] == 0x8B
+                        && window[1] == 0xFF
+                        && window[2] == 0x56
+                        && window[3] == 0x8B)
+                    || (window[0] == 0x8B
+                        && window[1] == 0xFF
+                        && window[2] == 0x56
+                        && window[3] == 0x57)
+                    || (window[0] == 0x8B && window[1] == 0x01 && window[2] == 0xC3)
+                    || (window[0] == 0x6A
+                        && window[1] == 0x03
+                        && window[2] == 0x58
+                        && window[3] == 0xC3);
                 let common = (window[0] == 0x51
                     && window[1] == 0x56
                     && window[2] == 0x8B
@@ -1472,6 +1485,20 @@ fn byte_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                 bytes[offset - 1],
                 0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF | 0xCC | 0x90 | 0x00
             );
+            let boundary_tiny = boundary
+                && ((window[0] == 0x8B
+                    && window[1] == 0xFF
+                    && window[2] == 0x56
+                    && window[3] == 0x8B)
+                    || (window[0] == 0x8B
+                        && window[1] == 0xFF
+                        && window[2] == 0x56
+                        && window[3] == 0x57)
+                    || (window[0] == 0x8B && window[1] == 0x01 && window[2] == 0xC3)
+                    || (window[0] == 0x6A
+                        && window[1] == 0x03
+                        && window[2] == 0x58
+                        && window[3] == 0xC3));
             if !boundary && !hotpatch {
                 continue;
             }
@@ -1480,7 +1507,7 @@ fn byte_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
             let safe_frame = matches!(bytes[offset - 1], 0xC3 | 0xE9 | 0xEB | 0xCC | 0x90 | 0x00);
             let frame = safe_frame && window[0] == 0x55 && window[1] == 0x8B && window[2] == 0xEC;
             let tail_thunk = window[0] == 0x83 && window[1] == 0xE9 && window[3] == 0xE9;
-            if hotpatch || lea_push || frame || tail_thunk {
+            if hotpatch || boundary_tiny || lea_push || frame || tail_thunk {
                 targets.insert(*start + u64::try_from(offset).unwrap_or(0));
             }
         }
@@ -2135,10 +2162,12 @@ mod tests {
         space.write(0x1240, &[0x8B, 0xFF, 0x56, 0x8B, 0xF1, 0xC3]);
         space.write(0x1250, &[0x8B, 0xFF, 0x53, 0x56, 0x8B, 0xC1, 0xC3]);
         space.write(0x1260, &[0x8B, 0xFF, 0x56, 0x57, 0x8B, 0xC1, 0xC3]);
+        space.write(0x12A0, &[0xC3]);
+        space.write(0x12A1, &[0x8B, 0xFF, 0x56, 0x8B, 0xF1, 0xC3]);
         space.write(0x1270, &[0x8B, 0x01, 0xC3]);
         space.write(0x1280, &[0x8B, 0xC1, 0xC3]);
         space.write(0x1290, &[0x33, 0xC0, 0x40, 0xC3]);
-        space.write(0x12A0, &[0x6A, 0x03, 0x58, 0xC3]);
+        space.write(0x12B0, &[0x6A, 0x03, 0x58, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -2201,7 +2230,8 @@ mod tests {
                 && prologue_targets.contains(&0x1270)
                 && prologue_targets.contains(&0x1280)
                 && prologue_targets.contains(&0x1290)
-                && prologue_targets.contains(&0x12A0),
+                && prologue_targets.contains(&0x12A1)
+                && prologue_targets.contains(&0x12B0),
             "prologue targets not discovered: {functions:?}"
         );
     }
