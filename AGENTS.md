@@ -94,10 +94,11 @@
   - 注入支持 x64→x64 与 x64→x86（WOW64）：跨位宽时按目标进程里的 32 位 kernel32 导出表
     解析 `LoadLibraryW`；x86 载荷 = `dist/i686-pc-windows-gnu/kotama_agent.dll`（pack 车道
     经 `tools/build_windows_agent.py --target x86-windows-gnu` 产出），attach 矩阵与 host live
+    e2e 各含一条 x86 目标车道（夹具 `x86-windows-gnu/-O2/spin.exe`）。
   - ⚠️ 各 worktree 的 `fixtures/generated` 是指向 `_worktree/kotama/windows-phase/fixtures/generated` 的 junction（2026-11-25 实踩）：
     `git worktree remove` 会**穿过 junction** 把共享夹具删空。移除 worktree 前先 `cmd /c rmdir <wt>\fixtures\generated`
     （只删链接），再 remove；被删空后用 `tools/build_fixtures.py --run` 与 `--targets x86_64-windows-msvc x86-windows-msvc --run` 重建。
-    e2e 各含一条 x86 目标车道（夹具 `x86-windows-gnu/-O2/spin.exe`）。
+
 
 ## 版本声明
 
