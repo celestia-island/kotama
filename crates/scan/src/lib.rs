@@ -6,7 +6,10 @@
 //! - `dynsym`：ELF dynsym 导出的函数
 //! - `pdata`：PE64 `.pdata` 的 `RUNTIME_FUNCTION`（编译器自记的精确边界）
 //! - `entry`：映像入口点
-//! - `call`：可执行节的直接 `call`/`jmp` 目标（线性反汇编收集；strip 二进制的主要信号）
+//! - `call`：可执行节的直接 `call` 目标（线性反汇编收集；strip 二进制的主要信号）
+//! - `pointer`：非执行节里的函数指针（回调表 / vtable / 手工分派表）
+//! - `immediate`：代码里的绝对地址立即数（`push offset` / `mov reg, offset`）
+//! - `prologue`：16 字节对齐、前面有填充的 `sub esp, imm` 序言
 //!
 //! 长度推断：没有边界的条目按「到下一个函数条目的距离」补（`size_inferred = true`）。
 //! 确定性：所有输出按 RVA 升序、证据集合排序稳定；同一输入两次发现逐字段相同。
@@ -51,6 +54,7 @@ struct Builder {
 struct ViewAdapter<'a> {
     container: Container,
     arch: Arch,
+    image_base: u64,
     entry_rva: Option<u64>,
     sections: &'a [SectionInfo],
     symbols: &'a [SymbolInfo],
@@ -74,6 +78,8 @@ pub struct ScanView<'a> {
     pub arch: Arch,
     /// 入口 RVA（无则 `None`）。
     pub entry_rva: Option<u64>,
+    /// PE 的首选映像基址；0 表示从地址空间的 PE 头读取（活体缓存）。
+    pub image_base: u64,
     /// 节表（执行节判定 / `.pdata` 定位都靠它）。
     pub sections: &'a [SectionInfo],
     /// ELF symtab 函数符号（活体一般为空）。
@@ -92,6 +98,7 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
     let view = ScanView {
         container: module.container,
         arch: module.arch,
+        image_base: module.image_base,
         entry_rva: module.entry_rva,
         sections: &module.sections,
         symbols: &module.symbols,
@@ -111,6 +118,7 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
     let view = ViewAdapter {
         container: module.container,
         arch: module.arch,
+        image_base: module.image_base,
         entry_rva: module.entry_rva,
         sections: &module.sections,
         symbols: &module.symbols,
@@ -137,6 +145,7 @@ fn discover_impl(
     let module = ViewAdapter {
         container: view.container,
         arch: view.arch,
+        image_base: view.image_base,
         entry_rva: view.entry_rva,
         sections: view.sections,
         symbols: view.symbols,
@@ -206,20 +215,41 @@ fn discover_impl(
             .insert(Evidence::Entry);
     }
 
-    // 5) 直接 call/jmp 目标（strip 二进制的主力信号；数据岛会造成少量噪声条目，
-    //    证据标 `call` 供下游按置信度取舍）。
+    // 5) 直接 call 目标 + 非执行节里的函数指针。条件/无条件跳转目标不进入种子：
+    //    函数内跳转占绝大多数，直接当函数起点会级联出大量假函数。
     let exec_ranges: Vec<(u64, u64)> = module
         .sections
         .iter()
         .filter(|s| s.executable && s.size > 0)
         .map(|s| (s.rva, s.size))
         .collect();
-    for target in direct_branch_targets(&module, &exec_ranges) {
+    for target in direct_call_targets(&module, &exec_ranges) {
         table
             .entry(target)
             .or_default()
             .evidence
             .insert(Evidence::CallTarget);
+    }
+    for target in data_pointer_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PointerTarget);
+    }
+    for target in immediate_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::ImmediateTarget);
+    }
+    for target in prologue_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
     }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
@@ -746,8 +776,337 @@ fn exception_functions_impl(
         .collect()
 }
 
-/// 线性反汇编全部执行节，收集直接（rel）call/jmp 的目标，只留落在执行节内的。
-fn direct_branch_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+/// 从 PE 可选头读取映像基址（指针可能是绝对 VA，需要它归一成 RVA）。
+fn pe_image_base(space: &dyn AddressSpace, container: Container) -> Option<u64> {
+    if !matches!(container, Container::Pe32 | Container::Pe64) {
+        return None;
+    }
+    let header = space.read(0, 0x1000).or_else(|| space.read(0, 0x400))?;
+    if header.len() < 0x40 {
+        return None;
+    }
+    let pe = u32::from_le_bytes(header.get(0x3C..0x40)?.try_into().ok()?) as usize;
+    if pe.checked_add(24 + 32)? > header.len() {
+        return None;
+    }
+    let optional = pe + 24;
+    let magic = u16::from_le_bytes(header.get(optional..optional + 2)?.try_into().ok()?);
+    match (container, magic) {
+        (Container::Pe32, 0x10B) => Some(u64::from(u32::from_le_bytes(
+            header.get(optional + 28..optional + 32)?.try_into().ok()?,
+        ))),
+        (Container::Pe64, 0x20B) => Some(u64::from_le_bytes(
+            header.get(optional + 24..optional + 32)?.try_into().ok()?,
+        )),
+        _ => None,
+    }
+}
+
+/// 函数起点前应有代码边界：填充、ret 或跳转；避免从指令中间开始。
+fn has_code_boundary_before(space: &dyn AddressSpace, rva: u64) -> bool {
+    let Some(bytes) = space.read(rva.saturating_sub(1), 1) else {
+        return true;
+    };
+    matches!(
+        bytes[0],
+        0xCC | 0x90 | 0x00 | 0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF
+    )
+}
+
+/// `mov/lea reg, [ebp+disp]` is a frame-relative access, never a function entry.
+fn is_frame_relative_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    let Some(bytes) = space.read(rva, 2) else {
+        return false;
+    };
+    matches!(bytes[0], 0x8B | 0x8D)
+        && matches!(
+            bytes[1],
+            0x45 | 0x4D
+                | 0x55
+                | 0x5D
+                | 0x65
+                | 0x6D
+                | 0x75
+                | 0x7D
+                | 0x85
+                | 0x8D
+                | 0x95
+                | 0x9D
+                | 0xA5
+                | 0xAD
+                | 0xB5
+                | 0xBD
+        )
+}
+
+/// 明显不是函数起点的字节：ret、int3、null、常见的 padding 噪声形状
+/// `sub ecx, [ecx+disp]`（`2B 49`），以及 frame-relative 访问。
+fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    let Some(bytes) = space.read(rva, 2) else {
+        return false;
+    };
+    matches!(bytes[0], 0xCC | 0xC3 | 0x00)
+        || (bytes[0] == 0x2B && bytes[1] == 0x49)
+        || is_frame_relative_start(space, rva)
+}
+
+/// 较宽的起点判定：在强序言之外，接受 getter / 常量返回 / 导入 thunk 的常见开头。
+fn looks_like_function_start_weak(space: &dyn AddressSpace, rva: u64) -> bool {
+    if is_degenerate_start(space, rva) {
+        return false;
+    }
+    if looks_like_function_start(space, rva) {
+        return true;
+    }
+    let start = rva.saturating_sub(2);
+    let Some(bytes) = space.read(start, 10) else {
+        return false;
+    };
+    let Ok(offset) = usize::try_from(rva - start) else {
+        return false;
+    };
+    let Some(window) = bytes.get(offset..offset + 5) else {
+        return false;
+    };
+    if window[0] == 0x8B
+        && matches!(
+            window[1],
+            0x01 | 0x41 | 0x44 | 0x49 | 0x4C | 0x51 | 0x54 | 0x59 | 0x5C
+        )
+    {
+        return true;
+    }
+    (window[0] == 0x33 && window[1] == 0xC0)
+        || window[0] == 0xB8
+        || (window[0] == 0x0F
+            && window[1] == 0xB6
+            && matches!(window[2], 0x41 | 0x44 | 0x49 | 0x4C))
+        || (window[0] == 0xFF && window[1] == 0x25)
+}
+
+/// 目标是否像函数起点：前面有对齐填充，或开头是常见 x86 序言。
+fn looks_like_function_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    if is_degenerate_start(space, rva) {
+        return false;
+    }
+    let start = rva.saturating_sub(2);
+    let (window, padded) = if let Some(bytes) = space.read(start, 8) {
+        let offset = usize::try_from(rva - start).unwrap_or(0);
+        let padded = offset >= 2
+            && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
+            && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00);
+        (bytes.get(offset..offset + 5), padded)
+    } else {
+        (space.read(rva, 5), false)
+    };
+    let Some(window) = window else {
+        return false;
+    };
+    if window.len() < 3 {
+        return false;
+    }
+    let prologue = (window[0] == 0x55 && window[1] == 0x8B && window[2] == 0xEC)
+        || (window[0] == 0x83 && matches!(window[1], 0xEC | 0xE4))
+        || (window[0] == 0x81 && matches!(window[1], 0xEC | 0xE4))
+        || matches!(window[0], 0x53 | 0x56 | 0x57);
+    padded || prologue
+}
+
+/// 扫描非执行节里的函数指针（回调表 / vtable / 手写分派表）。
+///
+/// 指针可能是绝对 VA 或已经归一过的 RVA；两者都接受。目标必须在执行节内、
+/// 按指针宽度对齐，且看起来像函数起点，避免把普通整数误认成函数入口。
+fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let image_base = if module.image_base != 0 {
+        module.image_base
+    } else if let Some(base) = pe_image_base(space, module.container) {
+        base
+    } else {
+        return BTreeSet::new();
+    };
+    let pointer_size = usize::try_from(module.arch.bitness() / 8).unwrap_or(0);
+    if pointer_size != 4 && pointer_size != 8 {
+        return BTreeSet::new();
+    }
+    let in_exec = |rva: u64| {
+        exec_ranges
+            .iter()
+            .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+    };
+    let mut targets = BTreeSet::new();
+    for section in module
+        .sections
+        .iter()
+        .filter(|section| !section.executable && section.size > 0)
+    {
+        let Ok(size) = usize::try_from(section.size) else {
+            continue;
+        };
+        let Some(bytes) = space.read(section.rva, size) else {
+            continue;
+        };
+        for chunk in bytes.chunks_exact(pointer_size) {
+            let value = if pointer_size == 4 {
+                let mut bytes = [0u8; 4];
+                bytes.copy_from_slice(chunk);
+                u64::from(u32::from_le_bytes(bytes))
+            } else {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(chunk);
+                u64::from_le_bytes(bytes)
+            };
+            let rva_target = in_exec(value).then_some(value);
+            let va_target = value.checked_sub(image_base).filter(|rva| in_exec(*rva));
+            let (target, prefer_rva) = match (rva_target, va_target) {
+                (Some(rva), Some(va))
+                    if looks_like_function_start_weak(space, rva)
+                        && !looks_like_function_start(space, va) =>
+                {
+                    (rva, true)
+                }
+                (_, Some(va)) => (va, false),
+                (Some(rva), None) => (rva, true),
+                (None, None) => continue,
+            };
+            let plausible = looks_like_function_start(space, target)
+                || (prefer_rva && looks_like_function_start_weak(space, target));
+            let aligned = target % pointer_size as u64 == 0
+                && (!matches!(module.arch, Arch::X86) || target % 16 == 0);
+            if aligned && plausible && has_code_boundary_before(space, target) {
+                targets.insert(target);
+            }
+        }
+        // 连续 RVA 表：编译器生成的 vtable/分派表通常是一串 4 字节 RVA。
+        // 只要连续 8 项都能按 RVA 解释且像函数起点，就整段收下；这能
+        // 纠正“错误 VA 目标恰好也像起点”时的逐个值误判。
+        let mut run = Vec::new();
+        for chunk in bytes.as_chunks::<4>().0 {
+            let value = u64::from(u32::from_le_bytes(*chunk));
+            if in_exec(value) && looks_like_function_start_weak(space, value) {
+                run.push(value);
+            } else {
+                if run.len() >= 8 {
+                    for value in run.drain(..) {
+                        let aligned = value % 4 == 0
+                            && (!matches!(module.arch, Arch::X86) || value % 16 == 0);
+                        if aligned && has_code_boundary_before(space, value) {
+                            targets.insert(value);
+                        }
+                    }
+                } else {
+                    run.clear();
+                }
+            }
+        }
+        if run.len() >= 8 {
+            for value in run {
+                let aligned =
+                    value % 4 == 0 && (!matches!(module.arch, Arch::X86) || value % 16 == 0);
+                if aligned && has_code_boundary_before(space, value) {
+                    targets.insert(value);
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// 扫描代码里的绝对地址立即数（静态回调注册 / 函数指针赋值）。
+///
+/// 只接受落在执行节内、按 4 字节对齐的值；绝对 VA 与已经归一过的 RVA 都接受。
+fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let image_base = if module.image_base != 0 {
+        module.image_base
+    } else if let Some(base) = pe_image_base(space, module.container) {
+        base
+    } else {
+        return BTreeSet::new();
+    };
+    let in_exec = |rva: u64| {
+        exec_ranges
+            .iter()
+            .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+    };
+    let mut targets = BTreeSet::new();
+    let bitness = module.arch.bitness();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut decoder = Decoder::with_ip(bitness, bytes, *start, DecoderOptions::NONE);
+        let mut buffer = Instruction::default();
+        while decoder.can_decode() {
+            decoder.decode_out(&mut buffer);
+            for index in 0..buffer.op_count() {
+                let value = match buffer.op_kind(index) {
+                    OpKind::Immediate32 => u64::from(buffer.immediate32()),
+                    OpKind::Immediate64 => buffer.immediate64(),
+                    _ => continue,
+                };
+                let rva = if value >= image_base {
+                    match value.checked_sub(image_base) {
+                        Some(rva) if in_exec(rva) => rva,
+                        _ => continue,
+                    }
+                } else if in_exec(value) {
+                    value
+                } else {
+                    continue;
+                };
+                let aligned = rva % 4 == 0 && (!matches!(module.arch, Arch::X86) || rva % 16 == 0);
+                if aligned
+                    && looks_like_function_start(space, rva)
+                    && has_code_boundary_before(space, rva)
+                {
+                    targets.insert(rva);
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// 扫描 16 字节对齐、前面有对齐填充的 sub esp, imm 序言。
+///
+/// 这是没有符号/没有引用的叶函数最常见的入口形态；限定 16 字节对齐和
+/// 两字节填充，避免把普通指令序列误认成函数起点。
+fn prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let mut targets = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut offset = usize::try_from((16 - (*start % 16)) % 16).unwrap_or(0);
+        while offset + 8 <= bytes.len() {
+            let rva = *start + u64::try_from(offset).unwrap_or(0);
+            let window = &bytes[offset..offset + 8];
+            let padded = offset >= 2
+                && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
+                && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00);
+            let prologue = (window[0] == 0x83 && matches!(window[1], 0xEC | 0xE4))
+                || (window[0] == 0x81 && matches!(window[1], 0xEC | 0xE4))
+                || (window[0] == 0xB8 && window[5] == 0xC3)
+                || (window[0] == 0x8B && window[1] == 0x41 && window[3] == 0xC3)
+                || (window[0] == 0x8B
+                    && window[1] == 0x44
+                    && window[2] == 0x24
+                    && window[4] == 0xC3)
+                || (window[0] == 0x8B && window[1] == 0x01 && window[2] == 0xC3)
+                || (window[0] == 0x55 && window[1] == 0x8B && window[2] == 0xEC);
+            if padded && prologue {
+                targets.insert(rva);
+            }
+            offset += 16;
+        }
+    }
+    targets
+}
+
+/// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
+fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
     let bitness = module.arch.bitness();
     let space = module.address_space();
@@ -761,15 +1120,14 @@ fn direct_branch_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -
             decoder.decode_out(&mut buffer);
 
             let direct_target = match buffer.flow_control() {
-                FlowControl::Call
-                | FlowControl::UnconditionalBranch
-                | FlowControl::ConditionalBranch => direct_near_target(&buffer),
+                FlowControl::Call => direct_near_target(&buffer),
                 _ => None,
             };
             if let Some(target) = direct_target {
                 if exec_ranges
                     .iter()
                     .any(|(s, sz)| target >= *s && target < s + sz)
+                    && !is_frame_relative_start(space, target)
                 {
                     targets.insert(target);
                 }
@@ -1069,6 +1427,7 @@ mod tests {
         ViewAdapter {
             container: Container::Pe64,
             arch: Arch::X86_64,
+            image_base: 0,
             entry_rva: None,
             sections,
             symbols: &[],
@@ -1127,6 +1486,7 @@ mod tests {
         let view = ScanView {
             container: Container::Pe64,
             arch: Arch::X86_64,
+            image_base: 0,
             entry_rva: None,
             sections: &sections,
             symbols: &[],
@@ -1141,6 +1501,393 @@ mod tests {
         assert_eq!(function.size, 0x40);
         assert!(!function.size_inferred);
         assert!(function.evidence.contains(&Evidence::Pdata));
+    }
+
+    #[test]
+    fn pe_data_pointer_seeds_are_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x1010, &[0x55, 0x8B, 0xEC, 0xC3]);
+        // Absolute VA of 0x1010 under the PE preferred base 0x400000.
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "pointer target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_rva_pointer_prefers_getter_start() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2100],
+            segments: vec![segment(0x1000, 0x2000, true), segment(0x3000, 0x100, false)],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0x11, 0x22]);
+        // The VA interpretation (0x1010) is not a plausible start; the RVA
+        // interpretation (0x2010) is a getter.
+        space.write(0x1010, &[0x00, 0x00, 0x00, 0x00]);
+        space.write(0x2010, &[0x8B, 0x41, 0x04, 0xC3]);
+        space.write(0x3000, &0x2010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x2000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x3000,
+                size: 0x100,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x1000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x2010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "RVA getter target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn contiguous_rva_table_seeds_getters() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2100],
+            segments: vec![segment(0x1000, 0x2000, true), segment(0x3000, 0x100, false)],
+        };
+        space.write(0x1000, &[0xC3]);
+        for index in 0..8u64 {
+            let va_target = 0x1010 + index * 0x10;
+            let rva_target = 0x2010 + index * 0x10;
+            space.write(va_target, &[0x55, 0x8B, 0xEC, 0xC3]);
+            space.write(rva_target, &[0x8B, 0x41, 0x04, 0xC3]);
+            let value = u32::try_from(rva_target).unwrap();
+            space.write(0x3000 + index * 4, &value.to_le_bytes());
+        }
+        // A 4-byte-aligned table entry must not become a function start.
+        space.write(0x2014, &[0x8B, 0x41, 0x04, 0xC3]);
+        space.write(0x3020, &0x2014u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x2000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x3000,
+                size: 0x100,
+                name: ".rdata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x1000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x2010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "RVA table target not discovered: {functions:?}"
+        );
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x2014
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "4-byte-aligned table entry was accepted: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn padded_sub_esp_prologue_is_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x1000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0xCC, 0xCC]);
+        space.write(0x1010, &[0x83, 0xEC, 0x10, 0xC3]);
+        space.write(0x102E, &[0xCC, 0xCC]);
+        space.write(0x1030, &[0xB8, 0x34, 0x12, 0x00, 0x00, 0xC3]);
+        space.write(0x104E, &[0xCC, 0xCC]);
+        space.write(0x1050, &[0x8B, 0x41, 0x04, 0xC3]);
+        space.write(0x106E, &[0xCC, 0xCC]);
+        space.write(0x1070, &[0x55, 0x8B, 0xEC, 0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        let prologue_targets: Vec<u64> = functions
+            .iter()
+            .filter(|function| function.evidence.contains(&Evidence::PrologueTarget))
+            .map(|function| function.rva)
+            .collect();
+        assert!(
+            prologue_targets.contains(&0x1010)
+                && prologue_targets.contains(&0x1030)
+                && prologue_targets.contains(&0x1050)
+                && prologue_targets.contains(&0x1070),
+            "prologue targets not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_pointer_targets_are_rejected() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x1010, &[0xCC, 0xCC, 0xCC, 0xCC]);
+        space.write(0x1020, &[0x8D, 0x4D, 0x08, 0xC3]);
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        space.write(0x2004, &0x40_1020u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            !functions
+                .iter()
+                .any(|function| matches!(function.rva, 0x1010 | 0x1020)
+                    && function.evidence.contains(&Evidence::PointerTarget)),
+            "degenerate target was accepted: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn pointer_target_without_code_boundary_is_rejected() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0x8B, 0x8B]);
+        space.write(0x1010, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "non-boundary target was accepted: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn code_immediate_seeds_are_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x1100],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        // push 0x401010; ret
+        space.write(0x1000, &[0x68, 0x10, 0x10, 0x40, 0x00, 0xC3]);
+        space.write(0x1010, &[0x55, 0x8B, 0xEC, 0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::ImmediateTarget)),
+            "immediate target not discovered: {functions:?}"
+        );
     }
 
     #[test]
