@@ -265,6 +265,13 @@ fn discover_impl(
             .evidence
             .insert(Evidence::PrologueTarget);
     }
+    for target in byte_pattern_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
+    }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
     let rvas: Vec<u64> = table.keys().copied().collect();
@@ -1322,6 +1329,40 @@ fn aligned_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)])
     targets
 }
 
+/// 任意字节偏移的极窄热补丁 / lea 形态。
+///
+/// 只接受 `8B FF 55 8B EC` 与 `8D 41 04 50`，且前置字节必须是代码边界；
+/// 这两种形态在紧凑 DLL 中常出现在非 4 对齐位置，放宽到逐字节扫描仍保持高精度。
+fn byte_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let mut targets = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        for offset in 1..bytes.len().saturating_sub(4) {
+            if !matches!(
+                bytes[offset - 1],
+                0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF | 0xCC | 0x90 | 0x00
+            ) {
+                continue;
+            }
+            let window = &bytes[offset..offset + 5];
+            let hotpatch = window[0] == 0x8B
+                && window[1] == 0xFF
+                && window[2] == 0x55
+                && window[3] == 0x8B
+                && window[4] == 0xEC;
+            let lea_push =
+                window[0] == 0x8D && window[1] == 0x41 && window[2] == 0x04 && window[3] == 0x50;
+            if hotpatch || lea_push {
+                targets.insert(*start + u64::try_from(offset).unwrap_or(0));
+            }
+        }
+    }
+    targets
+}
+
 /// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
 fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
@@ -1950,6 +1991,8 @@ mod tests {
         space.write(0x1160, &[0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0xC3]);
         space.write(0x1170, &[0xF6, 0x44, 0x24, 0x04, 0x01, 0xC3]);
         space.write(0x1180, &[0x8D, 0x41, 0x04, 0x50, 0xC3]);
+        space.write(0x1191, &[0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x11A1, &[0x8D, 0x41, 0x04, 0x50, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -1994,7 +2037,9 @@ mod tests {
                 && prologue_targets.contains(&0x1150)
                 && prologue_targets.contains(&0x1160)
                 && prologue_targets.contains(&0x1170)
-                && prologue_targets.contains(&0x1180),
+                && prologue_targets.contains(&0x1180)
+                && prologue_targets.contains(&0x1191)
+                && prologue_targets.contains(&0x11A1),
             "prologue targets not discovered: {functions:?}"
         );
     }
