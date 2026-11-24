@@ -1341,18 +1341,19 @@ fn byte_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
             continue;
         };
         for offset in 1..bytes.len().saturating_sub(4) {
-            if !matches!(
-                bytes[offset - 1],
-                0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF | 0xCC | 0x90 | 0x00
-            ) {
-                continue;
-            }
             let window = &bytes[offset..offset + 5];
             let hotpatch = window[0] == 0x8B
                 && window[1] == 0xFF
                 && window[2] == 0x55
                 && window[3] == 0x8B
                 && window[4] == 0xEC;
+            let boundary = matches!(
+                bytes[offset - 1],
+                0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF | 0xCC | 0x90 | 0x00
+            );
+            if !boundary && !hotpatch {
+                continue;
+            }
             let lea_push =
                 window[0] == 0x8D && window[1] == 0x41 && window[2] == 0x04 && window[3] == 0x50;
             let safe_frame = matches!(bytes[offset - 1], 0xC3 | 0xE9 | 0xEB | 0xCC | 0x90 | 0x00);
@@ -2002,6 +2003,8 @@ mod tests {
             0x11C1,
             &[0x83, 0xE9, 0x28, 0xE9, 0x00, 0x00, 0x00, 0x00, 0xC3],
         );
+        space.write(0x11D0, &[0x55]);
+        space.write(0x11D1, &[0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -2050,7 +2053,8 @@ mod tests {
                 && prologue_targets.contains(&0x1191)
                 && prologue_targets.contains(&0x11A1)
                 && prologue_targets.contains(&0x11B1)
-                && prologue_targets.contains(&0x11C1),
+                && prologue_targets.contains(&0x11C1)
+                && prologue_targets.contains(&0x11D1),
             "prologue targets not discovered: {functions:?}"
         );
     }
