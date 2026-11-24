@@ -1,4 +1,5 @@
 set shell := ["bash", "-c"]
+set windows-shell := ["pwsh", "-NoProfile", "-Command"]
 
 _default:
     @just --list
@@ -29,3 +30,19 @@ licenses:
 
 # One-shot gate.
 gate: fmt lint test licenses
+
+# Native Windows bench: fixtures, gate, pack/load and live e2e.
+bench-windows *args:
+    python tools/windows_bench.py {{args}}
+
+# Cross-check the PDB lane against the system dbghelp oracle.
+pdb-crosscheck:
+    python tools/pdb_crosscheck.py
+
+# Cross-check function discovery against an IDA headless oracle.
+ida-crosscheck:
+    python tools/ida_crosscheck.py
+
+# Run the real Ghidra differential on a PDB-less fixture.
+ghidra-crosscheck:
+    python tools/ghidra_crosscheck.py

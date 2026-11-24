@@ -40,6 +40,7 @@ use kotama::FuncKey;
 use kotama::FunctionEntry;
 use kotama::ModuleId;
 use kotama_image::Arch;
+use kotama_image::ExceptionFunction;
 
 /// 单个函数的发射结果。
 pub struct FunctionText {
@@ -77,6 +78,36 @@ pub fn decompile_function_bounded(
     function: &FunctionEntry,
     body_limit: Option<u64>,
 ) -> FunctionText {
+    decompile_impl(space, module_id, arch, function, body_limit, &[])
+}
+
+/// 带 PE64 SEH sidecar 的函数发射。
+///
+/// `exceptions` 通常来自 `kotama_scan::exception_functions`；只取 BeginAddress 与当前
+/// 函数入口相同的记录，不改变既有调用方，也不把 handler 假装成普通直接分支。
+#[must_use]
+pub fn decompile_function_bounded_with_exceptions(
+    space: &dyn AddressSpace,
+    module_id: ModuleId,
+    arch: Arch,
+    function: &FunctionEntry,
+    body_limit: Option<u64>,
+    exceptions: &[ExceptionFunction],
+) -> FunctionText {
+    decompile_impl(space, module_id, arch, function, body_limit, exceptions)
+}
+
+fn decompile_impl(
+    space: &dyn AddressSpace,
+    module_id: ModuleId,
+    arch: Arch,
+    function: &FunctionEntry,
+    body_limit: Option<u64>,
+    exceptions: &[ExceptionFunction],
+) -> FunctionText {
+    let exception = exceptions
+        .iter()
+        .find(|exception| u64::from(exception.runtime.begin_rva) == function.rva);
     let key = FuncKey::new(module_id, function.rva);
     let uri = key.to_string();
     let fallback_name = format!("sub_{:x}", function.rva);
@@ -93,6 +124,7 @@ pub fn decompile_function_bounded(
             );
             let _ = writeln!(out, "void {name}(void)");
             let _ = writeln!(out, "{{");
+            write_seh(&mut out, exception);
             let _ = writeln!(
                 out,
                 "    /* ERROR: unreadable body at {:x} */",
@@ -131,6 +163,7 @@ pub fn decompile_function_bounded(
     );
     let _ = writeln!(out, "void {name}(void){body_hint}");
     let _ = writeln!(out, "{{");
+    write_seh(&mut out, exception);
 
     // 间接跳转先恢复成跳转表：稠密 switch 的后继全靠它，不恢复 CFG 就断在这里。
     let tables = jump_table::recover(space, &instructions, function.rva, end_rva);
@@ -244,7 +277,42 @@ pub fn decompile_function_bounded(
     FunctionText { uri, text: out }
 }
 
-/// 读取函数体：优先整段；跨节时截到所在节尾。
+/// 发射确定性的 SEH sidecar；handler 仍是 RVA，不伪造函数内 goto。
+fn write_seh(out: &mut String, exception: Option<&ExceptionFunction>) {
+    let Some(exception) = exception else { return };
+    let runtime = exception.runtime;
+    let _ = writeln!(
+        out,
+        "    /* seh: runtime=[0x{:x},0x{:x}) unwind=0x{:x} */",
+        runtime.begin_rva, runtime.end_rva, runtime.unwind_info_rva
+    );
+    if let Some(unwind) = exception.unwind {
+        let _ = writeln!(
+            out,
+            "    /* seh: unwind version={} flags=0x{:02x} prolog={} codes={} frame={}:{} */",
+            unwind.version,
+            unwind.flags,
+            unwind.prolog_size,
+            unwind.unwind_code_count,
+            unwind.frame_register,
+            unwind.frame_offset
+        );
+        if let Some(handler) = unwind.handler_rva {
+            let _ = writeln!(out, "    /* seh: handler=0x{handler:x} (external RVA) */");
+        }
+        if let Some(chained) = unwind.chained {
+            let _ = writeln!(
+                out,
+                "    /* seh: chained runtime=[0x{:x},0x{:x}) unwind=0x{:x} */",
+                chained.begin_rva, chained.end_rva, chained.unwind_info_rva
+            );
+        }
+    } else if runtime.unwind_info_rva != 0 {
+        let _ = writeln!(out, "    /* seh: unwind metadata unavailable */");
+    }
+}
+
+/// 读取函数体：优先整段；跨节时截到所在节尾，且永不越过声明/推断上界。
 fn read_body<'a>(
     space: &'a dyn AddressSpace,
     function: &FunctionEntry,
@@ -263,7 +331,12 @@ fn read_body<'a>(
         .segment_at(function.rva)?
         .end()
         .saturating_sub(function.rva);
-    space.read(function.rva, usize::try_from(limit).unwrap_or(0))
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if whole <= limit {
+        return None;
+    }
+    // 精确边界和 body_limit 都是硬上界；段更长也绝不能多读。
+    space.read(function.rva, whole.min(limit))
 }
 
 /// 直接 rel 转移目标；间接返回 `None`。
@@ -292,7 +365,16 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/generated")
             .join(rel);
-        path.exists().then_some(path)
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            );
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -353,6 +435,176 @@ mod tests {
                 "arm target L_{label} has no block"
             );
         }
+    }
+
+    struct StaticSpace {
+        segment: kotama::Segment,
+        bytes: Vec<u8>,
+    }
+
+    impl AddressSpace for StaticSpace {
+        fn segments(&self) -> &[kotama::Segment] {
+            std::slice::from_ref(&self.segment)
+        }
+
+        fn read(&self, rva: u64, len: usize) -> Option<&[u8]> {
+            if !self.segment.contains(rva, len) {
+                return None;
+            }
+            let offset = usize::try_from(rva.checked_sub(self.segment.rva)?).ok()?;
+            self.bytes.get(offset..offset.checked_add(len)?)
+        }
+    }
+
+    #[test]
+    fn seh_sidecar_emits_runtime_unwind_handler_and_chain() {
+        use kotama_image::{RuntimeFunction, UnwindInfo};
+
+        let space = StaticSpace {
+            segment: kotama::Segment {
+                rva: 0x1000,
+                size: 1,
+                perms: kotama::Perms {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
+            },
+            bytes: vec![0xc3],
+        };
+        let function = FunctionEntry {
+            rva: 0x1000,
+            size: 1,
+            size_inferred: false,
+            name: Some("seh_main".into()),
+            evidence: std::collections::BTreeSet::from([kotama::Evidence::Pdata]),
+        };
+        let exception = ExceptionFunction {
+            runtime: RuntimeFunction {
+                begin_rva: 0x1000,
+                end_rva: 0x1001,
+                unwind_info_rva: 0x2000,
+            },
+            unwind: Some(UnwindInfo {
+                version: 1,
+                flags: 1,
+                prolog_size: 4,
+                unwind_code_count: 1,
+                frame_register: 5,
+                frame_offset: 1,
+                handler_rva: Some(0x1040),
+                chained: Some(RuntimeFunction {
+                    begin_rva: 0x1040,
+                    end_rva: 0x1060,
+                    unwind_info_rva: 0,
+                }),
+            }),
+        };
+        let id = ModuleId::from_bytes([0; 32]);
+        let exceptions = [exception];
+        let first = decompile_function_bounded_with_exceptions(
+            &space,
+            id,
+            Arch::X86_64,
+            &function,
+            None,
+            &exceptions,
+        )
+        .text;
+        assert!(first.contains("seh: runtime=[0x1000,0x1001) unwind=0x2000"));
+        assert!(first.contains("prolog=4 codes=1 frame=5:1"));
+        assert!(first.contains("handler=0x1040 (external RVA)"));
+        assert!(first.contains("chained runtime=[0x1040,0x1060) unwind=0x0"));
+        assert!(!first.contains("goto L_1040"));
+        let second = decompile_function_bounded_with_exceptions(
+            &space,
+            id,
+            Arch::X86_64,
+            &function,
+            None,
+            &exceptions,
+        )
+        .text;
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn exact_body_never_requests_beyond_declared_end() {
+        struct SpySpace {
+            segment: kotama::Segment,
+            max_requested: std::cell::Cell<usize>,
+        }
+        impl AddressSpace for SpySpace {
+            fn segments(&self) -> &[kotama::Segment] {
+                std::slice::from_ref(&self.segment)
+            }
+
+            fn read(&self, _rva: u64, len: usize) -> Option<&[u8]> {
+                self.max_requested.set(self.max_requested.get().max(len));
+                None
+            }
+        }
+
+        let space = SpySpace {
+            segment: kotama::Segment {
+                rva: 0x1000,
+                size: 0x100,
+                perms: kotama::Perms {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
+            },
+            max_requested: std::cell::Cell::new(0),
+        };
+        let function = FunctionEntry {
+            rva: 0x1000,
+            size: 8,
+            size_inferred: false,
+            name: None,
+            evidence: std::collections::BTreeSet::new(),
+        };
+        let text = decompile_function_bounded(
+            &space,
+            ModuleId::from_bytes([0; 32]),
+            Arch::X86_64,
+            &function,
+            None,
+        )
+        .text;
+        assert!(text.contains("unreadable body"));
+        assert_eq!(space.max_requested.get(), 8);
+    }
+
+    #[test]
+    fn real_pe64_seh_facts_reach_decompiler_sidecar() {
+        let Some(path) = fixture("x86_64-windows-gnu/-O2/loops.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let functions = kotama_scan::discover(&module);
+        let exceptions = kotama_scan::exception_functions(&module);
+        let function = functions
+            .iter()
+            .find(|function| {
+                exceptions.iter().any(|exception| {
+                    u64::from(exception.runtime.begin_rva) == function.rva
+                        && exception.unwind.is_some()
+                })
+            })
+            .expect("a pdata function with xdata");
+        let text = decompile_function_bounded_with_exceptions(
+            &module.address_space(),
+            module.module_id(),
+            module.arch,
+            function,
+            None,
+            &exceptions,
+        )
+        .text;
+        assert!(text.contains("seh: runtime=["));
+        assert!(text.contains("seh: unwind version="));
     }
 
     #[test]

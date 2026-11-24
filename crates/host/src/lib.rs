@@ -1,26 +1,39 @@
-//! 活体会话宿主（Linux 车道）：`/proc/<pid>/maps` 模块枚举 + `/proc/<pid>/mem` 读取 +
-//! 把活体进程变成 [`kotama::AddressSpace`]。
+//! 活体会话宿主：Linux `/proc` 与原生 Windows Win32 共用一份会话 facade。
 //!
-//! P2 第一版是**只读、零注入**车道：
-//! - 读走 `/proc/<pid>/mem`（同 uid / 祖先后代即可，Yama 默认口径），不需要 ptrace 停机；
-//! - **wine 宿主 PE 是一等公民**——wine 进程就是 Linux 进程，PE 映像映射在其地址空间里，
-//!   从 `/proc/<pid>/maps` 探测 `MZ` 头即可拿到映像基址。本机就能对「Windows 目标」做
-//!   活体分析；Windows 原生注入（CreateRemoteThread 一族）待台架就绪另波。
-//! - [`ProcessImage`] 构造时把整个映像**缓存成一份字节**（上限 64 MiB）——
-//!   `AddressSpace::read` 因此是纯切片借用，静态管线（scan/discover/decomp）原样可跑，
-//!   「同一套管线跑文件与活体」从口号变成类型事实。停机控制与写内存随 P3 门禁引入。
+//! 两条平台车道都只替换进程、模块与内存区域原语：
+//! - Linux 读 `/proc/<pid>/mem`、解析 maps，并把 wine 宿主 PE 当一等公民；
+//! - Windows 用 `OpenProcess` / `ReadProcessMemory` / Toolhelp / `VirtualQueryEx`，
+//!   原生 PE 以 `ModuleKind::NativePe` 诚实上报；
+//! - [`ProcessImage`] 在两侧都把整个映像**缓存成一份字节**（上限 64 MiB），因此
+//!   `AddressSpace::read` 是纯切片借用，scan/discover/decomp 跑同一条静态管线。
 //!
 //! 地址约定：RVA = 进程绝对地址 − 映像基址，与静态侧（文件映像归一）同口径——
-//! 内容寻址身份因此跨静态/活体成立。
-
-#![cfg(target_os = "linux")]
+//! 内容寻址身份因此跨静态/活体成立。写内存、冻结与远程注入仍由
+//! `control::Session` 的 capability 门禁显式开放；Windows 外部栈回溯（Toolhelp 线程 +
+//! StackWalk64 + dbghelp 符号）见 [`stack`]，它只做短暂挂起、**不是**冻结机制。
+//!
+//! Windows 原生车道的传输有两种：命名管道（默认，见 [`pipe`]）与回环 TCP（保留给
+//! wine）。两者与 Linux 的 unix socket 共用 [`wire`] 的帧编解码与只读巡检步骤。
 
 pub mod control;
+#[cfg(target_os = "windows")]
+pub mod inject;
+#[cfg(target_os = "linux")]
 pub mod launch;
+#[cfg(target_os = "windows")]
+pub mod pipe;
 pub mod scanner;
+#[cfg(target_os = "windows")]
+pub mod stack;
+#[cfg(target_os = "linux")]
 pub mod trace;
+#[cfg(target_os = "windows")]
+mod windows;
+pub mod wire;
 
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileExt;
 
 use kotama::AddressSpace;
@@ -29,7 +42,9 @@ use kotama::Perms;
 use kotama::Segment;
 use kotama_image::SectionInfo;
 use kotama_image::SymbolInfo;
+#[cfg(target_os = "linux")]
 use kotama_proto::ModuleInfo;
+#[cfg(target_os = "linux")]
 use kotama_proto::ModuleKind;
 
 /// 缓存整个映像的上限（超出报错——超大映像的分片读取随 P2 后续轮引入）。
@@ -42,10 +57,16 @@ pub enum HostError {
     Process(String),
     /// `/proc/<pid>/maps` 或 `mem` 读失败。
     Proc(String),
+    /// Win32 API 调用失败。
+    Win32(String),
     /// PE 头解析失败。
     PeParse(String),
+    /// 远程注入前置校验失败或远程线程未按预期完成。
+    Inject(String),
     /// 写操作未获授权（capability 门禁；负对照钉的就是它）。
     CapabilityDenied(&'static str),
+    /// 外部栈回溯失败（线程枚举 / 挂起恢复 / StackWalk64 / dbghelp 符号会话）。
+    Stack(String),
 }
 
 impl std::fmt::Display for HostError {
@@ -53,8 +74,11 @@ impl std::fmt::Display for HostError {
         match self {
             Self::Process(msg) => write!(f, "process: {msg}"),
             Self::Proc(msg) => write!(f, "proc: {msg}"),
+            Self::Win32(msg) => write!(f, "win32: {msg}"),
             Self::PeParse(msg) => write!(f, "pe parse: {msg}"),
+            Self::Inject(msg) => write!(f, "inject: {msg}"),
             Self::CapabilityDenied(msg) => write!(f, "capability denied: {msg}"),
+            Self::Stack(msg) => write!(f, "stack: {msg}"),
         }
     }
 }
@@ -64,7 +88,10 @@ impl std::error::Error for HostError {}
 /// 一个已打开的目标进程（只读句柄）。
 pub struct TargetProcess {
     pid: i32,
+    #[cfg(target_os = "linux")]
     mem: File,
+    #[cfg(target_os = "windows")]
+    handle: std::os::windows::io::OwnedHandle,
 }
 
 impl TargetProcess {
@@ -72,6 +99,7 @@ impl TargetProcess {
     ///
     /// # Errors
     /// 进程不存在或无权（Yama 口径：同 uid 且（祖先后代或 `ptrace_scope=0`））。
+    #[cfg(target_os = "linux")]
     pub fn open(pid: i32) -> Result<Self, HostError> {
         let mem = File::open(format!("/proc/{pid}/mem"))
             .map_err(|e| HostError::Process(format!("pid {pid}: {e}")))?;
@@ -88,6 +116,7 @@ impl TargetProcess {
     ///
     /// # Errors
     /// 地址未映射或跨入未映射页。
+    #[cfg(target_os = "linux")]
     pub fn read_absolute(&self, address: u64, length: usize) -> Result<Vec<u8>, HostError> {
         let mut buffer = vec![0u8; length];
         self.mem
@@ -100,6 +129,7 @@ impl TargetProcess {
     ///
     /// # Errors
     /// maps 读取或解析失败。
+    #[cfg(target_os = "linux")]
     pub fn modules(&self) -> Result<Vec<ModuleInfo>, HostError> {
         let maps = std::fs::read_to_string(format!("/proc/{}/maps", self.pid))
             .map_err(|e| HostError::Proc(format!("maps: {e}")))?;
@@ -112,6 +142,7 @@ impl TargetProcess {
     ///
     /// # Errors
     /// 无 PE 模块、头解析失败或映像超过 [`MAX_IMAGE_CACHE`]。
+    #[cfg(target_os = "linux")]
     pub fn wine_pe(&self, base_hint: Option<u64>) -> Result<ProcessImage<'_>, HostError> {
         let modules = self.modules()?;
         let module = match base_hint {
@@ -128,7 +159,16 @@ impl TargetProcess {
                 .or_else(|| modules.iter().find(|m| m.kind == ModuleKind::WinePe))
                 .ok_or_else(|| HostError::PeParse("no wine PE module found".into()))?,
         };
-        ProcessImage::from_wine_pe(self, module.base)
+        ProcessImage::from_pe(self, module.base)
+    }
+
+    /// 取当前平台的 PE 活体映像（Linux 上即 wine PE）。
+    ///
+    /// # Errors
+    /// 与 [`Self::wine_pe`] 相同。
+    #[cfg(target_os = "linux")]
+    pub fn pe_image(&self, base_hint: Option<u64>) -> Result<ProcessImage<'_>, HostError> {
+        self.wine_pe(base_hint)
     }
 }
 
@@ -189,6 +229,7 @@ pub fn parse_maps(text: &str) -> Vec<MapEntry> {
 }
 
 /// 从 maps + 现场探测枚举模块。`read` 是内存读取回调（探测 `MZ` 头用）。
+#[cfg(target_os = "linux")]
 fn parse_modules(
     maps_text: &str,
     read: impl Fn(u64, usize) -> Result<Vec<u8>, HostError>,
@@ -242,6 +283,7 @@ fn parse_modules(
 }
 
 /// wine 内建 DLL 的路径特征（Debian 布局与通用 /usr/lib/wine 布局都命中）。
+#[cfg(target_os = "linux")]
 fn is_wine_builtin(path: &str) -> bool {
     path.contains("/wine/")
         || path.contains("\\wine\\")
@@ -305,11 +347,20 @@ pub struct ProcessImage<'a> {
 }
 
 impl<'a> ProcessImage<'a> {
-    /// 现场解析并缓存一个 wine PE 模块（读取整个 `SizeOfImage`）。
+    /// 兼容旧名的 wine PE 入口；实现与 [`Self::from_pe`] 完全相同。
+    ///
+    /// # Errors
+    /// 与 [`Self::from_pe`] 相同。
+    #[cfg(target_os = "linux")]
+    pub fn from_wine_pe(process: &'a TargetProcess, base: u64) -> Result<Self, HostError> {
+        Self::from_pe(process, base)
+    }
+
+    /// 现场解析并缓存一个 PE 模块（读取整个 `SizeOfImage`）。
     ///
     /// # Errors
     /// 头读取 / 解析失败，或映像超过 [`MAX_IMAGE_CACHE`]。
-    pub fn from_wine_pe(process: &'a TargetProcess, base: u64) -> Result<Self, HostError> {
+    pub fn from_pe(process: &'a TargetProcess, base: u64) -> Result<Self, HostError> {
         let header = process
             .read_absolute(base, 0x400)
             .map_err(|e| HostError::PeParse(format!("{base:#x}: {e}")))?;
@@ -469,6 +520,7 @@ mod tests {
     /// 流程：wine 拉起 spin.exe → 等心跳 → /proc 探测 PE 模块 → 活体 ModuleId ==
     /// 静态文件 ModuleId（内容寻址身份跨静态/活体的验收断言）→ discover 出函数表。
     #[test]
+    #[cfg(target_os = "linux")]
     fn live_e2e_wine_pe_identity() {
         if std::env::var_os("KOTAMA_LIVE_E2E").is_none() {
             eprintln!("skip: set KOTAMA_LIVE_E2E=1 to run the live e2e");
@@ -549,6 +601,7 @@ mod tests {
     /// 冻结它 → spin.exe **自己打印**的计数停在冻结值上（外部可观测的行为改变）。
     /// 同时钉门禁负对照的活体形态：只读会话 freeze 必须被拒。
     #[test]
+    #[cfg(target_os = "linux")]
     fn live_e2e_scan_freeze_pins_target_output() {
         if std::env::var_os("KOTAMA_LIVE_E2E").is_none() {
             eprintln!("skip: set KOTAMA_LIVE_E2E=1 to run the live e2e");
@@ -676,6 +729,7 @@ mod tests {
     }
 
     /// 负对照用的冻结值（不真正落到写——门禁应先拒）。
+    #[cfg(target_os = "linux")]
     fn control_freeze_value() -> scanner::Value {
         scanner::Value::U32(0x7f7f_7f7f)
     }

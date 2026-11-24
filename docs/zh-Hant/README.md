@@ -33,6 +33,11 @@
 **P0 靜態管線已跑通**（2026-11-23 首提交，`master` 單主幹）。
 `kotama analyze <檔案>` 對一個 ELF/PE 檔做載入 → 函式發現 → 基本塊級反編譯。
 
+**Windows 原生車道已落地**（2026-11-23，Win10 Pro x64）：原生 host attach/scan/write/freeze、
+命名管道或回環 TCP 的 LoadLibrary 注入、PE exception/unwind 與 MSVC RTTI、RSDS 身分驗證
+PDB 並以 dbghelp 交叉驗證、GNU/MSVC 夾具與打包車道。Windows 上執行 `just bench-windows`
+（追加 `--oracle` 納入 Ghidra、設定 `KOTAMA_IDA` 後追加 `--ida` 納入 IDA）。
+
 已實證的範圍：
 
 | 維度 | 現狀 |
@@ -42,10 +47,10 @@
 | 邊界 | 精確邊界優先（符號長度、`.pdata`）；推斷邊界用線性掃描精化，共享尾塊不再切斷真函式 |
 | 反編譯 | 基本塊 + 位址錨註釋；**稠密 switch 的跳轉表可恢復**（ELF64 夾具 10/10 分支、置信度 100%） |
 | 確定性 | 同一輸入兩次輸出逐位元組相同（差分與知識庫複用的前提） |
-| 已驗證 | 24 個矩陣夾具 + `/bin/true`、`/bin/ls` 等 strip 系統二進位檔 |
+| 已驗證 | 完整矩陣夾具 + `/bin/true`、`/bin/ls` 等 strip 系統二進位檔 |
 
-已知邊界（P1 範圍）：PE 的精確函式邊界依賴 PDB（當前 mingw 夾具無 PDB，靠 call 目標 + 線性掃描）；
-類型推斷、結構體恢復、Ghidra 差分 oracle 尚未接入。
+已知邊界：PE 的精確函式邊界依賴 PDB（zig -g 會產出 loops.pdb；無 PDB 時靠 call 目標 + 線性掃描）；
+Ghidra / IDA 差分 oracle 已接入。型別推斷、結構體恢復與 GUI/服務面尚未開始。
 
 設計決策與過程記錄在 PR 描述中（設計文件不進倉樹）。
 
@@ -53,7 +58,7 @@
 
 | 塊 | 內容 | 階段 |
 | --- | --- | --- |
-| 靜態 | 載入 → 函式發現 → 基本塊反編譯 ✅ / 類型推斷 · 結構體 · 差分 oracle | P0 ✅ / P1 |
+| 靜態 | 載入 → 函式發現 → 基本塊反編譯 → SEH/RTTI/PDB 證據與 Ghidra/IDA 差分 ✅ / 類型推斷 · 結構體 | P0 ✅ / P1 |
 | 動態 | 注入（Windows / Linux 雙線）→ 記憶體/堆疊/快照 → 掃描/凍結 → hook / trace | P2–P4 |
 | 打包 | `hooks.toml` + hook 原始碼 → 各平台注入庫 + 清單（ABI / 能力 / 摘要） | P4 |
 | 面 | 服務（REST / WS / MCP）+ hikari web UI + evernight 遠端節點 | P5–P6 |

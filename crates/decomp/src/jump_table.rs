@@ -270,7 +270,16 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/generated")
             .join(rel);
-        path.exists().then_some(path)
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            );
+        } else {
+            None
+        }
     }
 
     #[test]

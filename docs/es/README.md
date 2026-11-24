@@ -35,6 +35,12 @@ Es CLI y biblioteca a la vez — y una vista dentro de shittim-chest / hikari.
 `kotama analyze <archivo>` carga un fichero ELF/PE → descubre funciones → las decompila a
 pseudo-C a nivel de bloques básicos.
 
+**Los carriles nativos de Windows ya están implementados** (2026-11-23, Win10 Pro x64):
+host nativo attach/scan/write/freeze, inyección LoadLibrary por named pipe o TCP de loopback,
+exception/unwind de PE y RTTI de MSVC, PDB autenticado por RSDS contrastado con dbghelp, y
+matriz de fixtures GNU/MSVC más empaquetado. Ejecuta `just bench-windows` en Windows (añade
+`--oracle` para Ghidra y `--ida` con `KOTAMA_IDA` para IDA).
+
 Alcance demostrado:
 
 | Dimensión | Estado |
@@ -44,11 +50,12 @@ Alcance demostrado:
 | Límites | Primero los límites exactos (longitudes de símbolos, `.pdata`); los inferidos se refinan con barrido lineal — los bloques de cola compartidos ya no truncan funciones reales |
 | Decompilación | Bloques básicos + comentarios con anclas de dirección; **las tablas de salto de los switch densos se recuperan** (10/10 ramas en la matriz ELF64, confianza 100%) |
 | Determinismo | Misma entrada, salida byte a byte idéntica en cada ejecución (la condición previa para el diff y la reutilización de conocimiento) |
-| Verificado en | 24 objetivos de la matriz de fixtures más binarios del sistema despojados como `/bin/true` y `/bin/ls` |
+| Verificado en | la matriz de fixtures completa más binarios del sistema despojados como `/bin/true` y `/bin/ls` |
 
-Límites conocidos (alcance P1): los límites exactos de funciones PE dependen de PDB (los fixtures
-mingw no traen hoy; los cubren destinos de llamada + barrido lineal); la inferencia de tipos, la
-recuperación de structs y el oráculo diferencial de Ghidra aún no están conectados.
+Límites conocidos: los límites exactos de funciones PE dependen de PDB (zig -g genera el PDB
+acompañante; sin él los cubren destinos de llamada + barrido lineal); los oráculos Ghidra/IDA ya
+están conectados. La inferencia de tipos, la recuperación de structs y la GUI/servicio aún no
+han comenzado.
 
 Las decisiones de diseño y los registros de proceso viven en las descripciones de los PR
 (los documentos de diseño no entran en el árbol fuente).
@@ -57,7 +64,7 @@ Las decisiones de diseño y los registros de proceso viven en las descripciones 
 
 | Área | Contenido | Etapa |
 | --- | --- | --- |
-| Estático | carga → descubrimiento → decompilación de bloques básicos ✅ / inferencia de tipos · structs · oráculo diferencial | P0 ✅ / P1 |
+| Estático | carga → descubrimiento → decompilación de bloques básicos → evidencia SEH/RTTI/PDB y diferencial Ghidra/IDA ✅ / inferencia de tipos · structs | P0 ✅ / P1 |
 | Dinámico | inyección (Windows / Linux) → memoria / pila / instantáneas → escaneo / congelación → hook / trace | P2–P4 |
 | Empaquetado | `hooks.toml` + fuentes de hooks → librerías de inyección por plataforma + manifiestos (ABI / capacidades / resúmenes) | P4 |
 | Superficie | servicios (REST / WS / MCP) + interfaz web hikari + nodos remotos evernight | P5–P6 |

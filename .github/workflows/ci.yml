@@ -9,6 +9,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # 夹具缺失必须是红灯；不能把静态矩阵全跳过当成通过。
+  KOTAMA_REQUIRE_FIXTURES: "1"
 
 jobs:
   check:
@@ -17,6 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build the static fixture matrix
+        run: python3 tools/build_fixtures.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

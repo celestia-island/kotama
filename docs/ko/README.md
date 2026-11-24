@@ -35,6 +35,12 @@ shittim-chest / hikari의 뷰이기도 합니다.
 `kotama analyze <파일>`이 ELF/PE 파일을 로드 → 함수 발견 → 기본 블록 단위 디컴파일까지
 수행합니다.
 
+**네이티브 Windows 레인 구현 완료**(2026-11-23, Win10 Pro x64): 네이티브 host
+attach/scan/write/freeze, named pipe 또는 루프백 TCP를 통한 LoadLibrary 주입,
+PE exception/unwind와 MSVC RTTI, RSDS 인증 PDB와 dbghelp 대조, GNU/MSVC 픽스처 및
+패키징. Windows에서 `just bench-windows` 실행(`--oracle`는 Ghidra, `KOTAMA_IDA`와
+`--ida`는 IDA 차등).
+
 검증된 범위:
 
 | 차원 | 현황 |
@@ -44,10 +50,11 @@ shittim-chest / hikari의 뷰이기도 합니다.
 | 경계 | 정확한 경계 우선(심볼 길이, `.pdata`). 추정 경계는 선형 스캔으로 정제 — 꼬리 블록 공유가 진짜 함수를 잘라내지 않습니다 |
 | 디컴파일 | 기본 블록 + 주소 앵커 주석. **밀집 switch의 점프 테이블 복원**(ELF64 픽스처 10/10 분기, 신뢰도 100%) |
 | 결정성 | 같은 입력이면 매 실행 바이트 단위로 동일한 출력(차등 비교와 지식 재사용의 전제) |
-| 검증 대상 | 매트릭스 픽스처 24개 + `/bin/true`, `/bin/ls` 등 strip된 시스템 바이너리 |
+| 검증 대상 | 전체 픽스처 매트릭스 + `/bin/true`, `/bin/ls` 등 strip된 시스템 바이너리 |
 
-알려진 한계(P1 범위): PE의 정확한 함수 경계는 PDB에 의존(현재 mingw 픽스처에는 PDB가 없어
-call 대상 + 선형 스캔으로 커버). 타입 추론, 구조체 복원, Ghidra 차등 오라클은 미연결입니다.
+알려진 한계: PE의 정확한 함수 경계는 PDB에 의존(zig -g가 loops.pdb를 생성하며, 없으면
+call 대상 + 선형 스캔으로 커버). Ghidra / IDA 차등 오라클은 연결되었습니다. 타입 추론,
+구조체 복원, GUI/서비스 면은 미착수입니다.
 
 설계 결정과 진행 기록은 PR 설명에 남깁니다(설계 문서는 소스 트리에 넣지 않습니다).
 
@@ -55,7 +62,7 @@ call 대상 + 선형 스캔으로 커버). 타입 추론, 구조체 복원, Ghid
 
 | 영역 | 내용 | 단계 |
 | --- | --- | --- |
-| 정적 | 로드 → 함수 발견 → 기본 블록 디컴파일 ✅ / 타입 추론 · 구조체 · 차등 오라클 | P0 ✅ / P1 |
+| 정적 | 로드 → 함수 발견 → 기본 블록 디컴파일 → SEH/RTTI/PDB 증거와 Ghidra/IDA 차등 ✅ / 타입 추론 · 구조체 | P0 ✅ / P1 |
 | 동적 | 인젝션 (Windows / Linux 양선) → 메모리/스택/스냅샷 → 스캔/고정 → hook / trace | P2–P4 |
 | 패키징 | `hooks.toml` + hook 소스 → 플랫폼별 인젝션 라이브러리 + 매니페스트(ABI / 기능 / 다이제스트) | P4 |
 | 서비스면 | 서비스 (REST / WS / MCP) + hikari web UI + evernight 원격 노드 | P5–P6 |
