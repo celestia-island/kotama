@@ -1815,11 +1815,11 @@ fn thunk_targets(
 /// 实例化、调整 thunk）对齐到 16 字节，COMDAT 折叠后的小函数落在 4 字节边界上，并用
 /// `int3` 填充，而起点的指令形态无穷无尽。
 /// 只认 `int3`（`90 90` 常是 `mov edx,[eax+1]` 这类指令的 ModRM/disp 字节，
-/// 不是填充），且必须在 256 字节内、不遇非法指令地解码到 ret / 无条件跳转 / 间接跳转
+/// 不是填充），且必须在 8 KiB 内、不遇非法指令地解码到 ret / 无条件跳转 / 间接跳转
 /// （`ret; int3` 之后的单字节填充同样成立：`ret` 已是完整指令，其后的 `int3` 只能是填充）
 /// （或 fastfail 的 `int3; ret`）。
 fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
-    const MAX_BODY: usize = 256;
+    const MAX_BODY: usize = 8192;
     let space = module.address_space();
     let bitness = module.arch.bitness();
     let mut targets = BTreeSet::new();
@@ -1864,11 +1864,15 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
         instructions += 1;
         if instruction.flow_control() == FlowControl::Interrupt {
             let next = instruction.next_ip();
-            return instructions >= 2
-                && body
-                    .get(usize::try_from(next - ip).unwrap_or(usize::MAX)..)
-                    .and_then(|rest| rest.first())
-                    .is_some_and(|byte| *byte != 0xCC);
+            // 两字节的 int imm8（如 fastfail 的 int 29h）本身就是终结符；只有单字节
+            // int3 可能是数据后面的填充串，才要求它后面不是又一个 int3。
+            let two_byte_int = instruction.len() == 2;
+            return two_byte_int
+                || (instructions >= 2
+                    && body
+                        .get(usize::try_from(next - ip).unwrap_or(usize::MAX)..)
+                        .and_then(|rest| rest.first())
+                        .is_some_and(|byte| *byte != 0xCC));
         }
         if is_terminator(&instruction) {
             return true;
@@ -3237,8 +3241,8 @@ mod tests {
         };
         let mut space = SyntheticSpace {
             base: 0x1000,
-            bytes: vec![0u8; 0x1400],
-            segments: vec![segment(0x1000, 0x1400, true)],
+            bytes: vec![0u8; 0x1800],
+            segments: vec![segment(0x1000, 0x1800, true)],
         };
         space.write(0x1000, &[0xC3]);
         // 无引用的 leaf：xor eax,eax; ret
@@ -3259,9 +3263,17 @@ mod tests {
         // 90 90 不是填充：它们是 mov edx,[eax+1] 的 ModRM/disp
         space.write(0x1068, &[0x8B, 0x90, 0x01, 0x00, 0x00]);
         space.write(0x1070, &[0x33, 0xC0, 0xC3]);
-        // 256 字节内到不了终结符
+        // 窗口内到不了终结符
         space.write(0x108E, &[0xCC, 0xCC]);
         space.write(0x1090, &[0x40; 300]);
+        // 超过 256 字节才到达 ret 的大函数：窗口足够宽
+        space.write(0x152E, &[0xCC, 0xCC]);
+        space.write(0x1530, &[0x40; 300]);
+        space.write(0x165C, &[0xC3]);
+        // fastfail：mov ecx,2; int 29h，后面是填充——两字节 int 本身就是终结符
+        space.write(0x172E, &[0xCC, 0xCC]);
+        space.write(0x1730, &[0xB9, 0x02, 0x00, 0x00, 0x00, 0xCD, 0x29]);
+        space.write(0x1737, &[0xCC, 0xCC, 0xCC, 0xCC, 0xCC]);
         // 函数体内的 fastfail：cmp; ja; int3; ret（int3 后面不是填充）
         space.write(0x11EE, &[0xCC, 0xCC]);
         space.write(0x11F0, &[0x48, 0x39, 0xC8, 0x77, 0x02, 0xCC, 0xC3]);
@@ -3276,7 +3288,7 @@ mod tests {
         space.write(0x11E0, &[0x55, 0x8B, 0xEC, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
-            size: 0x1400,
+            size: 0x1800,
             name: ".text".into(),
             executable: true,
         }];
@@ -3296,7 +3308,7 @@ mod tests {
                 function.rva == rva && function.evidence.contains(&Evidence::PrologueTarget)
             })
         };
-        for rva in [0x1010u64, 0x1030, 0x11E0, 0x11F0, 0x1200] {
+        for rva in [0x1010u64, 0x1030, 0x11E0, 0x11F0, 0x1200, 0x1530, 0x1730] {
             assert!(
                 has(rva),
                 "padded code start {rva:#x} not discovered: {functions:?}"
