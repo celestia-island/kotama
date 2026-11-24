@@ -91,6 +91,10 @@
   - 一键验收 = `just bench-windows`；追加 `--oracle` 纳入真实 Ghidra PE 差分，追加
     `--ida`（需 `KOTAMA_IDA`）纳入 IDA 差分。常驻 CI runner 尚未注册（2026-11-23 用户裁决），
     本机通过不等于常驻 CI 项完成。
+  - 注入支持 x64→x64 与 x64→x86（WOW64）：跨位宽时按目标进程里的 32 位 kernel32 导出表
+    解析 `LoadLibraryW`；x86 载荷 = `dist/i686-pc-windows-gnu/kotama_agent.dll`（pack 车道
+    经 `tools/build_windows_agent.py --target x86-windows-gnu` 产出），attach 矩阵与 host live
+    e2e 各含一条 x86 目标车道（夹具 `x86-windows-gnu/-O2/spin.exe`）。
 
 ## 版本声明
 

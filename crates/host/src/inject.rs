@@ -1,13 +1,16 @@
-//! 原生 Windows x64→x64 远程注入：显式 capability 门禁 → 参数校验 → LoadLibraryW 远程线程。
+//! 原生 Windows 远程注入（x64→x64 与 x64→x86/WOW64）：显式 capability 门禁 → 参数校验 →
+//! LoadLibraryW 远程线程。
 //!
 //! 授权 API 在 control::Session::with_injection；未授权会话调用
 //! control::Session::inject 时，在任何 Win32 注入原语（VirtualAllocEx /
 //! CreateRemoteThread）之前就返回 HostError::CapabilityDenied——负对照钉的就是它。
 //!
 //! 注入流程（教科书 LoadLibrary 注入；不做 manual map / 免杀 / 反检测 / 持久化）：
-//! 1. 校验 DLL：绝对路径、文件存在、PE 机器位与目标一致且为 AMD64；
-//! 2. 本机 GetProcAddress 取 LoadLibraryW，按所在宿主模块的文件名 + 导出 RVA 映射到
+//! 1. 校验 DLL：绝对路径、文件存在、PE 机器位与目标一致（AMD64 或 I386）；
+//! 2. 同位宽：本机 GetProcAddress 取 LoadLibraryW，按所在宿主模块的文件名 + 导出 RVA 映射到
 //!    目标进程（kernel32 的转发导出可能落在 kernelbase，故按「含该地址的模块」算 RVA）；
+//!    跨位宽（x64 宿主 → WOW64 目标）：目标里的 kernel32 是另一份二进制，改读目标进程
+//!    内存里的 PE 导出表（只读）解析 LoadLibraryW，转发导出递归到被转发模块；
 //! 3. VirtualAllocEx + WriteProcessMemory 写入 UTF-16 DLL 路径；
 //! 4. CreateRemoteThread 调 LoadLibraryW，WaitForSingleObject 带超时；
 //! 5. 线程退出后才 VirtualFreeEx；未退出时**绝不**释放（宁可有界泄漏，也不留
@@ -49,6 +52,16 @@ use crate::TargetProcess;
 
 /// 64 位 PE 的 IMAGE_FILE_MACHINE_AMD64。
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+/// 32 位 PE 的 IMAGE_FILE_MACHINE_I386。
+const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+/// 宿主自身的 COFF 机器位：同位宽时可按本机导出 RVA 映射到目标，跨位宽则不行。
+const HOST_MACHINE: u16 = if cfg!(target_arch = "x86_64") {
+    IMAGE_FILE_MACHINE_AMD64
+} else if cfg!(target_arch = "x86") {
+    IMAGE_FILE_MACHINE_I386
+} else {
+    0
+};
 
 /// 一次成功注入的报告。
 #[derive(Clone, Debug)]
@@ -112,9 +125,12 @@ pub(crate) fn inject_dll(
 ) -> Result<InjectionReport, HostError> {
     let (dll_machine, wide_path) = validate_dll(dll)?;
     let target_machine = module_machine(process)?;
-    if target_machine != IMAGE_FILE_MACHINE_AMD64 {
+    if !matches!(
+        target_machine,
+        IMAGE_FILE_MACHINE_AMD64 | IMAGE_FILE_MACHINE_I386
+    ) {
         return Err(HostError::Inject(format!(
-            "target pid {} main module machine {target_machine:#x} is not x64 ({IMAGE_FILE_MACHINE_AMD64:#x}); only x64-to-x64 injection is supported",
+            "target pid {} main module machine {target_machine:#x} is neither x64 ({IMAGE_FILE_MACHINE_AMD64:#x}) nor x86 ({IMAGE_FILE_MACHINE_I386:#x}); only x86 and x64 targets are supported",
             process.pid()
         )));
     }
@@ -125,7 +141,7 @@ pub(crate) fn inject_dll(
         )));
     }
 
-    let remote_load_library = remote_load_library(process)?;
+    let remote_load_library = remote_load_library(process, target_machine)?;
     let path_bytes = wide_path.len() * std::mem::size_of::<u16>();
 
     #[cfg(test)]
@@ -307,8 +323,173 @@ fn module_machine(process: &TargetProcess) -> Result<u16, HostError> {
     })
 }
 
-/// 计算目标进程内 LoadLibraryW 的绝对地址（本机导出 RVA + 目标同模块基址）。
-fn remote_load_library(process: &TargetProcess) -> Result<u64, HostError> {
+/// 计算目标进程内 LoadLibraryW 的绝对地址。
+///
+/// 同位宽：本机导出 RVA + 目标同模块基址。跨位宽（x64 宿主 → WOW64 目标）：目标里的
+/// kernel32 是另一份二进制，导出 RVA 与本机不同，改为读目标进程内存里的导出表。
+fn remote_load_library(process: &TargetProcess, target_machine: u16) -> Result<u64, HostError> {
+    if target_machine != HOST_MACHINE {
+        return remote_export(process, "kernel32.dll", "LoadLibraryW", 0);
+    }
+    remote_load_library_same_bitness(process)
+}
+
+/// 按目标进程内存里的 PE 导出表解析 `dll!proc` 的绝对地址；只读，不调用本机 API。
+///
+/// 转发导出（`KERNELBASE.LoadLibraryW`）递归到被转发的模块，最多 4 层。
+fn remote_export(
+    process: &TargetProcess,
+    dll: &str,
+    proc_name: &str,
+    depth: usize,
+) -> Result<u64, HostError> {
+    const MAX_FORWARDERS: usize = 4;
+    if depth > MAX_FORWARDERS {
+        return Err(HostError::Inject(format!(
+            "export forwarder chain for {dll}!{proc_name} exceeds {MAX_FORWARDERS} hops in pid {}",
+            process.pid()
+        )));
+    }
+    let module = process
+        .modules()?
+        .into_iter()
+        .find(|module| same_module_name(&module.path, dll))
+        .ok_or_else(|| {
+            HostError::Inject(format!(
+                "target pid {} lacks module {dll} needed to resolve {proc_name}",
+                process.pid()
+            ))
+        })?;
+    let base = module.base;
+    let dos = process.read_absolute(base, 0x40)?;
+    let Some(lfanew) = read_u32(&dos, 0x3C) else {
+        return Err(HostError::PeParse(format!(
+            "module {dll} at {base:#x} in pid {} has no e_lfanew",
+            process.pid()
+        )));
+    };
+    // 签名 + 文件头 + 可选头（PE32+ 可选头最长 0xF0）。
+    let headers = process.read_absolute(base + u64::from(lfanew), 24 + 0xF0)?;
+    let Some((dir_rva, dir_size)) = pe_export_directory(&headers) else {
+        return Err(HostError::PeParse(format!(
+            "module {dll} at {base:#x} in pid {} has no export directory",
+            process.pid()
+        )));
+    };
+    if dir_rva == 0 || dir_size == 0 {
+        return Err(HostError::PeParse(format!(
+            "module {dll} at {base:#x} in pid {} exports nothing",
+            process.pid()
+        )));
+    }
+    let size = usize::try_from(dir_size).map_err(|_| {
+        HostError::PeParse(format!(
+            "export directory size {dir_size:#x} overflows usize"
+        ))
+    })?;
+    let export = process.read_absolute(base + u64::from(dir_rva), size)?;
+    match find_export(&export, dir_rva, dir_size, proc_name) {
+        Ok(ExportEntry::Function(rva)) => Ok(base + u64::from(rva)),
+        Ok(ExportEntry::Forwarder(target)) => {
+            let (forwarded_dll, forwarded_proc) = target.split_once('.').ok_or_else(|| {
+                HostError::PeParse(format!("malformed export forwarder {target:?}"))
+            })?;
+            remote_export(
+                process,
+                &format!("{forwarded_dll}.dll"),
+                forwarded_proc,
+                depth + 1,
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 导出目录里的一个条目：函数 RVA，或转发字符串（`DLL.Func`）。
+#[derive(Debug, PartialEq, Eq)]
+enum ExportEntry {
+    Function(u32),
+    Forwarder(String),
+}
+
+fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// NT 头（`PE\0\0` + 文件头 + 可选头）里的导出目录 (RVA, size)。
+fn pe_export_directory(headers: &[u8]) -> Option<(u32, u32)> {
+    if headers.get(..4)? != b"PE\0\0" {
+        return None;
+    }
+    let optional_size = usize::from(read_u16(headers, 20)?);
+    let data_directory = 24
+        + match read_u16(headers, 24)? {
+            0x10B => 96,
+            0x20B => 112,
+            _ => return None,
+        };
+    if optional_size < data_directory - 24 + 8 {
+        return None;
+    }
+    Some((
+        read_u32(headers, data_directory)?,
+        read_u32(headers, data_directory + 4)?,
+    ))
+}
+
+/// 在导出目录镜像里按名字找条目。`export` 是模块里 [dir_rva, dir_rva + dir_size) 的内容，
+/// 名称表 / 序号表 / 函数表 / 名称字符串按 PE 规范都落在这段里。
+fn find_export(
+    export: &[u8],
+    dir_rva: u32,
+    dir_size: u32,
+    proc_name: &str,
+) -> Result<ExportEntry, HostError> {
+    let malformed = || HostError::PeParse("malformed export directory".into());
+    // RVA → 镜像内偏移；越界即视为损坏。
+    let at = |rva: u32| {
+        usize::try_from(rva.checked_sub(dir_rva)?)
+            .ok()
+            .filter(|offset| *offset <= export.len())
+    };
+    let functions = at(read_u32(export, 0x1C).ok_or_else(malformed)?).ok_or_else(malformed)?;
+    let names = at(read_u32(export, 0x20).ok_or_else(malformed)?).ok_or_else(malformed)?;
+    let ordinals = at(read_u32(export, 0x24).ok_or_else(malformed)?).ok_or_else(malformed)?;
+    let count = read_u32(export, 0x18).ok_or_else(malformed)? as usize;
+    for index in 0..count {
+        let name_offset =
+            at(read_u32(export, names + index * 4).ok_or_else(malformed)?).ok_or_else(malformed)?;
+        let ordinal = usize::from(read_u16(export, ordinals + index * 2).ok_or_else(malformed)?);
+        let function_rva = read_u32(export, functions + ordinal * 4).ok_or_else(malformed)?;
+        if c_str_at(export, name_offset) != Some(proc_name) {
+            continue;
+        }
+        if dir_rva <= function_rva && function_rva < dir_rva.saturating_add(dir_size) {
+            let forwarder = at(function_rva)
+                .and_then(|offset| c_str_at(export, offset))
+                .ok_or_else(malformed)?;
+            return Ok(ExportEntry::Forwarder(forwarder.to_owned()));
+        }
+        return Ok(ExportEntry::Function(function_rva));
+    }
+    Err(HostError::Inject(format!(
+        "export {proc_name} not found among {count} named entries"
+    )))
+}
+
+/// 镜像 `offset` 处的 NUL 结尾 ASCII 字符串。
+fn c_str_at(bytes: &[u8], offset: usize) -> Option<&str> {
+    let rest = bytes.get(offset..)?;
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    std::str::from_utf8(&rest[..end]).ok()
+}
+
+/// 同位宽：本机导出 RVA + 目标同模块基址。
+fn remote_load_library_same_bitness(process: &TargetProcess) -> Result<u64, HostError> {
     let mut kernel32_name: Vec<u16> = "kernel32.dll".encode_utf16().collect();
     kernel32_name.push(0);
     // SAFETY: 名称 NUL 结尾；返回值判空。
@@ -429,6 +610,109 @@ mod tests {
         bytes
     }
 
+    fn write_u32(bytes: &mut [u8], at: usize, value: u32) {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u16(bytes: &mut [u8], at: usize, value: u16) {
+        bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn synthetic_nt(magic: u16, optional: usize, export: Option<(u32, u32)>) -> Vec<u8> {
+        let mut headers = vec![0u8; 24 + optional.max(96) + 16 * 8];
+        headers[0..4].copy_from_slice(b"PE\0\0");
+        write_u16(&mut headers, 20, optional as u16);
+        write_u16(&mut headers, 24, magic);
+        if let Some((rva, size)) = export {
+            let directory = 24 + if magic == 0x10b { 96 } else { 112 };
+            write_u32(&mut headers, directory, rva);
+            write_u32(&mut headers, directory + 4, size);
+        }
+        headers
+    }
+
+    #[test]
+    fn export_directory_is_located_in_pe32_and_pe32_plus_headers() {
+        for (machine, magic, optional) in [(0x014cu16, 0x10bu16, 96usize), (0x8664, 0x20b, 112)] {
+            let mut headers = synthetic_nt(magic, optional + 16 * 8, Some((0x1000, 0x80)));
+            write_u16(&mut headers, 4, machine);
+            assert_eq!(pe_export_directory(&headers), Some((0x1000, 0x80)));
+            assert_eq!(pe_export_directory(&headers[..24 + optional + 4]), None);
+        }
+        assert_eq!(pe_export_directory(b"not a PE"), None);
+        assert_eq!(
+            pe_export_directory(&synthetic_nt(0x10b, 96 - 8, Some((1, 2)))),
+            None,
+            "optional header too small for the data directory"
+        );
+    }
+
+    #[test]
+    fn find_export_resolves_functions_forwarders_and_rejects_damage() {
+        let dir_rva = 0x1000u32;
+        let mut image = vec![0u8; 0x80];
+        write_u32(&mut image, 0x18, 2); // NumberOfNames
+        write_u32(&mut image, 0x1C, dir_rva + 0x28); // AddressOfFunctions
+        write_u32(&mut image, 0x20, dir_rva + 0x30); // AddressOfNames
+        write_u32(&mut image, 0x24, dir_rva + 0x38); // AddressOfNameOrdinals
+        write_u32(&mut image, 0x28, 0x2000); // functions[0]
+        write_u32(&mut image, 0x2C, dir_rva + 0x50); // functions[1] → forwarder string
+        write_u32(&mut image, 0x30, dir_rva + 0x60); // names[0] → "Alpha"
+        write_u32(&mut image, 0x34, dir_rva + 0x66); // names[1] → "Beta"
+        write_u16(&mut image, 0x38, 0); // ordinals[0]
+        write_u16(&mut image, 0x3A, 1); // ordinals[1]
+        image[0x50..0x60].copy_from_slice(b"KERNELBASE.Beta\0");
+        image[0x60..0x6B].copy_from_slice(b"Alpha\0Beta\0");
+        assert!(
+            matches!(
+                find_export(&image, dir_rva, 0x80, "Alpha"),
+                Ok(ExportEntry::Function(0x2000))
+            ),
+            "plain export must resolve to its RVA"
+        );
+        assert!(
+            matches!(
+                find_export(&image, dir_rva, 0x80, "Beta"),
+                Ok(ExportEntry::Forwarder(ref name)) if name == "KERNELBASE.Beta"
+            ),
+            "forwarder export must resolve to its DLL.Proc string"
+        );
+        assert!(find_export(&image, dir_rva, 0x80, "Gamma").is_err());
+        assert!(
+            find_export(&image[..0x40], dir_rva, 0x80, "Alpha").is_err(),
+            "truncated image must error instead of panicking"
+        );
+        let mut dangling = image.clone();
+        write_u32(&mut dangling, 0x30, 0x7FFF_FFF0); // name RVA outside the image
+        assert!(find_export(&dangling, dir_rva, 0x80, "Alpha").is_err());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn export_table_resolution_matches_get_proc_address_on_host() {
+        let process = TargetProcess::open(std::process::id() as i32).expect("open self");
+        let resolved = remote_export(&process, "kernel32.dll", "LoadLibraryW", 0)
+            .expect("resolve kernel32!LoadLibraryW through the export table");
+        let mut kernel32_name: Vec<u16> = "kernel32.dll".encode_utf16().collect();
+        kernel32_name.push(0);
+        // SAFETY: NUL-terminated name; handle checked for null.
+        let handle = unsafe { GetModuleHandleW(kernel32_name.as_ptr()) };
+        assert!(!handle.is_null());
+        // SAFETY: handle from GetModuleHandleW; c"LoadLibraryW" is NUL-terminated ASCII.
+        let expected = unsafe { GetProcAddress(handle, c"LoadLibraryW".as_ptr().cast()) }
+            .map(|function| function as usize as u64)
+            .expect("GetProcAddress(kernel32!LoadLibraryW)");
+        assert_eq!(resolved, expected);
+        assert!(
+            remote_export(&process, "kernel32.dll", "KotamaNoSuchExport", 0).is_err(),
+            "unknown export must be an error"
+        );
+        assert!(
+            remote_export(&process, "kotama-no-such-module.dll", "LoadLibraryW", 0).is_err(),
+            "unknown module must be an error"
+        );
+    }
+
     #[test]
     fn read_pe_machine_parses_x64_and_x86_headers() {
         assert_eq!(read_pe_machine(&synthetic_pe(0x8664)), Some(0x8664));
@@ -489,7 +773,7 @@ mod tests {
             session.inject(&missing, Duration::from_secs(1)),
             Err(HostError::Inject(_))
         ));
-        // 存在、绝对、但不是 x64（模拟 i686 DLL）。
+        // 存在、绝对、但机器位与 x64 宿主不符（模拟 i686 DLL 注入 x64 进程）。
         let fake = std::env::temp_dir().join(format!("kotama-fake-x86-{}.dll", std::process::id()));
         std::fs::write(&fake, synthetic_pe(0x014c)).expect("write fake dll");
         let result = session.inject(&fake, Duration::from_secs(1));
