@@ -825,36 +825,43 @@ fn is_frame_relative_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 2) else {
         return false;
     };
-    matches!(bytes[0], 0x8B | 0x8D)
-        && matches!(
-            bytes[1],
-            0x45 | 0x4D
-                | 0x55
-                | 0x5D
-                | 0x65
-                | 0x6D
-                | 0x75
-                | 0x7D
-                | 0x85
-                | 0x8D
-                | 0x95
-                | 0x9D
-                | 0xA5
-                | 0xAD
-                | 0xB5
-                | 0xBD
-        )
+    matches!(bytes[0], 0x8B | 0x8D | 0xFF) && is_ebp_disp_modrm(bytes[1])
+}
+
+fn is_ebp_disp_modrm(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x45 | 0x4D
+            | 0x55
+            | 0x5D
+            | 0x65
+            | 0x6D
+            | 0x75
+            | 0x7D
+            | 0x85
+            | 0x8D
+            | 0x95
+            | 0x9D
+            | 0xA5
+            | 0xAD
+            | 0xB5
+            | 0xBD
+    )
 }
 
 /// 明显不是函数起点的字节：ret、int3、null、常见的 padding 噪声形状
 /// `sub ecx, [ecx+disp]`（`2B 49`），以及 frame-relative 访问。
 fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
-    let Some(bytes) = space.read(rva, 2) else {
+    let Some(bytes) = space.read(rva, 4) else {
         return false;
     };
     matches!(bytes[0], 0xCC | 0xC3 | 0x00)
         || (bytes[0] == 0x90 && bytes[1] == 0x90)
         || (bytes[0] == 0x2B && bytes[1] == 0x49)
+        || (bytes[0] == 0x6A
+            && bytes.len() >= 4
+            && matches!(bytes[2], 0x8B | 0x8D)
+            && is_ebp_disp_modrm(bytes[3]))
         || is_frame_relative_start(space, rva)
 }
 
@@ -1941,9 +1948,16 @@ mod tests {
         space.write(0x1010, &[0xCC, 0xCC, 0xCC, 0xCC]);
         space.write(0x1020, &[0x8D, 0x4D, 0x08, 0xC3]);
         space.write(0x1030, &[0x90, 0x90, 0x8B, 0x44, 0x24, 0x04, 0xC3]);
+        space.write(
+            0x1040,
+            &[0xFF, 0x75, 0x08, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3],
+        );
+        space.write(0x1050, &[0x6A, 0x18, 0x8B, 0x45, 0x08, 0xC3]);
         space.write(0x2000, &0x40_1010u32.to_le_bytes());
         space.write(0x2004, &0x40_1020u32.to_le_bytes());
         space.write(0x2008, &0x40_1030u32.to_le_bytes());
+        space.write(0x200C, &0x40_1040u32.to_le_bytes());
+        space.write(0x2010, &0x40_1050u32.to_le_bytes());
         let sections = vec![
             SectionInfo {
                 rva: 0x1000,
@@ -1970,10 +1984,12 @@ mod tests {
         };
         let functions = discover_with(view, &space);
         assert!(
-            !functions
-                .iter()
-                .any(|function| matches!(function.rva, 0x1010 | 0x1020 | 0x1030)
-                    && function.evidence.contains(&Evidence::PointerTarget)),
+            !functions.iter().any(|function| matches!(
+                function.rva,
+                0x1010 | 0x1020 | 0x1030 | 0x1040 | 0x1050
+            ) && function
+                .evidence
+                .contains(&Evidence::PointerTarget)),
             "degenerate target was accepted: {functions:?}"
         );
     }
