@@ -959,14 +959,26 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                 run.push(value);
             } else {
                 if run.len() >= 8 {
-                    targets.extend(run.drain(..));
+                    for value in run.drain(..) {
+                        let aligned = value % 4 == 0
+                            && (!matches!(module.arch, Arch::X86) || value % 16 == 0);
+                        if aligned && has_code_boundary_before(space, value) {
+                            targets.insert(value);
+                        }
+                    }
                 } else {
                     run.clear();
                 }
             }
         }
         if run.len() >= 8 {
-            targets.extend(run);
+            for value in run {
+                let aligned =
+                    value % 4 == 0 && (!matches!(module.arch, Arch::X86) || value % 16 == 0);
+                if aligned && has_code_boundary_before(space, value) {
+                    targets.insert(value);
+                }
+            }
         }
     }
     targets
