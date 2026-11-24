@@ -283,7 +283,9 @@ fn discover_impl(
             &rvas[3..rvas.len().min(6)]
         );
     }
+    let known_starts: BTreeSet<u64> = rvas.iter().copied().collect();
     let mut out = refine_bodies(&module, &exec_ranges, rvas, &table);
+    expand_inferred_sizes(&module, &exec_ranges, &known_starts, &mut out);
     out.sort_by_key(|entry| entry.rva);
     out
 }
@@ -399,6 +401,74 @@ fn refine_bodies(
         index += 1 + consumed;
     }
     out
+}
+
+/// 用直接條件分支目標擴大「推斷」函數的 size。
+///
+/// 只改輸出 size，不改入口集合，也不吸收候選；上界是下一個函數起點或執行節末。
+/// 分支目標若本身就是已知函數起點，則視為共享尾塊/其他函數，不跟隨。
+fn expand_inferred_sizes(
+    module: &ViewAdapter<'_>,
+    exec_ranges: &[(u64, u64)],
+    known_starts: &BTreeSet<u64>,
+    functions: &mut [FunctionEntry],
+) {
+    let space = module.address_space();
+    let bitness = module.arch.bitness();
+    for index in 0..functions.len() {
+        if !functions[index].size_inferred {
+            continue;
+        }
+        let start = functions[index].rva;
+        let limit = functions
+            .get(index + 1)
+            .map_or_else(|| exec_limit(exec_ranges, start), |next| next.rva)
+            .min(exec_limit(exec_ranges, start));
+        if limit <= start {
+            continue;
+        }
+        let mut end = start;
+        let mut visited = BTreeSet::new();
+        let mut work = vec![start];
+        while let Some(address) = work.pop() {
+            if address < start || address >= limit || !visited.insert(address) {
+                continue;
+            }
+            let Some(bytes) = space.read(
+                address,
+                usize::try_from(limit - address).unwrap_or(usize::MAX),
+            ) else {
+                continue;
+            };
+            let mut decoder = Decoder::with_ip(bitness, bytes, address, DecoderOptions::NONE);
+            let mut instruction = Instruction::default();
+            while decoder.can_decode() {
+                decoder.decode_out(&mut instruction);
+                if instruction.is_invalid() {
+                    break;
+                }
+                end = end.max(instruction.next_ip());
+                match instruction.flow_control() {
+                    FlowControl::ConditionalBranch => {
+                        if let Some(target) = direct_near_target(&instruction) {
+                            if (start..limit).contains(&target) && !known_starts.contains(&target) {
+                                work.push(target);
+                            }
+                        }
+                    }
+                    FlowControl::Return
+                    | FlowControl::UnconditionalBranch
+                    | FlowControl::IndirectBranch
+                    | FlowControl::Interrupt
+                    | FlowControl::Exception => break,
+                    _ => {}
+                }
+            }
+        }
+        if end > start {
+            functions[index].size = end - start;
+        }
+    }
 }
 
 /// 是否终止一个函数体（顺序执行不再往下走）。
@@ -2097,6 +2167,50 @@ mod tests {
                 && prologue_targets.contains(&0x1230),
             "prologue targets not discovered: {functions:?}"
         );
+    }
+
+    #[test]
+    fn cfg_size_includes_conditional_branch_block() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        space.write(0x1000, &[0x74, 0x1E]);
+        space.write(0x1002, &[0xC3]);
+        space.write(0x1020, &[0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        let entry = functions
+            .iter()
+            .find(|function| function.rva == 0x1000)
+            .expect("entry function");
+        assert_eq!(entry.size, 0x21);
+        assert!(entry.size_inferred);
     }
 
     #[test]
