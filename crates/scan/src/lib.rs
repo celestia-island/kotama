@@ -1763,7 +1763,7 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
         let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
             continue;
         };
-        let alignment = u64::try_from(module.arch.bitness() / 8).unwrap_or(4);
+        let alignment = u64::from(module.arch.bitness() / 8);
         let mut offset =
             usize::try_from((alignment - (*start % alignment)) % alignment).unwrap_or(0);
         while offset < bytes.len() {
