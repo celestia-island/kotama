@@ -258,6 +258,13 @@ fn discover_impl(
             .evidence
             .insert(Evidence::PrologueTarget);
     }
+    for target in aligned_pattern_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
+    }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
     let rvas: Vec<u64> = table.keys().copied().collect();
@@ -1263,6 +1270,50 @@ fn frame_prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) 
     targets
 }
 
+/// 4 字节对齐、前置代码边界的热补丁 / thunk 形态。
+///
+/// 这些起点不满足 16 对齐的两字节填充前提，但形态本身很窄：
+/// 热补丁 `8B FF 55 8B EC`、尾调用 `83 E9 imm8; E9`、以及常见 thunk 序言。
+fn aligned_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let mut targets = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut offset = usize::try_from((4 - (*start % 4)) % 4).unwrap_or(0);
+        while offset + 8 <= bytes.len() {
+            let boundary = offset >= 1
+                && matches!(
+                    bytes[offset - 1],
+                    0xC3 | 0xC2 | 0xE9 | 0xEB | 0xFF | 0xCC | 0x90 | 0x00
+                );
+            if boundary {
+                let window = &bytes[offset..offset + 5];
+                let thunk = window[0] == 0x83 && window[1] == 0xE9 && window[3] == 0xE9;
+                let hotpatch = window[0] == 0x8B
+                    && window[1] == 0xFF
+                    && window[2] == 0x55
+                    && window[3] == 0x8B
+                    && window[4] == 0xEC;
+                let common = (window[0] == 0x51
+                    && window[1] == 0x56
+                    && window[2] == 0x8B
+                    && window[3] == 0x74)
+                    || (window[0] == 0x8D
+                        && window[1] == 0x41
+                        && window[2] == 0xF4
+                        && window[3] == 0x85);
+                if thunk || hotpatch || common {
+                    targets.insert(*start + u64::try_from(offset).unwrap_or(0));
+                }
+            }
+            offset += 4;
+        }
+    }
+    targets
+}
+
 /// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
 fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
@@ -1882,6 +1933,13 @@ mod tests {
         space.write(0x1100, &[0x53, 0x56, 0x57, 0x8B, 0xF9, 0x8B, 0x00, 0xC3]);
         space.write(0x1110, &[0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0xC3]);
         space.write(0x1120, &[0x8B, 0x41, 0x04, 0x80, 0xC3, 0x00, 0xC3]);
+        space.write(0x1130, &[0x51, 0x56, 0x8B, 0x74, 0x24, 0x08, 0xC3]);
+        space.write(
+            0x1140,
+            &[0x83, 0xE9, 0x28, 0xE9, 0x00, 0x00, 0x00, 0x00, 0xC3],
+        );
+        space.write(0x1150, &[0x8D, 0x41, 0xF4, 0x85, 0xC0, 0xC3]);
+        space.write(0x1160, &[0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -1920,7 +1978,11 @@ mod tests {
                 && prologue_targets.contains(&0x10F0)
                 && prologue_targets.contains(&0x1100)
                 && prologue_targets.contains(&0x1110)
-                && prologue_targets.contains(&0x1120),
+                && prologue_targets.contains(&0x1120)
+                && prologue_targets.contains(&0x1130)
+                && prologue_targets.contains(&0x1140)
+                && prologue_targets.contains(&0x1150)
+                && prologue_targets.contains(&0x1160),
             "prologue targets not discovered: {functions:?}"
         );
     }
