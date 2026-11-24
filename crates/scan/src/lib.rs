@@ -1839,10 +1839,37 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
     const MAX_BODY: usize = 8192;
     let space = module.address_space();
     let bitness = module.arch.bitness();
+    let image_base = if module.image_base != 0 {
+        module.image_base
+    } else {
+        pe_image_base(space, module.container).unwrap_or(0)
+    };
     let mut targets = BTreeSet::new();
     for (start, size) in exec_ranges {
         let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
             continue;
+        };
+        // 结束于 offset 的 6 字节 jmp [槽] 是否真是导入 stub：槽位要落在非执行节
+        //（`FF 25` 两个字节也常出现在普通指令的立即数里）。
+        let import_stub_ends_here = |stub_at: usize, rva: u64| {
+            rel32_at(&bytes[stub_at..], 1)
+                .map(i64::from)
+                .and_then(|disp| {
+                    if bitness == 64 {
+                        i64::try_from(rva).ok().map(|next| next + disp)
+                    } else {
+                        Some(disp - i64::try_from(image_base).unwrap_or(0))
+                    }
+                })
+                .and_then(|slot| u64::try_from(slot).ok())
+                .is_some_and(|slot| {
+                    module.sections.iter().any(|section| {
+                        !section.executable
+                            && section.rva > 0
+                            && slot >= section.rva
+                            && slot < section.rva.saturating_add(section.size)
+                    })
+                })
         };
         // COMDAT 折叠后的小函数按 4 字节粒度落位，与位宽无关。
         let alignment = 4u64;
@@ -1851,9 +1878,20 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
         while offset < bytes.len() {
             let rva = *start + u64::try_from(offset).unwrap_or(0);
             let body = bytes.get(offset..offset + MAX_BODY.min(bytes.len() - offset));
-            if offset >= 2
+            let cc_padded = offset >= 2
                 && bytes[offset - 1] == 0xCC
-                && matches!(bytes[offset - 2], 0xCC | 0xC3)
+                && matches!(bytes[offset - 2], 0xCC | 0xC3);
+            // 导入跳转 stub（jmp [iat]）之后直接是下一个函数，没有填充。
+            let after_import_stub = (offset >= 6
+                && bytes[offset - 6] == 0xFF
+                && bytes[offset - 5] == 0x25
+                && import_stub_ends_here(offset - 6, rva))
+                || (offset >= 7
+                    && bytes[offset - 1] == 0xCC
+                    && bytes[offset - 7] == 0xFF
+                    && bytes[offset - 6] == 0x25
+                    && import_stub_ends_here(offset - 7, rva - 1));
+            if (cc_padded || after_import_stub)
                 && !matches!(bytes[offset], 0xCC | 0xC3 | 0x90 | 0x00)
                 && !is_padding_noise(space, rva)
                 && body.is_some_and(|body| decodes_to_terminator(bitness, body, rva))
@@ -1869,10 +1907,13 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
 /// 顺序解码是否到达终结符。
 ///
 /// `int3` 既可能是函数体里的 fastfail（`cmp; ja; int3; ret`），也可能是跟在数据后面的填充：
-/// 只有它后面不是 `int3` 时才算终结符，填充串则拒绝。非法指令一律拒绝。
+/// 只有它后面不是 `int3` 时才算终结符，填充串则拒绝；`call` 之后的 `int3` 填充是
+/// noreturn 调用（exit / abort）的函数结尾，也算终结符。非法指令一律拒绝。
 fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
     let mut decoder = Decoder::with_ip(bitness, body, ip, DecoderOptions::NONE);
     let mut instructions = 0usize;
+    // 距上一条 call 的指令数；开头即视为「很久没调用」。
+    let mut since_call = 1usize;
     while decoder.can_decode() {
         let instruction = decoder.decode();
         if instruction.is_invalid() {
@@ -1881,6 +1922,11 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
         instructions += 1;
         if instruction.flow_control() == FlowControl::Interrupt {
             let next = instruction.next_ip();
+            // call（直接或间接）紧跟填充：被调方不返回（exit / abort 一类），函数到此为止。
+            // 放宽到「call 后两三条指令内」会在真实样本上接进几十个无人认可的数据块，不放宽。
+            if since_call == 0 {
+                return true;
+            }
             // 两字节的 int imm8（如 fastfail 的 int 29h）本身就是终结符；只有单字节
             // int3 可能是数据后面的填充串，才要求它后面不是又一个 int3。
             let two_byte_int = instruction.len() == 2;
@@ -1890,6 +1936,14 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
                         .get(usize::try_from(next - ip).unwrap_or(usize::MAX)..)
                         .and_then(|rest| rest.first())
                         .is_some_and(|byte| *byte != 0xCC));
+        }
+        if matches!(
+            instruction.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            since_call = 0;
+        } else {
+            since_call = since_call.saturating_add(1);
         }
         if is_terminator(&instruction) {
             return true;
@@ -3468,6 +3522,15 @@ mod tests {
         space.write(0x1012, &0x40_2000u32.to_le_bytes());
         space.write(0x1016, &[0xFF, 0x25]);
         space.write(0x1018, &0x40_2004u32.to_le_bytes());
+        // 导入 stub 之后直接是下一个函数（没有填充）；再后面是 noreturn 调用 + 填充的小函数
+        // （函数 4 字节对齐，stub 落在 2 mod 4）
+        space.write(0x1042, &[0xFF, 0x25]);
+        space.write(0x1044, &0x40_2008u32.to_le_bytes());
+        space.write(0x1048, &[0xB0, 0x01, 0xC3]);
+        space.write(0x104E, &[0xCC, 0xCC]);
+        space.write(0x1050, &[0x6A, 0x01, 0xFF, 0x15]);
+        space.write(0x1054, &0x40_200Cu32.to_le_bytes());
+        space.write(0x1058, &[0xCC, 0xCC, 0xCC, 0xCC]);
         // 槽位落在代码里：不是导入 stub
         space.write(0x102F, &[0xC3]);
         space.write(0x1030, &[0xFF, 0x25]);
@@ -3497,11 +3560,11 @@ mod tests {
             debug_functions: &[],
         };
         let functions = discover_with(view, &space);
-        for rva in [0x1010u64, 0x1016] {
+        for (rva, size) in [(0x1010u64, 6u64), (0x1016, 6), (0x1048, 3), (0x1050, 9)] {
             assert!(
                 functions
                     .iter()
-                    .any(|function| function.rva == rva && function.size == 6),
+                    .any(|function| function.rva == rva && function.size == size),
                 "import stub {rva:#x} not discovered: {functions:?}"
             );
         }
