@@ -288,6 +288,13 @@ fn discover_impl(
             .evidence
             .insert(Evidence::CallTarget);
     }
+    for target in padded_code_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
+    }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
     let rvas: Vec<u64> = table.keys().copied().collect();
@@ -921,11 +928,6 @@ fn has_code_boundary_before(space: &dyn AddressSpace, rva: u64) -> bool {
     )
 }
 
-/// `sub ecx, [ecx-4]; jmp` 是 MSVC 虚基类调整器 thunk 的开头，不是 padding 噪声。
-fn is_vbtable_thunk(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes[2] == 0xFC && bytes[3] == 0xE9
-}
-
 /// `mov/lea reg, [ebp+disp]` is a frame-relative access, never a function entry.
 fn is_frame_relative_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 2) else {
@@ -969,7 +971,8 @@ fn is_padding_noise(space: &dyn AddressSpace, rva: u64) -> bool {
     };
     matches!(bytes[0], 0xCC | 0xC3 | 0x00)
         || (bytes[0] == 0x90 && bytes[1] == 0x90)
-        || (bytes[0] == 0x2B && bytes[1] == 0x49 && !is_vbtable_thunk(bytes))
+        // 2B 49 FC（sub ecx,[ecx-4]）是 vbtable 调整 thunk 的固定开头，不是噪声。
+        || (bytes[0] == 0x2B && bytes[1] == 0x49 && bytes[2] != 0xFC)
         || (bytes[0] == 0x6A
             && bytes.len() >= 4
             && matches!(bytes[2], 0x8B | 0x8D)
@@ -1741,6 +1744,56 @@ fn thunk_targets(
         }
     }
     (starts, jumps)
+}
+
+/// 16 对齐、前置 ≥2 字节 `int3` 对齐填充、且能顺序解码到终结符的代码起点。
+///
+/// [`prologue_targets`] 形状表的泛化：MSVC 把每个函数（包括没有任何引用的 leaf、模板
+/// 实例化、调整 thunk）对齐到 16 字节并用 `int3` 填充，而起点的指令形态无穷无尽。
+/// 只认 `int3`（`90 90` 常是 `mov edx,[eax+1]` 这类指令的 ModRM/disp 字节，
+/// 不是填充），且必须在 256 字节内、不遇非法指令、也不以 `int3` 结束地解码到
+/// ret / 无条件跳转 / 间接跳转。
+fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    const MAX_BODY: usize = 256;
+    let space = module.address_space();
+    let bitness = module.arch.bitness();
+    let mut targets = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut offset = usize::try_from((16 - (*start % 16)) % 16).unwrap_or(0);
+        while offset < bytes.len() {
+            let rva = *start + u64::try_from(offset).unwrap_or(0);
+            let body = bytes.get(offset..offset + MAX_BODY.min(bytes.len() - offset));
+            if offset >= 2
+                && bytes[offset - 1] == 0xCC
+                && bytes[offset - 2] == 0xCC
+                && !matches!(bytes[offset], 0xCC | 0xC3 | 0x90 | 0x00)
+                && !is_padding_noise(space, rva)
+                && body.is_some_and(|body| decodes_to_terminator(bitness, body, rva))
+            {
+                targets.insert(rva);
+            }
+            offset += 16;
+        }
+    }
+    targets
+}
+
+/// 顺序解码是否在不遇非法指令 / `int3` 的情况下到达终结符。
+fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
+    let mut decoder = Decoder::with_ip(bitness, body, ip, DecoderOptions::NONE);
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.is_invalid() || instruction.flow_control() == FlowControl::Interrupt {
+            return false;
+        }
+        if is_terminator(&instruction) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
@@ -2951,6 +3004,87 @@ mod tests {
                 functions.iter().any(|function| function.rva == rva
                     && function.evidence.contains(&Evidence::PointerTarget)),
                 "pointer target {rva:#x} not discovered: {functions:?}"
+            );
+        }
+    }
+
+    /// 16 对齐 + `int3` 填充 + 可顺序解码到终结符：无引用 leaf 函数的通用形态。
+    #[test]
+    fn padded_code_starts_are_discovered_but_tables_and_fake_padding_are_not() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x1000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        space.write(0x1000, &[0xC3]);
+        // 无引用的 leaf：xor eax,eax; ret
+        space.write(0x100E, &[0xCC, 0xCC]);
+        space.write(0x1010, &[0x33, 0xC0, 0xC3]);
+        // 调整 thunk：sub ecx,[ecx-4]; sub ecx,0x38; jmp 0x1100
+        space.write(0x102E, &[0xCC, 0xCC]);
+        space.write(0x1030, &[0x2B, 0x49, 0xFC, 0x83, 0xE9, 0x38, 0xE9]);
+        space.write(0x1037, &(0x1100i32 - 0x103Ci32).to_le_bytes());
+        // 16 对齐、int3 填充的跳转表：解码会撞上填充 int3，不是代码
+        space.write(0x104E, &[0xCC, 0xCC]);
+        space.write(
+            0x1050,
+            &[
+                0x10, 0x10, 0x40, 0x00, 0x20, 0x10, 0x40, 0x00, 0xCC, 0xCC, 0xCC, 0xCC,
+            ],
+        );
+        // 90 90 不是填充：它们是 mov edx,[eax+1] 的 ModRM/disp
+        space.write(0x1068, &[0x8B, 0x90, 0x01, 0x00, 0x00]);
+        space.write(0x1070, &[0x33, 0xC0, 0xC3]);
+        // 256 字节内到不了终结符
+        space.write(0x108E, &[0xCC, 0xCC]);
+        space.write(0x1090, &[0x40; 300]);
+        // 非 16 对齐
+        space.write(0x11C0, &[0xCC, 0xCC]);
+        space.write(0x11C2, &[0x33, 0xC0, 0xC3]);
+        // 帧序言作为对照
+        space.write(0x11DE, &[0xCC, 0xCC]);
+        space.write(0x11E0, &[0x55, 0x8B, 0xEC, 0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        let has = |rva: u64| {
+            functions.iter().any(|function| {
+                function.rva == rva && function.evidence.contains(&Evidence::PrologueTarget)
+            })
+        };
+        for rva in [0x1010u64, 0x1030, 0x11E0] {
+            assert!(
+                has(rva),
+                "padded code start {rva:#x} not discovered: {functions:?}"
+            );
+        }
+        for rva in [0x1050u64, 0x1070, 0x1090, 0x11C2] {
+            assert!(
+                !functions.iter().any(|function| function.rva == rva),
+                "non-code or fake padding at {rva:#x} was accepted: {functions:?}"
             );
         }
     }
