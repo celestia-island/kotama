@@ -943,10 +943,9 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
             };
             let plausible = looks_like_function_start(space, target)
                 || (prefer_rva && looks_like_function_start_weak(space, target));
-            if target % pointer_size as u64 == 0
-                && plausible
-                && has_code_boundary_before(space, target)
-            {
+            let aligned = target % pointer_size as u64 == 0
+                && (!matches!(module.arch, Arch::X86) || target % 16 == 0);
+            if aligned && plausible && has_code_boundary_before(space, target) {
                 targets.insert(target);
             }
         }
@@ -1016,7 +1015,8 @@ fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BT
                 } else {
                     continue;
                 };
-                if rva % 4 == 0
+                let aligned = rva % 4 == 0 && (!matches!(module.arch, Arch::X86) || rva % 16 == 0);
+                if aligned
                     && looks_like_function_start(space, rva)
                     && has_code_boundary_before(space, rva)
                 {
@@ -1047,7 +1047,8 @@ fn prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTr
                 && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
                 && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00);
             let prologue = (window[0] == 0x83 && matches!(window[1], 0xEC | 0xE4))
-                || (window[0] == 0x81 && matches!(window[1], 0xEC | 0xE4));
+                || (window[0] == 0x81 && matches!(window[1], 0xEC | 0xE4))
+                || (window[0] == 0xB8 && window[5] == 0xC3);
             if padded && prologue {
                 targets.insert(rva);
             }
@@ -1640,6 +1641,8 @@ mod tests {
         space.write(0x1000, &[0xC3]);
         space.write(0x100E, &[0xCC, 0xCC]);
         space.write(0x1010, &[0x83, 0xEC, 0x10, 0xC3]);
+        space.write(0x102E, &[0xCC, 0xCC]);
+        space.write(0x1030, &[0xB8, 0x34, 0x12, 0x00, 0x00, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -1657,10 +1660,14 @@ mod tests {
             debug_functions: &[],
         };
         let functions = discover_with(view, &space);
+        let prologue_targets: Vec<u64> = functions
+            .iter()
+            .filter(|function| function.evidence.contains(&Evidence::PrologueTarget))
+            .map(|function| function.rva)
+            .collect();
         assert!(
-            functions.iter().any(|function| function.rva == 0x1010
-                && function.evidence.contains(&Evidence::PrologueTarget)),
-            "prologue target not discovered: {functions:?}"
+            prologue_targets.contains(&0x1010) && prologue_targets.contains(&0x1030),
+            "prologue targets not discovered: {functions:?}"
         );
     }
 
