@@ -853,6 +853,7 @@ fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
         return false;
     };
     matches!(bytes[0], 0xCC | 0xC3 | 0x00)
+        || (bytes[0] == 0x90 && bytes[1] == 0x90)
         || (bytes[0] == 0x2B && bytes[1] == 0x49)
         || is_frame_relative_start(space, rva)
 }
@@ -1931,8 +1932,10 @@ mod tests {
         space.write(0x1000, &[0xC3]);
         space.write(0x1010, &[0xCC, 0xCC, 0xCC, 0xCC]);
         space.write(0x1020, &[0x8D, 0x4D, 0x08, 0xC3]);
+        space.write(0x1030, &[0x90, 0x90, 0x8B, 0x44, 0x24, 0x04, 0xC3]);
         space.write(0x2000, &0x40_1010u32.to_le_bytes());
         space.write(0x2004, &0x40_1020u32.to_le_bytes());
+        space.write(0x2008, &0x40_1030u32.to_le_bytes());
         let sections = vec![
             SectionInfo {
                 rva: 0x1000,
@@ -1961,7 +1964,7 @@ mod tests {
         assert!(
             !functions
                 .iter()
-                .any(|function| matches!(function.rva, 0x1010 | 0x1020)
+                .any(|function| matches!(function.rva, 0x1010 | 0x1020 | 0x1030)
                     && function.evidence.contains(&Evidence::PointerTarget)),
             "degenerate target was accepted: {functions:?}"
         );
