@@ -420,17 +420,68 @@ fn live_e2e_attach_then_inject_into_x86_target_over_default_pid_pipe() {
     );
     let pid = child.0.id() as i32;
     let (target, spin_base) = wait_for_main_module(pid, "spin.exe");
-    let header = target
-        .read_absolute(spin_base, 0x40)
-        .expect("host read of image head");
-    let lfanew = u32::from_le_bytes(header[0x3C..0x40].try_into().expect("e_lfanew")) as usize;
-    let machine_bytes = target
-        .read_absolute(spin_base + lfanew as u64 + 4, 2)
-        .expect("host read of COFF machine");
+    let image = target
+        .pe_image(Some(spin_base))
+        .expect("live image of the WOW64 target");
+    assert_eq!(image.container, kotama_image::Container::Pe32);
     assert_eq!(
-        u16::from_le_bytes(machine_bytes.try_into().expect("machine")),
-        0x014c,
+        image.arch,
+        kotama_image::Arch::X86,
         "the x86 lane must target a WOW64 process"
+    );
+
+    // 活体发现 == 静态发现：同一映像按自身架构解码，函数起点集合必须逐项相同。
+    let live_functions = kotama_scan::discover_with(
+        kotama_scan::ScanView {
+            container: image.container,
+            arch: image.arch,
+            image_base: image.base,
+            entry_rva: image.entry_rva,
+            sections: &image.sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        },
+        &image,
+    );
+    let file = std::fs::read(&spin).expect("read x86 fixture image");
+    let module = kotama_image::LoadedModule::parse(&file).expect("parse x86 fixture image");
+    let static_functions = kotama_scan::discover_with(
+        kotama_scan::ScanView {
+            container: module.container,
+            arch: module.arch,
+            image_base: module.image_base,
+            entry_rva: module.entry_rva,
+            sections: &module.sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        },
+        &module.address_space(),
+    );
+    let live_rvas: std::collections::BTreeSet<u64> =
+        live_functions.iter().map(|function| function.rva).collect();
+    let static_rvas: std::collections::BTreeSet<u64> = static_functions
+        .iter()
+        .map(|function| function.rva)
+        .collect();
+    assert!(
+        static_rvas.is_subset(&live_rvas),
+        "every static start must be found live: missing {:?}",
+        static_rvas.difference(&live_rvas).collect::<Vec<_>>()
+    );
+    // 文件里头页与 .text 之间没有后备字节，静态看不到那里的零填充；活体里它让节首
+    // 成为合法的填充起点。除此之外两边的起点集合必须逐项相同。
+    let section_starts: std::collections::BTreeSet<u64> = image
+        .sections
+        .iter()
+        .filter(|section| section.executable)
+        .map(|section| section.rva)
+        .collect();
+    let live_only: Vec<u64> = live_rvas.difference(&static_rvas).copied().collect();
+    assert!(
+        live_only.iter().all(|rva| section_starts.contains(rva)),
+        "live-only starts must be executable section starts, got {live_only:?}"
     );
 
     let server = NamedPipeServer::for_pid(pid).expect("deterministic default pipe");
