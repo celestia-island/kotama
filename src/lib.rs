@@ -172,6 +172,8 @@ pub enum Evidence {
     CallTarget,
     /// 非执行节里的函数指针（回调表 / vtable / 手写分派表）。
     PointerTarget,
+    /// 代码里的绝对地址立即数（`push offset` / `mov reg, offset` / 静态回调注册）。
+    ImmediateTarget,
 }
 
 impl Evidence {
@@ -187,6 +189,7 @@ impl Evidence {
             Self::Entry => "entry",
             Self::CallTarget => "call",
             Self::PointerTarget => "pointer",
+            Self::ImmediateTarget => "immediate",
         }
     }
 }

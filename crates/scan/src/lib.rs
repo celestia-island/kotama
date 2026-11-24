@@ -8,6 +8,7 @@
 //! - `entry`：映像入口点
 //! - `call`：可执行节的直接 `call` 目标（线性反汇编收集；strip 二进制的主要信号）
 //! - `pointer`：非执行节里的函数指针（回调表 / vtable / 手工分派表）
+//! - `immediate`：代码里的绝对地址立即数（`push offset` / `mov reg, offset`）
 //!
 //! 长度推断：没有边界的条目按「到下一个函数条目的距离」补（`size_inferred = true`）。
 //! 确定性：所有输出按 RVA 升序、证据集合排序稳定；同一输入两次发现逐字段相同。
@@ -234,6 +235,13 @@ fn discover_impl(
             .or_default()
             .evidence
             .insert(Evidence::PointerTarget);
+    }
+    for target in immediate_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::ImmediateTarget);
     }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
@@ -786,10 +794,35 @@ fn pe_image_base(space: &dyn AddressSpace, container: Container) -> Option<u64> 
     }
 }
 
+/// 目标是否像函数起点：前面有对齐填充，或开头是常见 x86 序言。
+fn looks_like_function_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    let start = rva.saturating_sub(2);
+    let (window, padded) = if let Some(bytes) = space.read(start, 8) {
+        let offset = usize::try_from(rva - start).unwrap_or(0);
+        let padded = offset >= 2
+            && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
+            && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00);
+        (bytes.get(offset..offset + 5), padded)
+    } else {
+        (space.read(rva, 5), false)
+    };
+    let Some(window) = window else {
+        return false;
+    };
+    if window.len() < 3 {
+        return false;
+    }
+    let prologue = (window[0] == 0x55 && window[1] == 0x8B && window[2] == 0xEC)
+        || (window[0] == 0x83 && matches!(window[1], 0xEC | 0xE4))
+        || (window[0] == 0x81 && matches!(window[1], 0xEC | 0xE4))
+        || matches!(window[0], 0x53 | 0x56 | 0x57);
+    padded || prologue
+}
+
 /// 扫描非执行节里的函数指针（回调表 / vtable / 手写分派表）。
 ///
 /// 指针可能是绝对 VA 或已经归一过的 RVA；两者都接受。目标必须在执行节内、
-/// 按指针宽度对齐，避免把普通整数误认成函数入口。
+/// 按指针宽度对齐，且看起来像函数起点，避免把普通整数误认成函数入口。
 fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let space = module.address_space();
     let image_base = if module.image_base != 0 {
@@ -841,8 +874,60 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
             } else {
                 continue;
             };
-            if rva % pointer_size as u64 == 0 {
+            if rva % pointer_size as u64 == 0 && looks_like_function_start(space, rva) {
                 targets.insert(rva);
+            }
+        }
+    }
+    targets
+}
+
+/// 扫描代码里的绝对地址立即数（静态回调注册 / 函数指针赋值）。
+///
+/// 只接受落在执行节内、按 4 字节对齐的值；绝对 VA 与已经归一过的 RVA 都接受。
+fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let image_base = if module.image_base != 0 {
+        module.image_base
+    } else if let Some(base) = pe_image_base(space, module.container) {
+        base
+    } else {
+        return BTreeSet::new();
+    };
+    let in_exec = |rva: u64| {
+        exec_ranges
+            .iter()
+            .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+    };
+    let mut targets = BTreeSet::new();
+    let bitness = module.arch.bitness();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut decoder = Decoder::with_ip(bitness, bytes, *start, DecoderOptions::NONE);
+        let mut buffer = Instruction::default();
+        while decoder.can_decode() {
+            decoder.decode_out(&mut buffer);
+            for index in 0..buffer.op_count() {
+                let value = match buffer.op_kind(index) {
+                    OpKind::Immediate32 => u64::from(buffer.immediate32()),
+                    OpKind::Immediate64 => buffer.immediate64(),
+                    _ => continue,
+                };
+                let rva = if value >= image_base {
+                    match value.checked_sub(image_base) {
+                        Some(rva) if in_exec(rva) => rva,
+                        _ => continue,
+                    }
+                } else if in_exec(value) {
+                    value
+                } else {
+                    continue;
+                };
+                if rva % 4 == 0 && looks_like_function_start(space, rva) {
+                    targets.insert(rva);
+                }
             }
         }
     }
@@ -1266,7 +1351,7 @@ mod tests {
             ],
         };
         space.write(0x1000, &[0xC3]);
-        space.write(0x1010, &[0xC3]);
+        space.write(0x1010, &[0x55, 0x8B, 0xEC, 0xC3]);
         // Absolute VA of 0x1010 under the PE preferred base 0x400000.
         space.write(0x2000, &0x40_1010u32.to_le_bytes());
         let sections = vec![
@@ -1298,6 +1383,49 @@ mod tests {
             functions.iter().any(|function| function.rva == 0x1010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "pointer target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn code_immediate_seeds_are_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x1100],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        // push 0x401010; ret
+        space.write(0x1000, &[0x68, 0x10, 0x10, 0x40, 0x00, 0xC3]);
+        space.write(0x1010, &[0x55, 0x8B, 0xEC, 0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::ImmediateTarget)),
+            "immediate target not discovered: {functions:?}"
         );
     }
 
