@@ -1782,8 +1782,8 @@ fn thunk_targets(
 /// 实例化、调整 thunk）按 16 字节对齐（COMDAT 折叠后的小函数也会落在 4 字节边界上）并用
 /// `int3` 填充，而起点的指令形态无穷无尽。
 /// 只认 `int3`（`90 90` 常是 `mov edx,[eax+1]` 这类指令的 ModRM/disp 字节，
-/// 不是填充），且必须在 256 字节内、不遇非法指令、也不以 `int3` 结束地解码到
-/// ret / 无条件跳转 / 间接跳转。
+/// 不是填充），且必须在 256 字节内、不遇非法指令地解码到 ret / 无条件跳转 / 间接跳转
+/// （或 fastfail 的 `int3; ret`）。
 fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     const MAX_BODY: usize = 256;
     let space = module.address_space();
@@ -1814,13 +1814,26 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
     targets
 }
 
-/// 顺序解码是否在不遇非法指令 / `int3` 的情况下到达终结符。
+/// 顺序解码是否到达终结符。
+///
+/// `int3` 既可能是函数体里的 fastfail（`cmp; ja; int3; ret`），也可能是跟在数据后面的填充：
+/// 只有它后面不是 `int3` 时才算终结符，填充串则拒绝。非法指令一律拒绝。
 fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
     let mut decoder = Decoder::with_ip(bitness, body, ip, DecoderOptions::NONE);
+    let mut instructions = 0usize;
     while decoder.can_decode() {
         let instruction = decoder.decode();
-        if instruction.is_invalid() || instruction.flow_control() == FlowControl::Interrupt {
+        if instruction.is_invalid() {
             return false;
+        }
+        instructions += 1;
+        if instruction.flow_control() == FlowControl::Interrupt {
+            let next = instruction.next_ip();
+            return instructions >= 2
+                && body
+                    .get(usize::try_from(next - ip).unwrap_or(usize::MAX)..)
+                    .and_then(|rest| rest.first())
+                    .is_some_and(|byte| *byte != 0xCC);
         }
         if is_terminator(&instruction) {
             return true;
@@ -1828,8 +1841,6 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
     }
     false
 }
-
-/// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
 fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
     let bitness = module.arch.bitness();
@@ -3184,6 +3195,9 @@ mod tests {
         // 256 字节内到不了终结符
         space.write(0x108E, &[0xCC, 0xCC]);
         space.write(0x1090, &[0x40; 300]);
+        // 函数体内的 fastfail：cmp; ja; int3; ret（int3 后面不是填充）
+        space.write(0x11EE, &[0xCC, 0xCC]);
+        space.write(0x11F0, &[0x48, 0x39, 0xC8, 0x77, 0x02, 0xCC, 0xC3]);
         // 非 16 对齐
         space.write(0x11C0, &[0xCC, 0xCC]);
         space.write(0x11C2, &[0x33, 0xC0, 0xC3]);
@@ -3212,7 +3226,7 @@ mod tests {
                 function.rva == rva && function.evidence.contains(&Evidence::PrologueTarget)
             })
         };
-        for rva in [0x1010u64, 0x1030, 0x11E0] {
+        for rva in [0x1010u64, 0x1030, 0x11E0, 0x11F0] {
             assert!(
                 has(rva),
                 "padded code start {rva:#x} not discovered: {functions:?}"
