@@ -1,7 +1,7 @@
 //! 映像装载：把 ELF / PE 文件变成 [`kotama::AddressSpace`] 加一份模块事实。
 //!
 //! P0 范围（x86 / x64 的 ELF 与 PE）：段表、节表、符号（ELF symtab / ELF dynsym）、
-//! 导入表、入口点、以及**内容寻址的模块指纹**。PE 导出表与 PDB / DWARF 调试信息在
+//! PE 可执行节导出、导入表、入口点、以及**内容寻址的模块指纹**。PDB / DWARF 调试信息在
 //! 后续阶段接入。
 //!
 //! 地址约定：一切地址是「映像相对地址」（RVA）。ELF 用节/符号的 vaddr 直接当 RVA
@@ -17,6 +17,7 @@ use gimli::Dwarf;
 use gimli::EndianSlice;
 use gimli::LittleEndian;
 use kotama::{AddressSpace, ModuleId, Perms, Segment};
+use object::read::ExportTarget;
 use object::read::Object;
 use object::read::ObjectSection;
 use object::read::ObjectSegment;
@@ -814,6 +815,30 @@ impl LoadedModule {
                 name: symbol.name().unwrap_or("").to_string(),
             });
         }
+        if let Ok(exports) = file.exports() {
+            for export in exports.flatten() {
+                let ExportTarget::Address { address } = export.target() else {
+                    continue;
+                };
+                let rva = to_rva(address);
+                if !sections.iter().any(|section| {
+                    section.executable
+                        && rva >= section.rva
+                        && rva < section.rva.saturating_add(section.size)
+                }) {
+                    continue;
+                }
+                dynamic_symbols.push(SymbolInfo {
+                    rva,
+                    size: 0,
+                    name: export
+                        .name()
+                        .name()
+                        .map(|name| String::from_utf8_lossy(name).into_owned())
+                        .unwrap_or_default(),
+                });
+            }
+        }
         dynamic_symbols.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
         dynamic_symbols.dedup_by(|a, b| a.sort_key() == b.sort_key());
 
@@ -918,6 +943,45 @@ mod tests {
         assert_eq!(module.container, Container::Pe32);
         assert_eq!(module.arch, Arch::X86);
         assert!(module.imports.iter().any(|i| i.name.contains("printf")));
+    }
+
+    #[test]
+    fn pe_exports_are_loaded_as_dynamic_symbols() {
+        let Some(path) = fixture("x86-windows-gnu/-O2/exports.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let module = LoadedModule::parse(&data).unwrap();
+        assert_eq!(module.container, Container::Pe32);
+        assert!(
+            module
+                .dynamic_symbols
+                .iter()
+                .any(|symbol| symbol.name == "fixture_exported"),
+            "exports missing: {:?}",
+            module.dynamic_symbols
+        );
+    }
+
+    #[test]
+    fn pe64_exports_are_loaded_as_dynamic_symbols() {
+        let Some(path) = fixture("x86_64-windows-gnu/-O2/exports.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let module = LoadedModule::parse(&data).unwrap();
+        assert_eq!(module.container, Container::Pe64);
+        assert_eq!(module.arch, Arch::X86_64);
+        assert!(
+            module
+                .dynamic_symbols
+                .iter()
+                .any(|symbol| symbol.name == "fixture_exported"),
+            "exports missing: {:?}",
+            module.dynamic_symbols
+        );
     }
 
     #[test]

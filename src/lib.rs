@@ -168,8 +168,14 @@ pub enum Evidence {
     Pdata,
     /// 映像入口点。
     Entry,
-    /// 直接 call/jmp 目标。
+    /// 直接 call 目标。
     CallTarget,
+    /// 非执行节里的函数指针（回调表 / vtable / 手写分派表）。
+    PointerTarget,
+    /// 代码里的绝对地址立即数（`push offset` / `mov reg, offset` / 静态回调注册）。
+    ImmediateTarget,
+    /// 16 字节对齐、前面有填充的 `sub esp, imm` 序言。
+    PrologueTarget,
 }
 
 impl Evidence {
@@ -184,6 +190,9 @@ impl Evidence {
             Self::Pdata => "pdata",
             Self::Entry => "entry",
             Self::CallTarget => "call",
+            Self::PointerTarget => "pointer",
+            Self::ImmediateTarget => "immediate",
+            Self::PrologueTarget => "prologue",
         }
     }
 }
