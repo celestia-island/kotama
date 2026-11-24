@@ -794,6 +794,37 @@ fn pe_image_base(space: &dyn AddressSpace, container: Container) -> Option<u64> 
     }
 }
 
+/// 较宽的起点判定：在强序言之外，接受 getter / 常量返回 / 导入 thunk 的常见开头。
+fn looks_like_function_start_weak(space: &dyn AddressSpace, rva: u64) -> bool {
+    if looks_like_function_start(space, rva) {
+        return true;
+    }
+    let start = rva.saturating_sub(2);
+    let Some(bytes) = space.read(start, 10) else {
+        return false;
+    };
+    let Ok(offset) = usize::try_from(rva - start) else {
+        return false;
+    };
+    let Some(window) = bytes.get(offset..offset + 5) else {
+        return false;
+    };
+    if window[0] == 0x8B
+        && matches!(
+            window[1],
+            0x01 | 0x41 | 0x44 | 0x49 | 0x4C | 0x51 | 0x54 | 0x59 | 0x5C
+        )
+    {
+        return true;
+    }
+    (window[0] == 0x33 && window[1] == 0xC0)
+        || window[0] == 0xB8
+        || (window[0] == 0x0F
+            && window[1] == 0xB6
+            && matches!(window[2], 0x41 | 0x44 | 0x49 | 0x4C))
+        || (window[0] == 0xFF && window[1] == 0x25)
+}
+
 /// 目标是否像函数起点：前面有对齐填充，或开头是常见 x86 序言。
 fn looks_like_function_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let start = rva.saturating_sub(2);
@@ -863,19 +894,23 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                 bytes.copy_from_slice(chunk);
                 u64::from_le_bytes(bytes)
             };
-            let rva = if value >= image_base {
-                match value.checked_sub(image_base) {
-                    Some(rva) if in_exec(rva) => rva,
-                    Some(_) => continue,
-                    None => continue,
+            let rva_target = in_exec(value).then_some(value);
+            let va_target = value.checked_sub(image_base).filter(|rva| in_exec(*rva));
+            let (target, prefer_rva) = match (rva_target, va_target) {
+                (Some(rva), Some(va))
+                    if looks_like_function_start_weak(space, rva)
+                        && !looks_like_function_start(space, va) =>
+                {
+                    (rva, true)
                 }
-            } else if in_exec(value) {
-                value
-            } else {
-                continue;
+                (_, Some(va)) => (va, false),
+                (Some(rva), None) => (rva, true),
+                (None, None) => continue,
             };
-            if rva % pointer_size as u64 == 0 && looks_like_function_start(space, rva) {
-                targets.insert(rva);
+            let plausible = looks_like_function_start(space, target)
+                || (prefer_rva && looks_like_function_start_weak(space, target));
+            if target % pointer_size as u64 == 0 && plausible {
+                targets.insert(target);
             }
         }
     }
@@ -1383,6 +1418,61 @@ mod tests {
             functions.iter().any(|function| function.rva == 0x1010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "pointer target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_rva_pointer_prefers_getter_start() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2100],
+            segments: vec![segment(0x1000, 0x2000, true), segment(0x3000, 0x100, false)],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0x11, 0x22]);
+        // The VA interpretation (0x1010) is not a plausible start; the RVA
+        // interpretation (0x2010) is a getter.
+        space.write(0x1010, &[0x00, 0x00, 0x00, 0x00]);
+        space.write(0x2010, &[0x8B, 0x41, 0x04, 0xC3]);
+        space.write(0x3000, &0x2010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x2000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x3000,
+                size: 0x100,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x1000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x2010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "RVA getter target not discovered: {functions:?}"
         );
     }
 
