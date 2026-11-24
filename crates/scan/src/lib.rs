@@ -1066,6 +1066,9 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
     } else {
         return BTreeSet::new();
     };
+    // 活体映像里 .eh_frame / DWARF 的地址引用不会被加载器重定位，仍按 PE 头里的首选
+    // 基址书写；解引用时在（活体）实际基址之后回退到它。静态分析两者相同。
+    let preferred_base = pe_image_base(space, module.container).unwrap_or(image_base);
     let pointer_size = usize::try_from(module.arch.bitness() / 8).unwrap_or(0);
     if pointer_size != 4 && pointer_size != 8 {
         return BTreeSet::new();
@@ -1098,7 +1101,16 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                 u64::from_le_bytes(bytes)
             };
             let rva_target = in_exec(value).then_some(value);
-            let va_target = value.checked_sub(image_base).filter(|rva| in_exec(*rva));
+            // 活体映像里 .eh_frame / DWARF 的地址引用不会被加载器重定位，仍按文件首选
+            // 基址书写；先按（活体）实际基址解释，再回退到 PE 头里的首选基址。
+            let va_target = value
+                .checked_sub(image_base)
+                .filter(|rva| in_exec(*rva))
+                .or_else(|| {
+                    value
+                        .checked_sub(preferred_base)
+                        .filter(|rva| in_exec(*rva))
+                });
             let (target, prefer_rva) = match (rva_target, va_target) {
                 (Some(rva), Some(va))
                     if looks_like_function_start_weak(space, rva)
@@ -1170,6 +1182,7 @@ fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BT
     } else {
         return BTreeSet::new();
     };
+    let preferred_base = pe_image_base(space, module.container).unwrap_or(image_base);
     let in_exec = |rva: u64| {
         exec_ranges
             .iter()
@@ -1191,14 +1204,18 @@ fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BT
                     OpKind::Immediate64 => buffer.immediate64(),
                     _ => continue,
                 };
-                let rva = if value >= image_base {
-                    match value.checked_sub(image_base) {
-                        Some(rva) if in_exec(rva) => rva,
-                        _ => continue,
-                    }
-                } else if in_exec(value) {
-                    value
-                } else {
+                // 依次尝试：（活体）实际基址 VA、裸 RVA、PE 头首选基址 VA（未重定位的
+                // .eh_frame / DWARF 引用）。
+                let Some(rva) = value
+                    .checked_sub(image_base)
+                    .filter(|rva| in_exec(*rva))
+                    .or_else(|| in_exec(value).then_some(value))
+                    .or_else(|| {
+                        value
+                            .checked_sub(preferred_base)
+                            .filter(|rva| in_exec(*rva))
+                    })
+                else {
                     continue;
                 };
                 let aligned = rva % 4 == 0 && (!matches!(module.arch, Arch::X86) || rva % 16 == 0);
@@ -2866,6 +2883,74 @@ mod tests {
                 !functions.iter().any(|function| function.rva == rva
                     && function.evidence.contains(&Evidence::PointerTarget)),
                 "frame-relative access without int3/nop padding was accepted: {functions:?}"
+            );
+        }
+    }
+
+    /// 活体场景：加载器把头里的 ImageBase 改成实际基址（0x600000），而 .eh_frame / DWARF
+    /// 里的函数地址仍按链接期基址（0x400000）书写、不会被重定位。
+    #[test]
+    fn unrelocated_references_fall_back_to_the_link_time_base() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0,
+            bytes: vec![0u8; 0x3000],
+            segments: vec![
+                segment(0, 0x1000, false),
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        // 最小 PE32 头：MZ、e_lfanew=0x80、PE\0\0、可选头魔数 0x10B、ImageBase=0x400000。
+        space.write(0, b"MZ");
+        space.write(0x3C, &0x80u32.to_le_bytes());
+        space.write(0x80, b"PE\0\0");
+        space.write(0x84, &0x014cu16.to_le_bytes());
+        space.write(0x98, &0x10Bu16.to_le_bytes());
+        space.write(0x98 + 28, &0x40_0000u32.to_le_bytes());
+        // 实际基址 0x600000 的重定位指针 + 链接期基址 0x400000 的未重定位引用。
+        space.write(0x2000, &0x60_1030u32.to_le_bytes());
+        space.write(0x2004, &0x40_1050u32.to_le_bytes());
+        space.write(0x1030, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x1050, &[0x55, 0x8B, 0xEC, 0xC3]);
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".rdata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x600_000,
+            entry_rva: None,
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        for rva in [0x1030u64, 0x1050] {
+            assert!(
+                functions.iter().any(|function| function.rva == rva
+                    && function.evidence.contains(&Evidence::PointerTarget)),
+                "pointer target {rva:#x} not discovered: {functions:?}"
             );
         }
     }

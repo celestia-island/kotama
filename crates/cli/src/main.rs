@@ -432,10 +432,11 @@ fn live(args: &[String]) -> ExitCode {
                 return ExitCode::from(2);
             };
             let functions = kotama_scan::discover_with(
+                // 按映像自身的机器位解码；活体内的绝对指针已重定位到实际加载基址。
                 kotama_scan::ScanView {
-                    container: kotama_image::Container::Pe64,
-                    arch: kotama_image::Arch::X86_64,
-                    image_base: 0,
+                    container: image.container,
+                    arch: image.arch,
+                    image_base: image.base,
                     entry_rva: image.entry_rva,
                     sections: &image.sections,
                     symbols: &[],
@@ -448,19 +449,47 @@ fn live(args: &[String]) -> ExitCode {
             struct LiveJson {
                 pid: i32,
                 image_base: String,
+                container: &'static str,
+                arch: &'static str,
+                entry: Option<String>,
                 module_id: String,
+                sections: Vec<SectionJson>,
                 function_count: usize,
                 pdata_functions: usize,
+                functions: Vec<FunctionJson>,
             }
             let report = LiveJson {
                 pid,
                 image_base: format!("0x{:x}", image.base),
+                container: image.container.short(),
+                arch: image.arch.short(),
+                entry: image.entry_rva.map(|rva| format!("0x{rva:x}")),
                 module_id: image.module_id().to_hex(),
+                sections: image
+                    .sections
+                    .iter()
+                    .map(|s| SectionJson {
+                        rva: format!("0x{:x}", s.rva),
+                        size: s.size,
+                        name: s.name.clone(),
+                        executable: s.executable,
+                    })
+                    .collect(),
                 function_count: functions.len(),
                 pdata_functions: functions
                     .iter()
                     .filter(|f| f.evidence.contains(&kotama_scan::Evidence::Pdata))
                     .count(),
+                functions: functions
+                    .iter()
+                    .map(|f| FunctionJson {
+                        rva: format!("0x{:x}", f.rva),
+                        size: f.size,
+                        size_inferred: f.size_inferred,
+                        name: f.name.clone(),
+                        evidence: f.evidence.iter().map(|e| e.short()).collect(),
+                    })
+                    .collect(),
             };
             match serde_json::to_string_pretty(&report) {
                 Ok(json) => println!("{json}"),
