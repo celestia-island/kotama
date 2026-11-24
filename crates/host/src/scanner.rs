@@ -12,11 +12,12 @@
 use std::collections::BTreeMap;
 
 use crate::HostError;
+#[cfg(target_os = "linux")]
 use crate::MapEntry;
 use crate::TargetProcess;
 
 /// 单区域快照上限（超大可写区——JIT 堆一类——快照要设界）。
-const MAX_REGION_SNAPSHOT: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_REGION_SNAPSHOT: u64 = 64 * 1024 * 1024;
 /// 首扫命中数上限（保险丝：全零区扫 `u32:0` 会命中百万级）。
 const MAX_HITS: usize = 200_000;
 /// 快照 diff 报告的差异字数上限。
@@ -39,32 +40,40 @@ impl Region {
     }
 }
 
-/// 枚举目标进程的可写区域（可读 + 可写；排除超大区）。
+/// 枚举目标进程的可写区域（Linux = maps；Windows = VirtualQueryEx；排除超大区）。
 ///
 /// # Errors
-/// maps 读取失败。
+/// Linux maps 读取失败；Windows 区域枚举遇到不前进的异常布局时失败。
 pub fn writable_regions(process: &TargetProcess) -> Result<Vec<Region>, HostError> {
-    let maps = std::fs::read_to_string(format!("/proc/{}/maps", process.pid()))
-        .map_err(|e| HostError::Proc(format!("maps: {e}")))?;
-    let mut out: Vec<Region> = crate::parse_maps(&maps)
-        .iter()
-        .filter(|entry: &&MapEntry| entry.readable && entry.writable)
-        .filter(|entry| entry.end.saturating_sub(entry.start) <= MAX_REGION_SNAPSHOT)
-        .map(|entry| Region {
-            start: entry.start,
-            end: entry.end,
-        })
-        .collect();
-    // maps 分裂的相邻同类区合并。
-    out.sort_by_key(|region| region.start);
-    let mut merged: Vec<Region> = Vec::with_capacity(out.len());
-    for region in out {
-        match merged.last_mut() {
-            Some(last) if last.end == region.start => last.end = region.end,
-            _ => merged.push(region),
-        }
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows::writable_regions(process)
     }
-    Ok(merged)
+
+    #[cfg(target_os = "linux")]
+    {
+        let maps = std::fs::read_to_string(format!("/proc/{}/maps", process.pid()))
+            .map_err(|e| HostError::Proc(format!("maps: {e}")))?;
+        let mut out: Vec<Region> = crate::parse_maps(&maps)
+            .iter()
+            .filter(|entry: &&MapEntry| entry.readable && entry.writable)
+            .filter(|entry| entry.end.saturating_sub(entry.start) <= MAX_REGION_SNAPSHOT)
+            .map(|entry| Region {
+                start: entry.start,
+                end: entry.end,
+            })
+            .collect();
+        // maps 分裂的相邻同类区合并。
+        out.sort_by_key(|region| region.start);
+        let mut merged: Vec<Region> = Vec::with_capacity(out.len());
+        for region in out {
+            match merged.last_mut() {
+                Some(last) if last.end == region.start => last.end = region.end,
+                _ => merged.push(region),
+            }
+        }
+        Ok(merged)
+    }
 }
 
 /// 一次区域快照（区域起始地址 → 字节）。

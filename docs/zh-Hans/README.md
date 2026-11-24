@@ -33,19 +33,29 @@
 **P0 静态管线已跑通**（2026-11-23 首提交，`master` 单主干）。
 `kotama analyze <文件>` 对一个 ELF/PE 文件做装载 → 函数发现 → 基本块级反编译。
 
+**Windows 原生车道已落地**（2026-11-23，Win10 Pro x64）：原生 host attach/scan/write/freeze、
+命名管道或回环 TCP 的 LoadLibrary 注入、PE exception/unwind 与 MSVC RTTI、RSDS 身份校验的 PDB
+并用 dbghelp 交叉验证、GNU/MSVC 夹具与打包车道。Windows 宿主上运行 `just bench-windows`
+（追加 `--oracle` 纳入真实 Ghidra 差分；设置 `KOTAMA_IDA` 后追加 `--ida` 纳入 IDA 差分）。
+
+本阶段剩余：常驻 Windows CI runner（尚未注册）与 GUI/服务面（P5–P6）。任务面见 PR #1。
+
 已实证的范围：
 
 | 维度 | 现状 |
 | --- | --- |
 | 容器 | ELF32 / ELF64 / PE32 / PE64（x86 与 x64） |
-| 函数发现 | 五路证据（symtab / dynsym / PE64 `.pdata` / entry / 直接 call 目标），每行带 provenance |
-| 边界 | 精确边界优先（符号长度、`.pdata`）；推断边界用线性扫描精化，共享尾块不再切断真函数 |
+| 函数发现 | 五路证据（symtab / dynsym / PE exception directory 或 `.pdata` / entry / 直接 call 目标），每行带 provenance |
+| PE 元数据 | exception directory + `.xdata` unwind/handler/chain、MSVC vtable/RTTI 类名与继承位移、RSDS 身份校验的伴生 PDB |
+| 活体 Windows | Toolhelp 模块、原生内存扫描/冻结、命名管道或回环 TCP 注入、StackWalk64 + dbghelp 线程栈 |
+| 边界 | 精确边界优先（符号长度、exception directory、PDB）；推断边界用线性扫描精化，共享尾块不再切断真函数 |
 | 反编译 | 基本块 + 地址锚注释；**稠密 switch 的跳转表可恢复**（ELF64 夹具 10/10 分支、置信度 100%） |
 | 确定性 | 同一输入两次输出逐字节相同（差分与知识库复用的前提） |
-| 已验证 | 24 个矩阵夹具 + `/bin/true`、`/bin/ls` 等 strip 系统二进制 |
+| 已验证 | 完整矩阵夹具 + `/bin/true`、`/bin/ls` 等 strip 系统二进制 |
 
-已知边界（P1 范围）：PE 的精确函数边界依赖 PDB（当前 mingw 夹具无 PDB，靠 call 目标 + 线性扫描）；
-类型推断、结构体恢复、Ghidra 差分 oracle 尚未接入。
+已知边界：类型推断与结构体恢复仍属 P1；无 PDB 的 PE 边界依赖 exception directory + call 目标；
+通用 vtable 扫描仍窄于 MSVC RTTI；Windows 注入仅 x64→x64；`--pid` attach 限同用户、目标未设
+非空 `KOTAMA_PAYLOAD_*`，并按 `.exe` 路径解析主镜像；GUI/服务面尚未开始。
 
 设计决策与过程记录在 PR 描述中（设计文档不进仓树）。
 
@@ -53,9 +63,9 @@
 
 | 块 | 内容 | 阶段 |
 | --- | --- | --- |
-| 静态 | 装载 → 函数发现 → 基本块反编译 ✅ / 类型推断 · 结构体 · 差分 oracle | P0 ✅ / P1 |
-| 动态 | 注入（Windows / Linux 双线）→ 内存/栈/快照 → 扫描/冻结 → hook / trace | P2–P4 |
-| 打包 | `hooks.toml` + hook 源码 → 各平台注入库 + 清单（ABI / 能力 / 摘要） | P4 |
+| 静态 | 装载 → 函数发现 → 基本块反编译 → SEH/RTTI/PDB 证据与 Ghidra 差分 ✅ / 类型推断 · 结构体 | P0 ✅ / P1 |
+| 动态 | Windows 注入（命名管道 / TCP）→ 内存/栈快照 → 扫描/冻结 ✅；hook / trace 与 Linux 注入矩阵待补 | P2–P4 |
+| 打包 | GNU x64/x86 与 MSVC 的 agent + manifest 车道 ✅；`hooks.toml` hook ABI 待补 | P4 |
 | 面 | 服务（REST / WS / MCP）+ hikari web UI + evernight 远程节点 | P5–P6 |
 
 两条地基，其它一切建在其上：
@@ -72,12 +82,17 @@ just gate                                  # fmt + clippy + test + deny
 cargo run -p kotama-cli -- --version       # 版本 + 载荷 ABI 版本
 cargo run -p kotama-cli -- analyze <文件>  # 函数表 JSON（带证据）
 cargo run -p kotama-cli -- analyze <文件> --decompile --limit 8   # 附伪 C
+cargo run -p kotama-cli -- analyze <文件> --rtti                # MSVC RTTI/虚表事实
+cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <目标>  # Windows：拉起+注入+握手
+cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll --pid <pid>       # Windows：注入已运行目标
+just bench-windows                          # 原生 Windows 台架（追加 --oracle 纳入 Ghidra）
+KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # 可选 IDA 差分
 python3 tools/build_fixtures.py --run --host-samples   # 四目标靶子矩阵 + 运行冒烟
 ```
 
 夹具矩阵：`x86_64-linux-gnu / x86-linux-gnu / x86_64-windows-gnu / x86-windows-gnu`
-× `-O2/-O0` × 6 个靶子（loops / switch / indirect / strings / float / recurs）。ELF 本机直跑，
-PE 默认经 wine（`KOTAMA_WINE`，见仓内 AGENTS「本机运行时依赖」）。
+× `-O2/-O0`，另有原生 `x86_64-windows-msvc / x86-windows-msvc`（`/Zi` + 伴生 PDB）。
+ELF 本机直跑；PE 在 Linux 上经 wine（`KOTAMA_WINE`），在 Windows 上原生运行。
 
 ## 边界
 

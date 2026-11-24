@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """构建 windows 载荷（C agent + loader），走 zig cc 交叉编译。
 
-产物（默认落 `dist/x86_64-windows-gnu/`）：
+产物（默认落 `dist/<target>/`，支持 x86_64-windows-gnu 与 x86-windows-gnu）：
   - `kotama_agent.dll`   —— 载荷本体（DllMain 起线程，TCP 回环说话）
   - `kotama_load.exe`    —— wine 下的装载器（LoadLibrary 预载 + 拉起目标）
 
@@ -11,7 +11,8 @@
 已在 wine 实测可 LoadLibrary 并被 Linux 宿主原生握手（见 host 的 wine e2e）。
 
 用法：
-  python3 tools/build_windows_agent.py            # 构建两个产物
+  python3 tools/build_windows_agent.py            # 构建 x64 两个产物
+  python3 tools/build_windows_agent.py --target x86-windows-gnu  # 构建 32 位产物
   python3 tools/build_windows_agent.py --check    # 只校验工具链在位
 环境：KOTAMA_ZIG（zig 路径）。
 """
@@ -26,8 +27,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent  # resolve() 已吃掉 ..
 SOURCE_DIR = REPO / "support" / "windows-agent"
-DIST = REPO / "dist" / "x86_64-windows-gnu"
-TARGET = "x86_64-windows-gnu"
+DEFAULT_TARGET = "x86_64-windows-gnu"
+WINDOWS_TARGETS = ("x86_64-windows-gnu", "x86-windows-gnu")
 DEFAULT_ZIG = "/mnt/work/zig-x86_64-linux-0.17.1/zig"
 
 def find_zig(override: str | None) -> str:
@@ -43,8 +44,8 @@ def find_zig(override: str | None) -> str:
     candidates_checked = ", ".join(filter(None, candidates)) or "<none>"
     sys.exit(f"build_windows_agent: no zig found (checked: {candidates_checked})")
 
-def compile_one(zig: str, source: Path, output: Path, shared: bool) -> None:
-    command = [zig, "cc", "-target", TARGET, "-O2"]
+def compile_one(zig: str, source: Path, output: Path, shared: bool, target: str) -> None:
+    command = [zig, "cc", "-target", target, "-O2"]
 
     if shared:
         command.append("-shared")
@@ -60,22 +61,23 @@ def compile_one(zig: str, source: Path, output: Path, shared: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(prog = "build_windows_agent")
     parser.add_argument("--zig")
+    parser.add_argument("--target", choices = WINDOWS_TARGETS, default = DEFAULT_TARGET)
     parser.add_argument("--check", action = "store_true", help = "only verify toolchain")
     parser.add_argument("--out-dir", help = "override output directory (default dist/<target>)")
     args = parser.parse_args()
 
     zig = find_zig(args.zig)
     version = subprocess.run([zig, "version"], capture_output = True, text = True).stdout.strip()
-    print(f"# zig {version} @ {zig}")
+    print(f"# zig {version} @ {zig}; target {args.target}")
 
     if args.check:
         print("# toolchain ok")
         return 0
 
-    out_dir = Path(args.out_dir) if args.out_dir else DIST
+    out_dir = Path(args.out_dir) if args.out_dir else REPO / "dist" / args.target
     out_dir.mkdir(parents = True, exist_ok = True)
-    compile_one(zig, SOURCE_DIR / "kotama_agent.c", out_dir / "kotama_agent.dll", shared = True)
-    compile_one(zig, SOURCE_DIR / "kotama_load.c", out_dir / "kotama_load.exe", shared = False)
+    compile_one(zig, SOURCE_DIR / "kotama_agent.c", out_dir / "kotama_agent.dll", True, args.target)
+    compile_one(zig, SOURCE_DIR / "kotama_load.c", out_dir / "kotama_load.exe", False, args.target)
     print(f"build_windows_agent: artifacts in {out_dir}")
     return 0
 

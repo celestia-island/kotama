@@ -9,9 +9,10 @@
  * wine loads it (verified). The wire format is byte-compatible with
  * kotama_proto, so the host speaks one protocol on both platforms.
  *
- * Transport is loopback TCP rather than a named pipe: wine maps winsock onto
- * host TCP, so a Linux host can attach natively; named pipes have no
- * host-side entry point under wine.
+ * Transport is a named pipe by default (KOTAMA_PAYLOAD_PIPE, native Windows);
+ * loopback TCP stays as the wine lane (KOTAMA_PAYLOAD_TCP): wine maps winsock
+ * onto host TCP, so a Linux host can attach natively, while named pipes have
+ * no host-side entry point under wine. The wire framing is identical on both.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -20,7 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define PROTO_VERSION 2
+#define PROTO_VERSION 3
 #define ABI_VERSION 1
 
 // Growable output buffer.
@@ -258,43 +259,152 @@ static int mp_read_str(Reader *reader, char *dst, size_t dst_len)
     return 1;
 }
 
-// Write exactly `size` bytes to the socket.
-static int send_all(SOCKET sock, const unsigned char *payload, size_t size)
+// Transport channel: named pipe (native Windows default) or loopback TCP (wine).
+typedef struct {
+    int is_pipe;
+    SOCKET sock;
+    HANDLE pipe;
+} Channel;
+
+// Write exactly `size` bytes to the channel.
+static int channel_send(Channel *channel, const unsigned char *payload, size_t size)
 {
     while(size > 0) {
-        int sent = send(sock, (const char *)payload, (int)size, 0);
-        if(sent <= 0) {
-            return 0;
+        if(channel->is_pipe) {
+            DWORD written = 0;
+            if(WriteFile(channel->pipe, payload, (DWORD)size, &written, NULL) == 0 ||
+               written == 0) {
+                return 0;
+            }
+            payload += written;
+            size -= (size_t)written;
+        } else {
+            int sent = send(channel->sock, (const char *)payload, (int)size, 0);
+            if(sent <= 0) {
+                return 0;
+            }
+            payload += sent;
+            size -= (size_t)sent;
         }
-        payload += sent;
-        size -= (size_t)sent;
     }
     return 1;
 }
 
-// Read exactly `size` bytes from the socket.
-static int recv_all(SOCKET sock, unsigned char *payload, size_t size)
+// Read exactly `size` bytes from the channel.
+static int channel_recv(Channel *channel, unsigned char *payload, size_t size)
 {
     while(size > 0) {
-        int got = recv(sock, (char *)payload, (int)size, 0);
-        if(got <= 0) {
-            return 0;
+        if(channel->is_pipe) {
+            DWORD got = 0;
+            if(ReadFile(channel->pipe, payload, (DWORD)size, &got, NULL) == 0 || got == 0) {
+                return 0;
+            }
+            payload += got;
+            size -= (size_t)got;
+        } else {
+            int got = recv(channel->sock, (char *)payload, (int)size, 0);
+            if(got <= 0) {
+                return 0;
+            }
+            payload += got;
+            size -= (size_t)got;
         }
-        payload += got;
-        size -= (size_t)got;
     }
     return 1;
 }
 
 // Emit a frame: 4-byte little-endian length, then the msgpack payload.
-static int send_frame(SOCKET sock, Buf *buffer)
+static int send_frame(Channel *channel, Buf *buffer)
 {
     unsigned char header[4];
     header[0] = (unsigned char)(buffer->len & 0xff);
     header[1] = (unsigned char)((buffer->len >> 8) & 0xff);
     header[2] = (unsigned char)((buffer->len >> 16) & 0xff);
     header[3] = (unsigned char)((buffer->len >> 24) & 0xff);
-    return send_all(sock, header, 4) && send_all(sock, buffer->data, buffer->len);
+    return channel_send(channel, header, 4) && channel_send(channel, buffer->data, buffer->len);
+}
+
+// Open the host channel: KOTAMA_PAYLOAD_PIPE first (native Windows), then
+// KOTAMA_PAYLOAD_TCP (wine). If neither is set, fall back to the deterministic
+// pipe name for this PID so an already-running target can be injected without
+// inheriting a transport environment variable.
+static int channel_open(Channel *channel)
+{
+    char pipe_name[512];
+    DWORD length =
+        GetEnvironmentVariableA("KOTAMA_PAYLOAD_PIPE", pipe_name, (DWORD)sizeof(pipe_name));
+    char port_text[16];
+    DWORD tcp_length =
+        GetEnvironmentVariableA("KOTAMA_PAYLOAD_TCP", port_text, (DWORD)sizeof(port_text));
+    if(length == 0 && tcp_length == 0) {
+        snprintf(pipe_name, sizeof(pipe_name), "\\\\.\\pipe\\kotama-%lu",
+                 (unsigned long)GetCurrentProcessId());
+        length = (DWORD)strlen(pipe_name);
+    }
+    if(length > 0 && length < sizeof(pipe_name)) {
+        channel->is_pipe = 1;
+        channel->sock = INVALID_SOCKET;
+        for(int attempt = 0;attempt < 200;attempt++) {
+            HANDLE pipe = CreateFileA(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                      OPEN_EXISTING, 0, NULL);
+            if(pipe != INVALID_HANDLE_VALUE) {
+                channel->pipe = pipe;
+                return 1;
+            }
+            Sleep(25);
+        }
+        return 0;
+    }
+
+    if(tcp_length == 0) {
+        return 0;
+    }
+    int port = atoi(port_text);
+    if(port <= 0 || port > 65535) {
+        return 0;
+    }
+
+    WSADATA wsa;
+    if(WSAStartup(0x0202, &wsa) != 0) {
+        return 0;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    if(sock == INVALID_SOCKET) {
+        WSACleanup();
+        return 0;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short)port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    for(int attempt = 0;attempt < 200;attempt++) {
+        if(connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            channel->is_pipe = 0;
+            channel->pipe = INVALID_HANDLE_VALUE;
+            channel->sock = sock;
+            return 1;
+        }
+        Sleep(25);
+    }
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}
+
+static void channel_close(Channel *channel)
+{
+    if(channel->is_pipe) {
+        if(channel->pipe != INVALID_HANDLE_VALUE) {
+            CloseHandle(channel->pipe);
+        }
+    } else if(channel->sock != INVALID_SOCKET) {
+        closesocket(channel->sock);
+        WSACleanup();
+    }
 }
 
 // Start a response: map(1){"Response": map(1){<variant>: ...}}.
@@ -315,6 +425,14 @@ static void respond_error(Buf *out, const char *message)
     mp_array(out, 2);
     mp_uint(out, 0);
     mp_str(out, message);
+}
+
+// wine exports wine_get_version from ntdll; native Windows does not. This is
+// only for honest ModuleKind reporting, never for capability or detection logic.
+static int running_under_wine(void)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll != NULL && GetProcAddress(ntdll, "wine_get_version") != NULL;
 }
 
 // Decode one request and build its response.
@@ -360,7 +478,7 @@ static void handle(Reader *reader, Buf *out)
         mp_array(out, 4);
         mp_uint(out, base);
         mp_uint(out, 0);
-        mp_str(out, "WinePe");
+        mp_str(out, running_under_wine() ? "WinePe" : "NativePe");
         mp_str(out, "");
         return;
     }
@@ -395,57 +513,33 @@ static void handle(Reader *reader, Buf *out)
         return;
     }
 
+    // StackSnapshot is a Windows Rust-payload capability (self-captured stack via
+    // RtlCaptureStackBackTrace). This C agent never declared it in HelloAck, so a
+    // host that honours the handshake must not send it; if one does anyway the
+    // honest answer is a refusal, not a fake snapshot.
+    if(strcmp(name, "StackSnapshot") == 0) {
+        respond_error(out, "stack-snapshot is not supported by the C payload; it never declares that capability");
+        return;
+    }
+
     respond_error(out, "unknown method");
 }
 
-// Worker thread: winsock, connect, then the protocol loop.
+// Worker thread: open the host channel, then the protocol loop.
 static DWORD WINAPI agent_thread(LPVOID param)
 {
     (void)param;
-    char port_text[16];
-    port_text[0] = 0;
-    if(GetEnvironmentVariableA("KOTAMA_PAYLOAD_TCP", port_text, sizeof(port_text)) == 0) {
-        return 0;
-    }
-    int port = atoi(port_text);
-    if(port <= 0 || port > 65535) {
-        return 0;
-    }
-
-    WSADATA wsa;
-    if(WSAStartup(0x0202, &wsa) != 0) {
-        return 0;
-    }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-    if(sock == INVALID_SOCKET) {
-        WSACleanup();
-        return 0;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((u_short)port);
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-    int connected = 0;
-    for(int attempt = 0;attempt < 200 && connected == 0;attempt++) {
-        if(connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-            connected = 1;
-        } else {
-            Sleep(25);
-        }
-    }
-    if(connected == 0) {
-        closesocket(sock);
-        WSACleanup();
+    Channel channel;
+    channel.is_pipe = 0;
+    channel.sock = INVALID_SOCKET;
+    channel.pipe = INVALID_HANDLE_VALUE;
+    if(channel_open(&channel) == 0) {
         return 0;
     }
 
     for(;;) {
         unsigned char header[4];
-        if(recv_all(sock, header, 4) == 0) {
+        if(channel_recv(&channel, header, 4) == 0) {
             break;
         }
         size_t length = (size_t)header[0] | ((size_t)header[1] << 8) | ((size_t)header[2] << 16) |
@@ -457,7 +551,7 @@ static DWORD WINAPI agent_thread(LPVOID param)
         if(frame == NULL) {
             break;
         }
-        if(recv_all(sock, frame, length) == 0) {
+        if(channel_recv(&channel, frame, length) == 0) {
             free(frame);
             break;
         }
@@ -471,14 +565,13 @@ static DWORD WINAPI agent_thread(LPVOID param)
         out.cap = 0;
         handle(&reader, &out);
         free(frame);
-        int ok = send_frame(sock, &out);
+        int ok = send_frame(&channel, &out);
         free(out.data);
         if(ok == 0) {
             break;
         }
     }
-    closesocket(sock);
-    WSACleanup();
+    channel_close(&channel);
     return 0;
 }
 

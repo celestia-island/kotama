@@ -8,8 +8,7 @@ use std::process::ExitCode;
 
 use kotama::ABI_VERSION;
 use kotama_backend_ghidra::GhidraOracle;
-use kotama_decomp::decompile_function_bounded;
-#[cfg(target_os = "linux")]
+use kotama_decomp::decompile_function_bounded_with_exceptions;
 use kotama_host::TargetProcess;
 use kotama_image::LoadedModule;
 use kotama_scan::call_graph;
@@ -28,15 +27,20 @@ Commands:
                              --decompile        also emit pseudo-C for the first --limit functions
                              --limit <N>        how many functions to decompile (default 8)
                              --xref             also emit the function-level call graph
+                             --strings          also emit string cross-references
+                             --vtables          also emit the generic vtable scan
+                             --rtti             also emit MSVC RTTI/vtable facts (PE/MSVC)
   oracle <path>            Run Ghidra headless and diff its function list against ours
-  live attach <pid>        List modules of a running process (ELF + wine-hosted PE)
-  live analyze <pid>       Parse the first wine PE module live and discover functions
+  live attach <pid>        List modules of a running process (ELF + wine/native PE)
+  live analyze <pid>       Parse the first wine/native PE module live and discover functions
   live scan <pid> --exact u32:N|f32:F|bytes:HEX [--then unchanged|changed|increased|decreased --times N]
                              Scan live memory (writable regions) and narrow
   live write <pid> <addr> u32:N|... --write   Write memory (requires --write)
-  live trace <pid> <addr-hex> [--seconds N]  INT3 breakpoint hit counting
-  live launch --preload <so> -- <cmd...>    Own-launch with the payload agent
+  live trace <pid> <addr-hex> [--seconds N]  INT3 breakpoint hit counting (Linux)
+  live launch --preload <so> -- <cmd...>    Own-launch with the payload agent (Linux)
   live freeze <pid> <addr> u32:N --seconds N --write   Pin a value
+  live inject --payload <dll> [--transport pipe|tcp] [--pid <pid> | -- <cmd...>]
+                             Launch or attach, inject, handshake (Windows)
   export <path>            Emit annotation scripts for other RE tools
                              --format idc|idapython|rizin   (required)
   serve                    Start the service surface (web UI + MCP)       (not wired yet)
@@ -62,7 +66,6 @@ fn main() -> ExitCode {
         Some("analyze") => analyze(&args.collect::<Vec<_>>()),
         Some("oracle") => oracle(&args.collect::<Vec<_>>()),
         Some("export") => export(&args.collect::<Vec<_>>()),
-        #[cfg(target_os = "linux")]
         Some("live") => live(&args.collect::<Vec<_>>()),
         Some("pack") => pack(&args.collect::<Vec<_>>()),
         Some(command) => {
@@ -186,6 +189,58 @@ struct Report {
     string_xrefs: Option<Vec<StringXrefJson>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vtables: Option<Vec<VtableJson>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exceptions: Vec<ExceptionJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtti: Option<RttiJson>,
+}
+
+/// MSVC RTTI facts exposed by the CLI; deterministic order comes from the scanner.
+#[derive(Serialize)]
+struct RttiJson {
+    vtables: Vec<RttiVtableJson>,
+    type_descriptors: Vec<RttiTypeJson>,
+}
+
+#[derive(Serialize)]
+struct RttiVtableJson {
+    locator_ptr_rva: String,
+    address_point: String,
+    class_name: String,
+    offset: u32,
+    constructor_disp: u32,
+    hierarchy_rva: String,
+    bases: Vec<RttiBaseJson>,
+    slots: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RttiBaseJson {
+    rva: String,
+    class_name: String,
+    num_contained_bases: u32,
+    member_disp: i32,
+    vbtable_disp: i32,
+    vbase_disp: i32,
+}
+
+#[derive(Serialize)]
+struct RttiTypeJson {
+    rva: String,
+    mangled: String,
+    class_name: String,
+}
+
+/// 一条 PE64 exception/unwind 事实；地址全部是模块 RVA。
+#[derive(Serialize)]
+struct ExceptionJson {
+    begin: String,
+    end: String,
+    unwind_info: Option<String>,
+    flags: Option<u8>,
+    prolog_size: Option<u8>,
+    handler: Option<String>,
+    chained_begin: Option<String>,
 }
 
 /// 一个识别出的 vtable（`--vtables` 时才有）。
@@ -228,16 +283,15 @@ struct FunctionJson {
 }
 
 /// 找伴生 PDB：zig/mingw 产出 `<stem>.pdb`（替换扩展名），MSVC 也常见 `<file>.pdb`。
-/// `live`：活体只读车道（Linux；wine 宿主 PE 一等公民）。
-#[cfg(target_os = "linux")]
+/// `live`：活体会话（Linux /proc+wine 与原生 Windows 共用 host facade）。
 fn live(args: &[String]) -> ExitCode {
     let mut iter = args.iter();
     let Some(sub) = iter.next() else {
         eprintln!("kotama: live wants a subcommand\n\n{USAGE}");
         return ExitCode::from(2);
     };
-    // launch 不带 pid（自己拉起目标）；其余子命令第一个参数是 pid。
-    let pid = if sub == "launch" {
+    // launch / inject 不带 pid（自己拉起目标）；其余子命令第一个参数是 pid。
+    let pid = if sub == "launch" || sub == "inject" {
         0
     } else {
         let Some(pid_raw) = iter.next() else {
@@ -274,13 +328,37 @@ fn live(args: &[String]) -> ExitCode {
             let args: Vec<String> = iter.cloned().collect();
             live_freeze(open_process(), &args)
         }
+        #[cfg(target_os = "linux")]
         "trace" => {
             let args: Vec<String> = iter.cloned().collect();
             live_trace(open_process(), &args)
         }
+        #[cfg(not(target_os = "linux"))]
+        "trace" => {
+            eprintln!("kotama: live trace is currently Linux-only");
+            ExitCode::FAILURE
+        }
+        #[cfg(target_os = "linux")]
         "launch" => {
             let args: Vec<String> = iter.cloned().collect();
             live_launch(&args)
+        }
+        #[cfg(not(target_os = "linux"))]
+        "launch" => {
+            eprintln!(
+                "kotama: live launch is currently Linux-only; use the Windows injection lane"
+            );
+            ExitCode::FAILURE
+        }
+        #[cfg(target_os = "windows")]
+        "inject" => {
+            let args: Vec<String> = iter.cloned().collect();
+            live_inject(&args)
+        }
+        #[cfg(not(target_os = "windows"))]
+        "inject" => {
+            eprintln!("kotama: live inject is currently Windows-only");
+            ExitCode::FAILURE
         }
         "attach" => match open_process().modules() {
             Ok(modules) => {
@@ -299,6 +377,7 @@ fn live(args: &[String]) -> ExitCode {
                         kind: match m.kind {
                             kotama_proto::ModuleKind::Elf => "elf",
                             kotama_proto::ModuleKind::WinePe => "wine-pe",
+                            kotama_proto::ModuleKind::NativePe => "native-pe",
                         },
                         path: m.path.clone(),
                     })
@@ -319,8 +398,8 @@ fn live(args: &[String]) -> ExitCode {
         },
         "analyze" => {
             let process = open_process();
-            let Ok(image) = process.wine_pe(None) else {
-                eprintln!("kotama: no wine PE module in pid {pid}");
+            let Ok(image) = process.pe_image(None) else {
+                eprintln!("kotama: no PE module in pid {pid}");
                 return ExitCode::from(2);
             };
             let functions = kotama_scan::discover_with(
@@ -417,12 +496,7 @@ fn live_launch(args: &[String]) -> ExitCode {
         capabilities: report
             .capabilities
             .iter()
-            .map(|capability| match capability {
-                kotama_proto::Capability::ListModules => "list-modules",
-                kotama_proto::Capability::ReadMemory => "read-memory",
-                kotama_proto::Capability::WriteMemory => "write-memory",
-                kotama_proto::Capability::Freeze => "freeze",
-            })
+            .map(|capability| capability.as_str())
             .collect(),
         module_count: report.module_count,
         image_base: report.image_base.map(|base| format!("0x{base:x}")),
@@ -446,6 +520,363 @@ fn live_launch(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `live inject`：拉起目标 → 显式授权注入 → 载荷回连 → 握手/巡检（Windows）。
+#[cfg(target_os = "windows")]
+fn live_inject(args: &[String]) -> ExitCode {
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::net::TcpStream;
+    use std::process::Command;
+    use std::process::Stdio;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use kotama_host::pipe::NamedPipeServer;
+    use kotama_host::pipe::PipeConnection;
+    use kotama_host::wire;
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    enum Lane {
+        Pipe(NamedPipeServer),
+        Tcp(TcpListener),
+    }
+
+    enum Transport {
+        Pipe(PipeConnection),
+        Tcp(TcpStream),
+    }
+
+    impl Read for Transport {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Pipe(stream) => stream.read(buffer),
+                Self::Tcp(stream) => stream.read(buffer),
+            }
+        }
+    }
+
+    impl Write for Transport {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Pipe(stream) => stream.write(buffer),
+                Self::Tcp(stream) => stream.write(buffer),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self {
+                Self::Pipe(stream) => stream.flush(),
+                Self::Tcp(stream) => stream.flush(),
+            }
+        }
+    }
+
+    let mut payload: Option<String> = None;
+    let mut transport = String::from("pipe");
+    let mut attach_pid: Option<i32> = None;
+    let mut command: Vec<String> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--payload" => payload = iter.next().cloned(),
+            "--transport" => {
+                transport = iter.next().cloned().unwrap_or_default();
+            }
+            "--pid" => {
+                let Some(raw) = iter.next() else {
+                    eprintln!("kotama: --pid wants a number");
+                    return ExitCode::from(2);
+                };
+                match raw.parse::<i32>() {
+                    Ok(pid) => attach_pid = Some(pid),
+                    Err(_) => {
+                        eprintln!("kotama: pid must be a number, got {raw:?}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--" => {
+                command.extend(iter.cloned());
+                break;
+            }
+            other => {
+                eprintln!("kotama: live inject unexpected argument `{other}`");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(payload) = payload else {
+        eprintln!("kotama: live inject wants --payload <dll>");
+        return ExitCode::from(2);
+    };
+    if !Path::new(&payload).is_file() {
+        eprintln!("kotama: payload is not a file: {payload}");
+        return ExitCode::from(2);
+    }
+    let payload = match std::path::absolute(&payload) {
+        Ok(payload) => payload,
+        Err(err) => {
+            eprintln!("kotama: cannot make payload absolute: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let (lane, child, pid, image_name) = if let Some(pid) = attach_pid {
+        if !command.is_empty() {
+            eprintln!("kotama: --pid and a launch command are mutually exclusive");
+            return ExitCode::from(2);
+        }
+        if transport != "pipe" {
+            eprintln!("kotama: --pid uses the deterministic named pipe; --transport tcp needs a launched target");
+            return ExitCode::from(2);
+        }
+        if let Err(err) = TargetProcess::open(pid) {
+            eprintln!("kotama: cannot open pid {pid}: {err}");
+            return ExitCode::FAILURE;
+        }
+        let server = match NamedPipeServer::for_pid(pid) {
+            Ok(server) => server,
+            Err(err) => {
+                eprintln!("kotama: default pipe for pid {pid}: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        (Lane::Pipe(server), None, pid, String::new())
+    } else {
+        if command.is_empty() {
+            eprintln!("kotama: live inject wants --pid <pid> or a target after --");
+            return ExitCode::from(2);
+        }
+        let (lane, env_key, env_value) = match transport.as_str() {
+            "pipe" => match NamedPipeServer::new() {
+                Ok(server) => {
+                    let name = server.name().to_string();
+                    (Lane::Pipe(server), "KOTAMA_PAYLOAD_PIPE", name)
+                }
+                Err(err) => {
+                    eprintln!("kotama: named pipe: {err}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "tcp" => match TcpListener::bind(("127.0.0.1", 0)) {
+                Ok(listener) => match listener.local_addr() {
+                    Ok(address) => (
+                        Lane::Tcp(listener),
+                        "KOTAMA_PAYLOAD_TCP",
+                        address.port().to_string(),
+                    ),
+                    Err(err) => {
+                        eprintln!("kotama: tcp address: {err}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                Err(err) => {
+                    eprintln!("kotama: tcp listener: {err}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                eprintln!("kotama: --transport wants pipe or tcp, got {other:?}");
+                return ExitCode::from(2);
+            }
+        };
+        let child = match Command::new(&command[0])
+            .args(&command[1..])
+            .env(env_key, &env_value)
+            .env_remove(if env_key == "KOTAMA_PAYLOAD_PIPE" {
+                "KOTAMA_PAYLOAD_TCP"
+            } else {
+                "KOTAMA_PAYLOAD_PIPE"
+            })
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => ChildGuard(child),
+            Err(err) => {
+                eprintln!("kotama: cannot launch target: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let pid = child.0.id() as i32;
+        let lane = match lane {
+            Lane::Pipe(mut server) => {
+                server.expect_client(pid);
+                Lane::Pipe(server)
+            }
+            other => other,
+        };
+        let image_name = Path::new(&command[0])
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (lane, Some(child), pid, image_name)
+    };
+    let _child = child;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (target, main_base) = loop {
+        if let Ok(process) = TargetProcess::open(pid) {
+            if let Ok(modules) = process.modules() {
+                let module = if image_name.is_empty() {
+                    process.main_module().ok()
+                } else {
+                    modules
+                        .iter()
+                        .find(|module| {
+                            Path::new(&module.path)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.eq_ignore_ascii_case(&image_name))
+                        })
+                        .cloned()
+                };
+                if let Some(module) = module {
+                    break (process, module.base);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "kotama: pid {pid} never exposed {}",
+                if image_name.is_empty() {
+                    "a main module"
+                } else {
+                    image_name.as_str()
+                }
+            );
+            return ExitCode::FAILURE;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let session = match kotama_host::control::Session::with_injection(target) {
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("kotama: injection capability: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match session.inject(&payload, Duration::from_secs(15)) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("kotama: inject: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut stream = match lane {
+        Lane::Pipe(server) => match server.accept(Duration::from_secs(20)) {
+            Ok(stream) => Transport::Pipe(stream),
+            Err(err) => {
+                eprintln!("kotama: pipe accept: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Lane::Tcp(listener) => {
+            if let Err(err) = listener.set_nonblocking(true) {
+                eprintln!("kotama: tcp nonblocking: {err}");
+                return ExitCode::FAILURE;
+            }
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        break Transport::Tcp(stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            eprintln!("kotama: payload did not connect over tcp");
+                            return ExitCode::FAILURE;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => {
+                        eprintln!("kotama: tcp accept: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        }
+    };
+
+    let ack = match wire::handshake(&mut stream) {
+        Ok(ack) => ack,
+        Err(err) => {
+            eprintln!("kotama: handshake: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let modules = match wire::list_modules(&mut stream) {
+        Ok(modules) => modules,
+        Err(err) => {
+            eprintln!("kotama: payload modules: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let payload_main = modules.first().map(|module| module.base).unwrap_or(0);
+    let magic = match wire::read_memory(&mut stream, main_base, 2) {
+        Ok(magic) => magic,
+        Err(err) => {
+            eprintln!("kotama: payload read: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if payload_main != main_base {
+        eprintln!("kotama: payload main base does not match the target image");
+        return ExitCode::FAILURE;
+    }
+
+    #[derive(Serialize)]
+    struct InjectJson {
+        pid: i32,
+        transport: String,
+        payload: String,
+        module_base: String,
+        remote_load_library: String,
+        thread_id: u32,
+        proto_version: u16,
+        capabilities: Vec<&'static str>,
+        payload_modules: usize,
+        payload_main_base: String,
+        target_main_base: String,
+        image_magic: String,
+    }
+    let json = InjectJson {
+        pid,
+        transport,
+        payload: payload.display().to_string(),
+        module_base: format!("0x{:x}", report.module_base),
+        remote_load_library: format!("0x{:x}", report.remote_load_library),
+        thread_id: report.thread_id,
+        proto_version: ack.proto_version,
+        capabilities: ack
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect(),
+        payload_modules: modules.len(),
+        payload_main_base: format!("0x{payload_main:x}"),
+        target_main_base: format!("0x{main_base:x}"),
+        image_magic: magic.iter().map(|byte| format!("{byte:02x}")).collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => println!("{text}"),
+        Err(err) => {
+            eprintln!("kotama: {err}");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// `live trace`：INT3 断点命中计数（ptrace；ELF / wine 宿主 PE 通吃）。
@@ -556,7 +987,6 @@ fn parse_value_spec(spec: &str) -> Result<kotama_host::scanner::Value, String> {
 }
 
 /// `live scan`：首扫 + 可选续扫链，输出命中 JSON。
-#[cfg(target_os = "linux")]
 fn live_scan(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
     use kotama_host::scanner;
     let mut exact: Option<kotama_host::scanner::Value> = None;
@@ -645,7 +1075,6 @@ fn live_scan(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
 }
 
 /// `live write`：需要 `--write` 显式授权（否则 exit 3）。
-#[cfg(target_os = "linux")]
 fn live_write(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
     let address = match args
         .first()
@@ -699,7 +1128,6 @@ fn live_write(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode 
 }
 
 /// `live freeze`：钉住一个值 `--seconds` 秒（需要 `--write`）。
-#[cfg(target_os = "linux")]
 fn live_freeze(process: kotama_host::TargetProcess, args: &[String]) -> ExitCode {
     let address = match args
         .first()
@@ -980,6 +1408,7 @@ fn analyze(args: &[String]) -> ExitCode {
     let mut xref = false;
     let mut strings = false;
     let mut vtables_flag = false;
+    let mut rtti_flag = false;
     let mut limit: usize = 8;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -988,6 +1417,7 @@ fn analyze(args: &[String]) -> ExitCode {
             "--xref" => xref = true,
             "--strings" => strings = true,
             "--vtables" => vtables_flag = true,
+            "--rtti" => rtti_flag = true,
             "--limit" => match iter.next().and_then(|v| v.parse().ok()) {
                 Some(value) => limit = value,
                 None => {
@@ -1015,6 +1445,7 @@ fn analyze(args: &[String]) -> ExitCode {
         }
     };
     let functions = discover(&module);
+    let exceptions = kotama_scan::exception_functions(&module);
 
     let report = Report {
         module_id: module.module_id().to_hex(),
@@ -1075,6 +1506,66 @@ fn analyze(args: &[String]) -> ExitCode {
                 })
                 .collect()
         }),
+        exceptions: exceptions
+            .iter()
+            .map(|exception| ExceptionJson {
+                begin: format!("0x{:x}", exception.runtime.begin_rva),
+                end: format!("0x{:x}", exception.runtime.end_rva),
+                unwind_info: (exception.runtime.unwind_info_rva != 0)
+                    .then(|| format!("0x{:x}", exception.runtime.unwind_info_rva)),
+                flags: exception.unwind.map(|unwind| unwind.flags),
+                prolog_size: exception.unwind.map(|unwind| unwind.prolog_size),
+                handler: exception
+                    .unwind
+                    .and_then(|unwind| unwind.handler_rva)
+                    .map(|rva| format!("0x{rva:x}")),
+                chained_begin: exception
+                    .unwind
+                    .and_then(|unwind| unwind.chained)
+                    .map(|runtime| format!("0x{:x}", runtime.begin_rva)),
+            })
+            .collect(),
+        rtti: rtti_flag.then(|| {
+            let facts = kotama_scan::msvc_rtti::scan(&module);
+            RttiJson {
+                vtables: facts
+                    .vtables
+                    .iter()
+                    .map(|table| RttiVtableJson {
+                        locator_ptr_rva: format!("0x{:x}", table.locator_ptr_rva),
+                        address_point: format!("0x{:x}", table.address_point),
+                        class_name: table.locator.type_descriptor.class_name.clone(),
+                        offset: table.locator.offset,
+                        constructor_disp: table.locator.constructor_disp,
+                        hierarchy_rva: format!("0x{:x}", table.locator.hierarchy.rva),
+                        bases: table
+                            .locator
+                            .hierarchy
+                            .bases
+                            .iter()
+                            .map(|base| RttiBaseJson {
+                                rva: format!("0x{:x}", base.rva),
+                                class_name: base.type_descriptor.class_name.clone(),
+                                num_contained_bases: base.num_contained_bases,
+                                member_disp: base.member_disp,
+                                vbtable_disp: base.vbtable_disp,
+                                vbase_disp: base.vbase_disp,
+                            })
+                            .collect(),
+                        slots: table.slots.iter().map(|rva| format!("0x{rva:x}")).collect(),
+                    })
+                    .collect(),
+                type_descriptors: facts
+                    .type_descriptors
+                    .iter()
+                    .map(|descriptor| RttiTypeJson {
+                        rva: format!("0x{:x}", descriptor.rva),
+                        mangled: descriptor.mangled.clone(),
+                        class_name: descriptor.class_name.clone(),
+                    })
+                    .collect(),
+            }
+        }),
         string_xrefs: strings.then(|| {
             string_xrefs(&module, &functions)
                 .into_iter()
@@ -1110,7 +1601,14 @@ fn analyze(args: &[String]) -> ExitCode {
         };
         for (index, function) in functions.iter().take(limit).enumerate() {
             let body_limit = limit_of(index);
-            let text = decompile_function_bounded(&space, id, module.arch, function, body_limit);
+            let text = decompile_function_bounded_with_exceptions(
+                &space,
+                id,
+                module.arch,
+                function,
+                body_limit,
+                &exceptions,
+            );
             println!();
             println!("{}", text.text);
         }

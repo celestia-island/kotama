@@ -9,12 +9,14 @@ i386-windows-gnu，各出 -O2 与 -O0 两档（-g 常开——DWARF 是静态管
   python3 tools/build_fixtures.py                 # 全矩阵编译
   python3 tools/build_fixtures.py --run           # 编译 + 本机 ELF 直跑 / PE 经 wine 跑（退出码必须 0）
   python3 tools/build_fixtures.py --targets x86_64-linux-gnu
+  python3 tools/build_fixtures.py --targets x86_64-windows-msvc x86-windows-msvc --run
   python3 tools/build_fixtures.py --host-samples  # 顺手拷几个本机真实 ELF 进 host-samples/
   python3 tools/build_fixtures.py --list
 
 工具链发现顺序：--zig > $KOTAMA_ZIG > PATH > /mnt/work/zig-*/zig。
 wine 发现顺序：--wine > $KOTAMA_WINE > PATH（wine64 > wine）。32 位 PE 在纯 wine64（无
-wine32）环境下会跑不动——脚本探测失败时按 lane-skip 报告，不算失败。
+wine32）环境下会跑不动——脚本探测失败时按 lane-skip 报告，不算失败。原生 Windows
+宿主直接运行 PE，不要求 wine；ELF 的运行在 Windows 上按 lane-skip 报告。
 """
 
 from __future__ import annotations
@@ -75,7 +77,87 @@ def find_wine(override: str | None) -> str | None:
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output = True, text = True, **kw)
 
-def build_all(zig: str, targets: list[str], opt_levels: list[str]) -> int:
+def is_windows_target(target: str) -> bool:
+    return target.endswith(("-windows-gnu", "-windows-msvc"))
+
+def decode_console(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("mbcs", errors = "replace")
+
+def msvc_environment(target: str) -> dict[str, str]:
+    if os.name != "nt":
+        sys.exit(f"build_fixtures: {target} currently needs a native Windows MSVC host")
+
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / \
+        "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        sys.exit(f"build_fixtures: vswhere not found at {vswhere}")
+
+    query = run([
+        str(vswhere), "-latest", "-products", "*", "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath",
+    ])
+    installation = query.stdout.strip()
+    if query.returncode != 0 or not installation:
+        sys.exit("build_fixtures: no Visual Studio C++ toolchain found")
+
+    dev_cmd = Path(installation) / "Common7" / "Tools" / "VsDevCmd.bat"
+    arch = "x86" if target.startswith("x86-") else "x64"
+    command = f'"{dev_cmd}" -arch={arch} -host_arch=x64 && set'
+    probe = subprocess.run(command, shell = True, capture_output = True)
+    stdout = decode_console(probe.stdout)
+    stderr = decode_console(probe.stderr)
+    if probe.returncode != 0:
+        sys.exit(f"build_fixtures: VsDevCmd failed:\n{stdout}\n{stderr}")
+
+    # Windows 环境变量大小写不敏感；VsDevCmd 常输出 Path 而非 PATH。
+    env = {name.upper(): value for name, value in os.environ.items()}
+    for line in stdout.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name and not name.startswith("="):
+            env[name.upper()] = value
+    if shutil.which("cl", path = env.get("PATH")) is None:
+        sys.exit(f"build_fixtures: VsDevCmd did not provide cl.exe for {target}")
+    print(f"# msvc {installation} arch={arch}")
+    return env
+
+def build_msvc_target(target: str, opt_levels: list[str], sources: list[Path]) -> int:
+    env = msvc_environment(target)
+    compiler = shutil.which("cl", path = env.get("PATH"))
+    failures = 0
+
+    for opt in opt_levels:
+        out_dir = OUT_ROOT / target / f"-{opt}"
+        out_dir.mkdir(parents = True, exist_ok = True)
+
+        for src in sources:
+            exe = out_dir / f"{src.stem}.exe"
+            obj = out_dir / f"{src.stem}.obj"
+            pdb = out_dir / f"{src.stem}.pdb"
+            cmd = [
+                compiler, "/nologo", "/utf-8", "/Zi", "/W4", "/D_CRT_SECURE_NO_WARNINGS",
+                "/O2" if opt == "O2" else "/Od",
+            ]
+            if src.suffix == ".cpp":
+                cmd += ["/EHsc", "/GR"]
+            cmd += [
+                f"/Fo{obj}", f"/Fe{exe}", str(src), "/link", "/DEBUG:FULL",
+                "/INCREMENTAL:NO", f"/PDB:{pdb}",
+            ]
+            proc = run(cmd, cwd = out_dir, env = env)
+
+            if proc.returncode != 0 or not exe.is_file():
+                failures += 1
+                output = (proc.stdout + proc.stderr).strip()
+                print(f"FAIL {target}/-{opt}/{src.stem}\n{output}")
+            else:
+                print(f"ok   {target}/-{opt}/{exe.name} ({exe.stat().st_size} B)")
+
+    return failures
+
+def build_all(zig: str | None, targets: list[str], opt_levels: list[str]) -> int:
     sources = sorted(SRC_DIR.glob("*.c"))
 
     if not sources:
@@ -85,7 +167,12 @@ def build_all(zig: str, targets: list[str], opt_levels: list[str]) -> int:
     failures = 0
 
     for target in targets:
-        is_windows = target.endswith("-windows-gnu")
+        if target.endswith("-windows-msvc"):
+            failures += build_msvc_target(target, opt_levels, sources + cpp_sources)
+            continue
+        if zig is None:
+            sys.exit("build_fixtures: zig is required for non-MSVC targets")
+        is_windows = is_windows_target(target)
 
         for opt in opt_levels:
             out_dir = OUT_ROOT / target / f"-{opt}"
@@ -109,12 +196,16 @@ def build_all(zig: str, targets: list[str], opt_levels: list[str]) -> int:
 
 def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> int:
     failures = 0
+    native_windows = os.name == "nt"
 
     for target in targets:
-        is_windows = target.endswith("-windows-gnu")
+        is_windows = is_windows_target(target)
 
-        if is_windows and (wine is None):
-            print(f"lane-skip {target}: no wine on this host")
+        if is_windows and not native_windows and (wine is None):
+            print(f"lane-skip {target}: PE smoke runs need a Windows host or wine")
+            continue
+        if not is_windows and native_windows:
+            print(f"lane-skip {target}: ELF smoke runs need a Linux host")
             continue
 
         for opt in opt_levels:
@@ -124,11 +215,13 @@ def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> in
                 if not exe.is_file():
                     continue
 
-                # mingw 目标带 -g 会顺带产出 <name>.pdb（调试符号伴生文件），不是可执行。
-                if exe.suffix == ".pdb":
+                # Windows 只执行 .exe；PDB/obj/lib/ilk 等伴生产物不是夹具程序。
+                if is_windows and exe.suffix.lower() != ".exe":
+                    continue
+                if not is_windows and exe.suffix == ".pdb":
                     continue
 
-                cmd = ([wine] if is_windows else []) + [str(exe)]
+                cmd = ([wine] if is_windows and not native_windows else []) + [str(exe)]
                 proc = run(cmd, timeout = 60)
                 name = f"{target}/-{opt}/{exe.name}"
 
@@ -173,9 +266,11 @@ def main() -> int:
 
         return 0
 
-    zig = find_zig(args.zig)
-    ver = run([zig, "version"]).stdout.strip()
-    print(f"# zig {ver} @ {zig}")
+    needs_zig = any(not target.endswith("-windows-msvc") for target in args.targets)
+    zig = find_zig(args.zig) if needs_zig else None
+    if zig:
+        ver = run([zig, "version"]).stdout.strip()
+        print(f"# zig {ver} @ {zig}")
     opt_levels = OPT_LEVELS if args.opt == "all" else [args.opt]
 
     failures = build_all(zig, args.targets, opt_levels)

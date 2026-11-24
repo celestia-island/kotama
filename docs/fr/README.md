@@ -35,6 +35,12 @@ Pour ce dépôt, cela se lit : *voir le programme clairement, et enregistrer ce 
 `kotama analyze <fichier>` charge un fichier ELF/PE → découvre les fonctions → les décompile
 en pseudo-C au niveau des blocs de base.
 
+**Les voies natives Windows sont implémentées** (2026-11-23, Win10 Pro x64) : hôte natif
+attach/scan/write/freeze, injection LoadLibrary par named pipe ou TCP loopback, exception/unwind
+PE et RTTI MSVC, PDB authentifié RSDS recoupé avec dbghelp, et matrice de fixtures GNU/MSVC plus
+packaging. Lance `just bench-windows` sous Windows (ajoute `--oracle` pour Ghidra et `--ida`
+avec `KOTAMA_IDA` pour IDA).
+
 Périmètre démontré :
 
 | Dimension | État |
@@ -44,12 +50,12 @@ Périmètre démontré :
 | Frontières | D'abord les frontières exactes (longueurs de symboles, `.pdata`) ; les inférées sont affinées par balayage linéaire — les blocs de queue partagés ne tronquent plus les vraies fonctions |
 | Décompilation | Blocs de base + commentaires avec ancres d'adresse ; **les tables de saut des switch denses sont récupérées** (10/10 branches sur la matrice ELF64, confiance 100 %) |
 | Déterminisme | Même entrée, sortie identique octet par octet à chaque exécution (le prérequis du diff et de la réutilisation des connaissances) |
-| Vérifié sur | 24 cibles de la matrice de fixtures plus des binaires système dénudés comme `/bin/true` et `/bin/ls` |
+| Vérifié sur | la matrice de fixtures complète plus des binaires système dénudés comme `/bin/true` et `/bin/ls` |
 
-Limites connues (périmètre P1) : les frontières exactes des fonctions PE dépendent du PDB (les
-fixtures mingw n'en embarquent pas aujourd'hui ; cibles d'appel + balayage linéaire les couvrent) ;
-l'inférence de types, la récupération de structs et l'oracle différentiel Ghidra ne sont pas
-encore câblés.
+Limites connues : les frontières exactes des fonctions PE dépendent du PDB (zig -g génère le PDB
+compagnon ; sans lui, cibles d'appel + balayage linéaire les couvrent) ;
+les oracles Ghidra/IDA sont désormais câblés. L'inférence de types, la récupération de structs
+et la GUI/service ne sont pas encore commencées.
 
 Les décisions de conception et les registres de processus vivent dans les descriptions de PR
 (les documents de conception n'entrent pas dans l'arbre source).
@@ -58,7 +64,7 @@ Les décisions de conception et les registres de processus vivent dans les descr
 
 | Domaine | Contenu | Étape |
 | --- | --- | --- |
-| Statique | chargement → découverte → décompilation en blocs de base ✅ / inférence de types · structs · oracle différentiel | P0 ✅ / P1 |
+| Statique | chargement → découverte → décompilation en blocs de base → preuves SEH/RTTI/PDB et différentiel Ghidra/IDA ✅ / inférence de types · structs | P0 ✅ / P1 |
 | Dynamique | injection (Windows / Linux) → mémoire / pile / instantanés → scan / gel → hook / trace | P2–P4 |
 | Empaquetage | `hooks.toml` + sources de hooks → bibliothèques d'injection par plateforme + manifestes (ABI / capacités / empreintes) | P4 |
 | Surface | services (REST / WS / MCP) + interface web hikari + nœuds distants evernight | P5–P6 |
