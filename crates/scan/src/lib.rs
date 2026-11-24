@@ -638,6 +638,9 @@ pub struct StringXref {
 pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
     use std::collections::BTreeSet;
 
+    // x86 非 PIE 用绝对地址立即数引用字符串（`push offset str` / `mov reg, imm32`）。
+    let image_base = module.image_base;
+
     let space = module.address_space();
     let bitness = module.arch.bitness();
     let data_sections: Vec<(u64, u64)> = module
@@ -668,10 +671,24 @@ pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<S
         let mut buffer = Instruction::default();
         while decoder.can_decode() {
             decoder.decode_out(&mut buffer);
-            // 只取 RIP 相对内存操作数：字符串引用的常态形态（`lea reg,[rip+X]`）。
-            // 立即数形态只出现在非 PIE 的 `mov esi,imm32`，P1 先不碰（误判面大）。
+            // RIP 相对内存操作数（x64 `lea reg,[rip+X]`）是字符串引用的常态形态。
             if buffer.is_ip_rel_memory_operand() {
                 let target = buffer.ip_rel_memory_address();
+                if in_data(target) {
+                    if let Some(text) = read_cstring(&space, target) {
+                        out.insert((function.rva, target, text));
+                    }
+                }
+            }
+            // x86 非 PIE 的绝对地址立即数（`push offset` / `mov reg, imm32`）：目标落在
+            // 数据节且能解出 NUL 结尾的可打印字符串才算，普通数值立即数过不了这一关。
+            for index in 0..buffer.op_count() {
+                if buffer.op_kind(index) != OpKind::Immediate32 {
+                    continue;
+                }
+                let Some(target) = u64::from(buffer.immediate32()).checked_sub(image_base) else {
+                    continue;
+                };
                 if in_data(target) {
                     if let Some(text) = read_cstring(&space, target) {
                         out.insert((function.rva, target, text));
@@ -2087,6 +2104,37 @@ mod tests {
         assert!(functions.iter().all(|f| f.rva < 0x100_0000),);
     }
 
+    /// x86 非 PIE（RA3 / 旧版游戏都是这一类）：`push offset str` / `mov reg, imm32` 的
+    /// 绝对地址立即数也要归到引用它的函数——此前只认 x64 的 RIP 相对形态，x86 永远为空。
+    #[test]
+    fn string_xrefs_find_absolute_immediate_references() {
+        for rel in [
+            "x86-windows-gnu/-O2/strings.exe",
+            "x86-windows-msvc/-O2/strings.exe",
+        ] {
+            let Some(path) = fixture(rel) else {
+                eprintln!("skip: fixtures not built");
+                continue;
+            };
+            let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+            let functions = discover(&module);
+            let xrefs = string_xrefs(&module, &functions);
+            let texts: Vec<&str> = xrefs.iter().map(|x| x.text.as_str()).collect();
+            let hits = ["large", "medium", "small"]
+                .iter()
+                .filter(|word| texts.contains(word))
+                .count();
+            assert!(
+                hits >= 2,
+                "{rel}: expected absolute literal references, got {xrefs:?}"
+            );
+            assert!(xrefs.iter().all(|x| x.text.len() >= 4));
+            // 每条引用的字符串都落在数据节，引用方函数确实存在。
+            assert!(xrefs
+                .iter()
+                .all(|x| functions.iter().any(|f| f.rva == x.func_rva)));
+        }
+    }
     #[test]
     fn string_xrefs_find_literal_references() {
         let Some(path) = fixture("x86_64-linux-gnu/-O2/strings") else {
