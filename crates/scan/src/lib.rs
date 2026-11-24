@@ -959,6 +959,11 @@ fn is_ebp_disp_modrm(byte: u8) -> bool {
 /// `sub ecx, [ecx+disp]`（`2B 49`，但虚基类调整器 thunk `2B 49 FC E9` 除外），
 /// 以及 frame-relative 访问。
 fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    is_padding_noise(space, rva) || is_frame_relative_start(space, rva)
+}
+
+/// padding 噪声形状（与 frame-relative 无关的那一半）。
+fn is_padding_noise(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 4) else {
         return false;
     };
@@ -969,7 +974,21 @@ fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
             && bytes.len() >= 4
             && matches!(bytes[2], 0x8B | 0x8D)
             && is_ebp_disp_modrm(bytes[3]))
-        || is_frame_relative_start(space, rva)
+}
+
+/// 前面有两字节对齐填充、自身不是 padding 噪声的起点；**不**排除 frame-relative 开头。
+///
+/// MSVC x86 `/O2` 常把 EBP 当通用寄存器（省略帧指针），这类函数天生以
+/// `lea/mov reg,[ebp±disp]` 开头。单独的 frame-relative 访问确实不是入口，但
+/// 「vtable 指向 + 16 对齐 + 对齐填充」已是足够强的入口证据，不应再被它否决。
+fn looks_like_padded_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    if is_padding_noise(space, rva) {
+        return false;
+    }
+    // 只认 int3 / nop 对齐填充：`00 00` 往往是前一条指令 imm32/disp32 的高位字节。
+    space
+        .read(rva.saturating_sub(2), 2)
+        .is_some_and(|bytes| matches!(bytes[0], 0xCC | 0x90) && matches!(bytes[1], 0xCC | 0x90))
 }
 
 /// 较宽的起点判定：在强序言之外，接受 getter / 常量返回 / 导入 thunk 的常见开头。
@@ -1092,7 +1111,9 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                 (None, None) => continue,
             };
             let plausible = looks_like_function_start(space, target)
-                || (prefer_rva && looks_like_function_start_weak(space, target));
+                || (prefer_rva && looks_like_function_start_weak(space, target))
+                // 16 对齐 + 对齐填充的 frame-relative 开头（EBP 作通用寄存器的函数）。
+                || (target % 16 == 0 && looks_like_padded_start(space, target));
             let aligned = target % pointer_size as u64 == 0
                 && (!matches!(module.arch, Arch::X86) || target % 16 == 0);
             if aligned && plausible && has_code_boundary_before(space, target) {
@@ -1105,7 +1126,10 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
         let mut run = Vec::new();
         for chunk in bytes.as_chunks::<4>().0 {
             let value = u64::from(u32::from_le_bytes(*chunk));
-            if in_exec(value) && looks_like_function_start_weak(space, value) {
+            if in_exec(value)
+                && (looks_like_function_start_weak(space, value)
+                    || looks_like_padded_start(space, value))
+            {
                 run.push(value);
             } else {
                 if run.len() >= 8 {
@@ -1694,7 +1718,7 @@ fn thunk_targets(
                 continue;
             };
             starts.insert(rva);
-            if !is_frame_relative_start(space, jump) {
+            if !is_frame_relative_start(space, jump) || looks_like_padded_start(space, jump) {
                 jumps.insert(jump);
             }
         }
@@ -2500,18 +2524,11 @@ mod tests {
         };
         space.write(0x1000, &[0xC3]);
         space.write(0x1010, &[0xCC, 0xCC, 0xCC, 0xCC]);
-        space.write(0x1020, &[0x8D, 0x4D, 0x08, 0xC3]);
         space.write(0x1030, &[0x90, 0x90, 0x8B, 0x44, 0x24, 0x04, 0xC3]);
-        space.write(
-            0x1040,
-            &[0xFF, 0x75, 0x08, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3],
-        );
         space.write(0x1050, &[0x6A, 0x18, 0x8B, 0x45, 0x08, 0xC3]);
         space.write(0x2000, &0x40_1010u32.to_le_bytes());
-        space.write(0x2004, &0x40_1020u32.to_le_bytes());
-        space.write(0x2008, &0x40_1030u32.to_le_bytes());
-        space.write(0x200C, &0x40_1040u32.to_le_bytes());
-        space.write(0x2010, &0x40_1050u32.to_le_bytes());
+        space.write(0x2004, &0x40_1030u32.to_le_bytes());
+        space.write(0x2008, &0x40_1050u32.to_le_bytes());
         let sections = vec![
             SectionInfo {
                 rva: 0x1000,
@@ -2538,12 +2555,10 @@ mod tests {
         };
         let functions = discover_with(view, &space);
         assert!(
-            !functions.iter().any(|function| matches!(
-                function.rva,
-                0x1010 | 0x1020 | 0x1030 | 0x1040 | 0x1050
-            ) && function
-                .evidence
-                .contains(&Evidence::PointerTarget)),
+            !functions
+                .iter()
+                .any(|function| matches!(function.rva, 0x1010 | 0x1030 | 0x1050)
+                    && function.evidence.contains(&Evidence::PointerTarget)),
             "degenerate target was accepted: {functions:?}"
         );
     }
@@ -2766,6 +2781,93 @@ mod tests {
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "sub ecx,[ecx+8] noise was accepted: {functions:?}"
         );
+    }
+
+    #[test]
+    fn vtable_pointing_at_padded_frame_relative_start_is_accepted() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        // 16 对齐、int3 填充、以 lea ecx,[ebp-0x2c] 开头（EBP 作通用寄存器）的函数
+        space.write(0x100E, &[0xCC, 0xCC]);
+        space.write(
+            0x1010,
+            &[0x8D, 0x4D, 0xD4, 0xE8, 0x10, 0x00, 0x00, 0x00, 0xC3],
+        );
+        // 同样开头但没有对齐填充：仍是函数中段的栈访问
+        space.write(0x1020, &[0x8B, 0x8B]);
+        space.write(0x1022, &[0x8B, 0x45, 0x08, 0xC3]);
+        // int3 填充 + push [ebp+8]; call; ret：同样是 EBP 作通用寄存器的小函数
+        space.write(0x102E, &[0xCC, 0xCC]);
+        // 零字节「填充」（其实是前一条指令的 imm32 高位）不算证据
+        space.write(0x1040, &[0xC7, 0x45, 0xFC, 0x08, 0x00, 0x00, 0x00]);
+        space.write(0x1047, &[0xFF, 0x75, 0xDC, 0xC3]);
+        space.write(0x1028, &[0xC3]);
+        space.write(
+            0x1030,
+            &[0xFF, 0x75, 0x08, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3],
+        );
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        space.write(0x2004, &0x40_1022u32.to_le_bytes());
+        space.write(0x2008, &0x40_1030u32.to_le_bytes());
+        space.write(0x200C, &0x40_1047u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".rdata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "padded frame-relative start was rejected: {functions:?}"
+        );
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1030
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "padded push-[ebp+8] start was rejected: {functions:?}"
+        );
+        for rva in [0x1022u64, 0x1047] {
+            assert!(
+                !functions.iter().any(|function| function.rva == rva
+                    && function.evidence.contains(&Evidence::PointerTarget)),
+                "frame-relative access without int3/nop padding was accepted: {functions:?}"
+            );
+        }
     }
 
     #[test]
