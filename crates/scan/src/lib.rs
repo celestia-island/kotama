@@ -1609,6 +1609,9 @@ mod tests {
             let value = u32::try_from(rva_target).unwrap();
             space.write(0x3000 + index * 4, &value.to_le_bytes());
         }
+        // A 4-byte-aligned table entry must not become a function start.
+        space.write(0x2014, &[0x8B, 0x41, 0x04, 0xC3]);
+        space.write(0x3020, &0x2014u32.to_le_bytes());
         let sections = vec![
             SectionInfo {
                 rva: 0x1000,
@@ -1638,6 +1641,11 @@ mod tests {
             functions.iter().any(|function| function.rva == 0x2010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "RVA table target not discovered: {functions:?}"
+        );
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x2014
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "4-byte-aligned table entry was accepted: {functions:?}"
         );
     }
 
