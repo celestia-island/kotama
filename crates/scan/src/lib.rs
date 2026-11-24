@@ -197,11 +197,41 @@ fn discover_impl(
     }
 
     // 3) PE64 exception directory：编译器自记的函数边界；节名仅是活体兼容回退。
-    for exception in exception_functions_impl(&module, exception_directory) {
+    //    UNW_FLAG_CHAININFO 条目是父函数的延续块（PDB 也把它归入父过程），不是起点：
+    //    紧邻父函数末尾的块并入父函数尺寸，分开的冷代码块只留在异常事实里。
+    let exceptions = exception_functions_impl(&module, exception_directory);
+    let mut chains: BTreeMap<u64, Vec<(u32, u32)>> = BTreeMap::new();
+    for exception in &exceptions {
+        if let Some(parent) = exception
+            .unwind
+            .as_ref()
+            .and_then(|unwind| unwind.chained.as_ref())
+        {
+            chains
+                .entry(u64::from(parent.begin_rva))
+                .or_default()
+                .push((exception.runtime.begin_rva, exception.runtime.end_rva));
+        }
+    }
+    for exception in exceptions {
         let runtime = exception.runtime;
-        let entry = table.entry(u64::from(runtime.begin_rva)).or_default();
+        if exception
+            .unwind
+            .as_ref()
+            .is_some_and(|unwind| unwind.chained.is_some())
+        {
+            continue;
+        }
+        let begin = u64::from(runtime.begin_rva);
+        let mut end = runtime.end_rva;
+        if let Some(chunks) = chains.get(&begin) {
+            while let Some(next) = chunks.iter().find(|(chunk_begin, _)| *chunk_begin == end) {
+                end = next.1;
+            }
+        }
+        let entry = table.entry(begin).or_default();
         if entry.size.is_none() {
-            entry.size = Some(u64::from(runtime.end_rva.saturating_sub(runtime.begin_rva)));
+            entry.size = Some(u64::from(end.saturating_sub(runtime.begin_rva)));
         }
         entry.evidence.insert(Evidence::Pdata);
     }
@@ -2195,6 +2225,110 @@ mod tests {
         assert_eq!(function.size, 0x40);
         assert!(!function.size_inferred);
         assert!(function.evidence.contains(&Evidence::Pdata));
+    }
+
+    /// 链式 .pdata：延续块不是起点，紧邻的并入父函数尺寸，分开的冷代码块只留在事实里。
+    #[test]
+    fn chained_unwind_chunks_are_not_function_starts() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x4000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+                segment(0x3000, 0x1000, false),
+            ],
+        };
+        // .pdata：父函数 1000-1040、紧邻延续块 1040-1060、分开的冷块 1200-1220。
+        let entries: [(u32, u32, u32); 3] = [
+            (0x1000, 0x1040, 0x3000),
+            (0x1040, 0x1060, 0x3020),
+            (0x1200, 0x1220, 0x3040),
+        ];
+        for (index, (begin, end, unwind)) in entries.iter().enumerate() {
+            let at = 0x2000u64 + index as u64 * 12;
+            space.write(at, &begin.to_le_bytes());
+            space.write(at + 4, &end.to_le_bytes());
+            space.write(at + 8, &unwind.to_le_bytes());
+        }
+        // 父函数的 UNWIND_INFO：version 1、无标志、一个 unwind code。
+        space.write(0x3000, &[1, 4, 1, 0x05, 0, 0]);
+        // 两个延续块的 UNWIND_INFO：CHAININFO，尾随父记录 1000-1040 @ 3000。
+        for unwind in [0x3020u64, 0x3040] {
+            space.write(unwind, &[(UNW_FLAG_CHAININFO << 3) | 1, 4, 1, 0x05, 0, 0]);
+            space.write(unwind + 8, &0x1000u32.to_le_bytes());
+            space.write(unwind + 12, &0x1040u32.to_le_bytes());
+            space.write(unwind + 16, &0x3000u32.to_le_bytes());
+        }
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 36,
+                name: ".pdata".into(),
+                executable: false,
+            },
+            SectionInfo {
+                rva: 0x3000,
+                size: 0x1000,
+                name: ".xdata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe64,
+            arch: Arch::X86_64,
+            image_base: 0,
+            entry_rva: None,
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let directory = DataDirectory {
+            rva: 0x2000,
+            size: 36,
+        };
+        let adapter = ViewAdapter {
+            container: Container::Pe64,
+            arch: Arch::X86_64,
+            image_base: 0,
+            entry_rva: None,
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+            space: &space,
+        };
+        let facts = exception_functions_impl(&adapter, Some(directory));
+        assert_eq!(facts.len(), 3, "exception facts keep every chunk");
+        let functions = discover_impl(view, &space, Some(directory));
+        let parent = functions
+            .iter()
+            .find(|function| function.rva == 0x1000)
+            .expect("parent function");
+        assert_eq!(parent.size, 0x60, "contiguous chunk extends the parent");
+        assert!(!parent.size_inferred);
+        for rva in [0x1040u64, 0x1200] {
+            assert!(
+                !functions.iter().any(|function| function.rva == rva),
+                "chained chunk {rva:#x} must not be a start: {functions:?}"
+            );
+        }
     }
 
     #[test]
