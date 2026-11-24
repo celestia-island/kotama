@@ -6,4 +6,4 @@
 
 KOTAMA_EXPORT int fixture_exported(int value) { return value + 1; }
 
-int main(void) { return fixture_exported(0); }
+int main(void) { return fixture_exported(-1); }
