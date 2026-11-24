@@ -386,6 +386,94 @@ fn live_e2e_attach_then_inject_over_default_pid_pipe() {
 }
 
 /// Rust payload + 空传输环境：必须忽略空值并回落到 PID 管道。
+/// x64 宿主 → x86（WOW64）目标：跨位宽注入走目标进程里的 32 位 kernel32 导出表。
+///
+/// 断言链：目标主映像的 COFF Machine 是 I386 → 注入 i686 agent 成功 → 载荷回连默认
+/// `kotama-<pid>` 管道 → 握手 PROTO_VERSION → ListModules 主基址 == spin.exe 基址 →
+/// ReadMemory 回 MZ → 宿主侧 Toolhelp 也枚举到 kotama_agent.dll。
+#[test]
+fn live_e2e_attach_then_inject_into_x86_target_over_default_pid_pipe() {
+    if !live_enabled() {
+        return;
+    }
+    let spin = repo_root().join("fixtures/generated/x86-windows-gnu/-O2/spin.exe");
+    assert!(
+        spin.is_file(),
+        "x86 fixture missing: run tools/build_fixtures.py first ({})",
+        spin.display()
+    );
+    let dll = repo_root().join("dist/i686-pc-windows-gnu/kotama_agent.dll");
+    assert!(
+        dll.is_file(),
+        "x86 payload missing: run tools/build_windows_agent.py --target x86-windows-gnu ({})",
+        dll.display()
+    );
+    let child = ChildGuard(
+        Command::new(&spin)
+            .arg("30")
+            .env_remove("KOTAMA_PAYLOAD_PIPE")
+            .env_remove("KOTAMA_PAYLOAD_TCP")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn x86 spin.exe"),
+    );
+    let pid = child.0.id() as i32;
+    let (target, spin_base) = wait_for_main_module(pid, "spin.exe");
+    let header = target
+        .read_absolute(spin_base, 0x40)
+        .expect("host read of image head");
+    let lfanew = u32::from_le_bytes(header[0x3C..0x40].try_into().expect("e_lfanew")) as usize;
+    let machine_bytes = target
+        .read_absolute(spin_base + lfanew as u64 + 4, 2)
+        .expect("host read of COFF machine");
+    assert_eq!(
+        u16::from_le_bytes(machine_bytes.try_into().expect("machine")),
+        0x014c,
+        "the x86 lane must target a WOW64 process"
+    );
+
+    let server = NamedPipeServer::for_pid(pid).expect("deterministic default pipe");
+    let session = Session::with_injection(TargetProcess::open(pid).expect("open inject target"))
+        .expect("explicit injection grant");
+    let report = session
+        .inject(&dll, Duration::from_secs(15))
+        .expect("inject i686 kotama_agent.dll into the WOW64 target");
+    assert!(
+        report.remote_load_library < 0x1_0000_0000,
+        "remote LoadLibraryW must live in the 32-bit kernel32: {:#x}",
+        report.remote_load_library
+    );
+    let modules = target.modules().expect("host module table");
+    let agent_base = find_module_base(&modules, "kotama_agent.dll")
+        .expect("injected i686 payload must be a module of spin.exe");
+    assert_eq!(agent_base, report.module_base);
+
+    let mut pipe = server
+        .accept(Duration::from_secs(15))
+        .expect("i686 payload did not connect over the default pipe");
+    let ack = wire::handshake(&mut pipe).expect("handshake");
+    assert_eq!(ack.proto_version, kotama_proto::PROTO_VERSION);
+    let payload_modules = wire::list_modules(&mut pipe).expect("payload module list");
+    assert_eq!(
+        payload_modules[0].base, spin_base,
+        "x86 lane: payload main base must equal spin.exe base"
+    );
+    let magic = wire::read_memory(&mut pipe, spin_base, 2).expect("payload read of image head");
+    assert_eq!(&magic, b"MZ");
+    assert_eq!(
+        target.read_absolute(spin_base, 2).expect("host read"),
+        b"MZ"
+    );
+    eprintln!(
+        "# x86 lane: pid={pid} spin_base={spin_base:#x} remote_load_library={:#x} agent_base={agent_base:#x} proto={}",
+        report.remote_load_library,
+        ack.proto_version
+    );
+    drop(pipe);
+    drop(session);
+}
+
 #[test]
 fn live_e2e_attach_rust_payload_ignores_empty_transport_env() {
     if !live_enabled() {
