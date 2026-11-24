@@ -913,6 +913,27 @@ fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) ->
                 targets.insert(target);
             }
         }
+        // 连续 RVA 表：编译器生成的 vtable/分派表通常是一串 4 字节 RVA。
+        // 只要连续 8 项都能按 RVA 解释且像函数起点，就整段收下；这能
+        // 纠正“错误 VA 目标恰好也像起点”时的逐个值误判。
+        let mut run = Vec::new();
+        for chunk in bytes.chunks_exact(4) {
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(chunk);
+            let value = u64::from(u32::from_le_bytes(raw));
+            if in_exec(value) && looks_like_function_start_weak(space, value) {
+                run.push(value);
+            } else {
+                if run.len() >= 8 {
+                    targets.extend(run.drain(..));
+                } else {
+                    run.clear();
+                }
+            }
+        }
+        if run.len() >= 8 {
+            targets.extend(run);
+        }
     }
     targets
 }
@@ -1473,6 +1494,63 @@ mod tests {
             functions.iter().any(|function| function.rva == 0x2010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "RVA getter target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn contiguous_rva_table_seeds_getters() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2100],
+            segments: vec![segment(0x1000, 0x2000, true), segment(0x3000, 0x100, false)],
+        };
+        space.write(0x1000, &[0xC3]);
+        for index in 0..8u64 {
+            let va_target = 0x1010 + index * 0x10;
+            let rva_target = 0x2010 + index * 0x10;
+            space.write(va_target, &[0x55, 0x8B, 0xEC, 0xC3]);
+            space.write(rva_target, &[0x8B, 0x41, 0x04, 0xC3]);
+            let value = u32::try_from(rva_target).unwrap();
+            space.write(0x3000 + index * 4, &value.to_le_bytes());
+        }
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x2000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x3000,
+                size: 0x100,
+                name: ".rdata".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x1000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x2010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "RVA table target not discovered: {functions:?}"
         );
     }
 
