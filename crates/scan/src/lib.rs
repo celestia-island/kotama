@@ -813,16 +813,11 @@ fn has_code_boundary_before(space: &dyn AddressSpace, rva: u64) -> bool {
     )
 }
 
-/// 明显不是函数起点的字节：ret、int3、null，以及常见的 padding 噪声形状
-/// `sub ecx, [ecx+disp]`（`2B 49`）。
-fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
+/// `mov/lea reg, [ebp+disp]` is a frame-relative access, never a function entry.
+fn is_frame_relative_start(space: &dyn AddressSpace, rva: u64) -> bool {
     let Some(bytes) = space.read(rva, 2) else {
         return false;
     };
-    if matches!(bytes[0], 0xCC | 0xC3 | 0x00) || (bytes[0] == 0x2B && bytes[1] == 0x49) {
-        return true;
-    }
-    // `mov/lea reg, [ebp+disp]` is a frame-relative access, never a function entry.
     matches!(bytes[0], 0x8B | 0x8D)
         && matches!(
             bytes[1],
@@ -842,6 +837,17 @@ fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
                 | 0xB5
                 | 0xBD
         )
+}
+
+/// 明显不是函数起点的字节：ret、int3、null、常见的 padding 噪声形状
+/// `sub ecx, [ecx+disp]`（`2B 49`），以及 frame-relative 访问。
+fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    let Some(bytes) = space.read(rva, 2) else {
+        return false;
+    };
+    matches!(bytes[0], 0xCC | 0xC3 | 0x00)
+        || (bytes[0] == 0x2B && bytes[1] == 0x49)
+        || is_frame_relative_start(space, rva)
 }
 
 /// 较宽的起点判定：在强序言之外，接受 getter / 常量返回 / 导入 thunk 的常见开头。
@@ -1121,6 +1127,7 @@ fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
                 if exec_ranges
                     .iter()
                     .any(|(s, sz)| target >= *s && target < s + sz)
+                    && !is_frame_relative_start(space, target)
                 {
                     targets.insert(target);
                 }
