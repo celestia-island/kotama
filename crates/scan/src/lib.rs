@@ -802,8 +802,20 @@ fn pe_image_base(space: &dyn AddressSpace, container: Container) -> Option<u64> 
     }
 }
 
+/// 明显不是函数起点的字节：ret、int3、null，以及常见的 padding 噪声形状
+/// `sub ecx, [ecx+disp]`（`2B 49`）。
+fn is_degenerate_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    let Some(bytes) = space.read(rva, 2) else {
+        return false;
+    };
+    matches!(bytes[0], 0xCC | 0xC3 | 0x00) || (bytes[0] == 0x2B && bytes[1] == 0x49)
+}
+
 /// 较宽的起点判定：在强序言之外，接受 getter / 常量返回 / 导入 thunk 的常见开头。
 fn looks_like_function_start_weak(space: &dyn AddressSpace, rva: u64) -> bool {
+    if is_degenerate_start(space, rva) {
+        return false;
+    }
     if looks_like_function_start(space, rva) {
         return true;
     }
@@ -835,6 +847,9 @@ fn looks_like_function_start_weak(space: &dyn AddressSpace, rva: u64) -> bool {
 
 /// 目标是否像函数起点：前面有对齐填充，或开头是常见 x86 序言。
 fn looks_like_function_start(space: &dyn AddressSpace, rva: u64) -> bool {
+    if is_degenerate_start(space, rva) {
+        return false;
+    }
     let start = rva.saturating_sub(2);
     let (window, padded) = if let Some(bytes) = space.read(start, 8) {
         let offset = usize::try_from(rva - start).unwrap_or(0);
@@ -1629,6 +1644,60 @@ mod tests {
             functions.iter().any(|function| function.rva == 0x1010
                 && function.evidence.contains(&Evidence::PrologueTarget)),
             "prologue target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_pointer_targets_are_rejected() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x1010, &[0xCC, 0xCC, 0xCC, 0xCC]);
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            !functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "degenerate target was accepted: {functions:?}"
         );
     }
 
