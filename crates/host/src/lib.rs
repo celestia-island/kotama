@@ -40,6 +40,8 @@ use kotama::AddressSpace;
 use kotama::ModuleId;
 use kotama::Perms;
 use kotama::Segment;
+use kotama_image::Arch;
+use kotama_image::Container;
 use kotama_image::SectionInfo;
 use kotama_image::SymbolInfo;
 #[cfg(target_os = "linux")]
@@ -159,7 +161,7 @@ impl TargetProcess {
                 .or_else(|| modules.iter().find(|m| m.kind == ModuleKind::WinePe))
                 .ok_or_else(|| HostError::PeParse("no wine PE module found".into()))?,
         };
-        ProcessImage::from_pe(self, module.base)
+        ProcessImage::from_pe_on_disk(self, module.base, Some(&module.path))
     }
 
     /// 取当前平台的 PE 活体映像（Linux 上即 wine PE）。
@@ -338,12 +340,40 @@ pub struct ProcessImage<'a> {
     pub size: u64,
     /// 入口 RVA。
     pub entry_rva: Option<u64>,
+    /// 由 COFF Machine 与可选头魔数决定的容器（PE32 / PE32+）。
+    pub container: Container,
+    /// 同上的架构（x86 / x86-64）：活体发现必须按它解码，不能假定与宿主同位宽。
+    pub arch: Arch,
     /// 现场解析的节表（PE 节头）。
     pub sections: Vec<SectionInfo>,
     /// 由节表导出的段表（`AddressSpace::segments` 的返回来源）。
     segments: Vec<Segment>,
     /// 整像缓存（RVA 寻址：`image[rva..rva+len]`）。
     image: Vec<u8>,
+}
+
+/// 磁盘 PE 文件头里的链接期 ImageBase（PE32 读 u32，PE32+ 读 u64）。
+fn link_time_image_base(path: &str) -> Option<u64> {
+    use std::io::Read as _;
+    let mut header = [0u8; 0x400];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    let lfanew = u32::from_le_bytes(header.get(0x3C..0x40)?.try_into().ok()?) as usize;
+    if header.get(lfanew..lfanew + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let optional = lfanew + 24;
+    match u16::from_le_bytes(header.get(optional..optional + 2)?.try_into().ok()?) {
+        0x10B => Some(u64::from(u32::from_le_bytes(
+            header.get(optional + 28..optional + 32)?.try_into().ok()?,
+        ))),
+        0x20B => Some(u64::from_le_bytes(
+            header.get(optional + 24..optional + 32)?.try_into().ok()?,
+        )),
+        _ => None,
+    }
 }
 
 impl<'a> ProcessImage<'a> {
@@ -361,6 +391,23 @@ impl<'a> ProcessImage<'a> {
     /// # Errors
     /// 头读取 / 解析失败，或映像超过 [`MAX_IMAGE_CACHE`]。
     pub fn from_pe(process: &'a TargetProcess, base: u64) -> Result<Self, HostError> {
+        Self::from_pe_on_disk(process, base, None)
+    }
+
+    /// 同 [`Self::from_pe`]；给出模块文件路径时，把缓存映像头里的 ImageBase 恢复成磁盘
+    /// 文件头里的链接期值。
+    ///
+    /// 加载器会把活体头里的 ImageBase 改写成实际基址，而 `.eh_frame` / DWARF 这类静态引用
+    /// 不会被重定位、仍按链接期基址书写。恢复这一个字段后，静态管线里「首选基址回退」在活体
+    /// 上同样成立；实际基址仍由 `base` 与 `ScanView::image_base` 提供，不受影响。
+    ///
+    /// # Errors
+    /// 与 [`Self::from_pe`] 相同；文件读不到时保持头里的值，不报错。
+    pub fn from_pe_on_disk(
+        process: &'a TargetProcess,
+        base: u64,
+        path: Option<&str>,
+    ) -> Result<Self, HostError> {
         let header = process
             .read_absolute(base, 0x400)
             .map_err(|e| HostError::PeParse(format!("{base:#x}: {e}")))?;
@@ -399,15 +446,38 @@ impl<'a> ProcessImage<'a> {
         }
         sections.sort_by_key(|s| (s.rva, s.name.clone()));
 
+        let machine = u16::from_le_bytes([header[lfanew + 4], header[lfanew + 5]]);
+        let optional_magic = u16::from_le_bytes([header[lfanew + 24], header[lfanew + 25]]);
+        let (container, arch) = match (machine, optional_magic) {
+            (0x014C, 0x10B) => (Container::Pe32, Arch::X86),
+            (0x8664, 0x20B) => (Container::Pe64, Arch::X86_64),
+            (machine, optional_magic) => {
+                return Err(HostError::PeParse(format!(
+                    "unsupported PE machine {machine:#x} / optional header magic {optional_magic:#x} at {base:#x}"
+                )));
+            }
+        };
+
         let size = u64::from(pe.size_of_image);
         if size > MAX_IMAGE_CACHE {
             return Err(HostError::PeParse(format!(
                 "image {size:#x} exceeds cache cap {MAX_IMAGE_CACHE:#x}"
             )));
         }
-        let image = process
+        let mut image = process
             .read_absolute(base, usize::try_from(size).unwrap_or(usize::MAX))
             .map_err(|e| HostError::Proc(format!("image read at {base:#x}: {e}")))?;
+        if let Some(link_time) = path.and_then(link_time_image_base) {
+            let optional = lfanew + 24;
+            let (offset, width) = if container == Container::Pe32 {
+                (optional + 28, 4)
+            } else {
+                (optional + 24, 8)
+            };
+            if let Some(slot) = image.get_mut(offset..offset + width) {
+                slot.copy_from_slice(&link_time.to_le_bytes()[..width]);
+            }
+        }
 
         let segments = sections
             .iter()
@@ -427,6 +497,8 @@ impl<'a> ProcessImage<'a> {
             base,
             size,
             entry_rva: (pe.entry_rva != 0).then(|| u64::from(pe.entry_rva)),
+            container,
+            arch,
             sections,
             segments,
             image,
@@ -481,6 +553,32 @@ impl AddressSpace for ProcessImage<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_time_image_base_reads_the_on_disk_header() {
+        let exe = std::env::current_exe().expect("current exe");
+        let base =
+            link_time_image_base(exe.to_str().expect("utf-8 path")).expect("test binary is a PE");
+        assert!(
+            base.is_multiple_of(0x1_0000),
+            "ImageBase must be 64K aligned: {base:#x}"
+        );
+        assert_eq!(link_time_image_base("definitely-not-a-file.dll"), None);
+    }
+
+    #[test]
+    fn live_image_reports_host_arch() {
+        let process = TargetProcess::open(std::process::id() as i32).expect("open self");
+        let module = process
+            .modules()
+            .expect("self modules")
+            .into_iter()
+            .find(|module| module.path.to_ascii_lowercase().ends_with(".exe"))
+            .expect("self main module");
+        let image = process.pe_image(Some(module.base)).expect("self image");
+        assert_eq!(image.container, Container::Pe64);
+        assert_eq!(image.arch, Arch::X86_64);
+    }
 
     #[test]
     fn parses_maps_lines() {

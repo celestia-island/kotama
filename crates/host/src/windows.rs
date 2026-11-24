@@ -220,7 +220,7 @@ impl TargetProcess {
                 .or_else(|| modules.first())
                 .ok_or_else(|| HostError::PeParse("no native PE module found".into()))?,
         };
-        ProcessImage::from_pe(self, module.base)
+        ProcessImage::from_pe_on_disk(self, module.base, Some(&module.path))
     }
 }
 
