@@ -9,6 +9,7 @@
 //! - `call`：可执行节的直接 `call` 目标（线性反汇编收集；strip 二进制的主要信号）
 //! - `pointer`：非执行节里的函数指针（回调表 / vtable / 手工分派表）
 //! - `immediate`：代码里的绝对地址立即数（`push offset` / `mov reg, offset`）
+//! - `prologue`：16 字节对齐、前面有填充的 `sub esp, imm` 序言
 //!
 //! 长度推断：没有边界的条目按「到下一个函数条目的距离」补（`size_inferred = true`）。
 //! 确定性：所有输出按 RVA 升序、证据集合排序稳定；同一输入两次发现逐字段相同。
@@ -242,6 +243,13 @@ fn discover_impl(
             .or_default()
             .evidence
             .insert(Evidence::ImmediateTarget);
+    }
+    for target in prologue_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
     }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
@@ -988,6 +996,35 @@ fn immediate_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BT
     targets
 }
 
+/// 扫描 16 字节对齐、前面有对齐填充的 sub esp, imm 序言。
+///
+/// 这是没有符号/没有引用的叶函数最常见的入口形态；限定 16 字节对齐和
+/// 两字节填充，避免把普通指令序列误认成函数起点。
+fn prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let mut targets = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut offset = usize::try_from((16 - (*start % 16)) % 16).unwrap_or(0);
+        while offset + 8 <= bytes.len() {
+            let rva = *start + u64::try_from(offset).unwrap_or(0);
+            let window = &bytes[offset..offset + 8];
+            let padded = offset >= 2
+                && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
+                && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00);
+            let prologue = (window[0] == 0x83 && matches!(window[1], 0xEC | 0xE4))
+                || (window[0] == 0x81 && matches!(window[1], 0xEC | 0xE4));
+            if padded && prologue {
+                targets.insert(rva);
+            }
+            offset += 16;
+        }
+    }
+    targets
+}
+
 /// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
 fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
@@ -1549,6 +1586,49 @@ mod tests {
             functions.iter().any(|function| function.rva == 0x2010
                 && function.evidence.contains(&Evidence::PointerTarget)),
             "RVA table target not discovered: {functions:?}"
+        );
+    }
+
+    #[test]
+    fn padded_sub_esp_prologue_is_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x1000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x100E, &[0xCC, 0xCC]);
+        space.write(0x1010, &[0x83, 0xEC, 0x10, 0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PrologueTarget)),
+            "prologue target not discovered: {functions:?}"
         );
     }
 
