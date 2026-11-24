@@ -1463,10 +1463,11 @@ fn aligned_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)])
     targets
 }
 
-/// 任意字节偏移的极窄热补丁 / lea 形态。
+/// 任意字节偏移的极窄热补丁 / tiny thunk / lea 形态。
 ///
-/// 只接受 `8B FF 55 8B EC` 与 `8D 41 04 50`，且前置字节必须是代码边界；
-/// 这两种形态在紧凑 DLL 中常出现在非 4 对齐位置，放宽到逐字节扫描仍保持高精度。
+/// 接受可无边界的 `8B FF 55 8B EC`，以及前置代码边界后的
+/// `8B FF 56 8B`、`8B FF 56 57`、`8B 01 C3`、`6A 03 58 C3`、`8D 41 04 50`；
+/// 这些形态在紧凑 DLL/MSVC 无 PDB 样本中常出现在非 4 对齐位置。
 fn byte_pattern_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let space = module.address_space();
     let mut targets = BTreeSet::new();
@@ -2168,6 +2169,12 @@ mod tests {
         space.write(0x1280, &[0x8B, 0xC1, 0xC3]);
         space.write(0x1290, &[0x33, 0xC0, 0x40, 0xC3]);
         space.write(0x12B0, &[0x6A, 0x03, 0x58, 0xC3]);
+        space.write(0x1300, &[0xC3]);
+        space.write(0x1301, &[0x8B, 0xFF, 0x56, 0x57, 0x8B, 0xC1, 0xC3]);
+        space.write(0x1310, &[0xC3]);
+        space.write(0x1311, &[0x8B, 0x01, 0xC3]);
+        space.write(0x1320, &[0xC3]);
+        space.write(0x1321, &[0x6A, 0x03, 0x58, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -2231,7 +2238,10 @@ mod tests {
                 && prologue_targets.contains(&0x1280)
                 && prologue_targets.contains(&0x1290)
                 && prologue_targets.contains(&0x12A1)
-                && prologue_targets.contains(&0x12B0),
+                && prologue_targets.contains(&0x12B0)
+                && prologue_targets.contains(&0x1301)
+                && prologue_targets.contains(&0x1311)
+                && prologue_targets.contains(&0x1321),
             "prologue targets not discovered: {functions:?}"
         );
     }
