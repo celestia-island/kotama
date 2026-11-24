@@ -465,8 +465,9 @@ fn expand_inferred_sizes(
                 }
             }
         }
-        if end > start {
-            functions[index].size = end - start;
+        let expanded = end.saturating_sub(start);
+        if expanded >= functions[index].size.saturating_add(2) {
+            functions[index].size = expanded;
         }
     }
 }
