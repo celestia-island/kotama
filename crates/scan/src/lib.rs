@@ -1776,13 +1776,14 @@ fn thunk_targets(
     (starts, jumps)
 }
 
-/// 按 4 字节对齐、前置 ≥2 字节 `int3` 对齐填充、且能顺序解码到终结符的代码起点。
+/// 按 4 字节对齐、前置 `int3` 填充（≥2 字节，或 `ret` 后跟 1 字节）、且能顺序解码到终结符的代码起点。
 ///
 /// [`prologue_targets`] 形状表的泛化：MSVC 把每个函数（包括没有任何引用的 leaf、模板
 /// 实例化、调整 thunk）对齐到 16 字节，COMDAT 折叠后的小函数落在 4 字节边界上，并用
 /// `int3` 填充，而起点的指令形态无穷无尽。
 /// 只认 `int3`（`90 90` 常是 `mov edx,[eax+1]` 这类指令的 ModRM/disp 字节，
 /// 不是填充），且必须在 256 字节内、不遇非法指令地解码到 ret / 无条件跳转 / 间接跳转
+/// （`ret; int3` 之后的单字节填充同样成立：`ret` 已是完整指令，其后的 `int3` 只能是填充）
 /// （或 fastfail 的 `int3; ret`）。
 fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     const MAX_BODY: usize = 256;
@@ -1802,7 +1803,7 @@ fn padded_code_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> 
             let body = bytes.get(offset..offset + MAX_BODY.min(bytes.len() - offset));
             if offset >= 2
                 && bytes[offset - 1] == 0xCC
-                && bytes[offset - 2] == 0xCC
+                && matches!(bytes[offset - 2], 0xCC | 0xC3)
                 && !matches!(bytes[offset], 0xCC | 0xC3 | 0x90 | 0x00)
                 && !is_padding_noise(space, rva)
                 && body.is_some_and(|body| decodes_to_terminator(bitness, body, rva))
@@ -3033,6 +3034,9 @@ mod tests {
         space.write(0x1022, &[0x8B, 0x45, 0x08, 0xC3]);
         // int3 填充 + push [ebp+8]; call; ret：同样是 EBP 作通用寄存器的小函数
         space.write(0x102E, &[0xCC, 0xCC]);
+        // ret 后只跟一个 int3：同样是填充
+        space.write(0x11FE, &[0xC3, 0xCC]);
+        space.write(0x1200, &[0x8B, 0x44, 0x24, 0x04, 0xC3]);
         // 零字节「填充」（其实是前一条指令的 imm32 高位）不算证据
         space.write(0x1040, &[0xC7, 0x45, 0xFC, 0x08, 0x00, 0x00, 0x00]);
         space.write(0x1047, &[0xFF, 0x75, 0xDC, 0xC3]);
@@ -3171,8 +3175,8 @@ mod tests {
         };
         let mut space = SyntheticSpace {
             base: 0x1000,
-            bytes: vec![0u8; 0x1000],
-            segments: vec![segment(0x1000, 0x1000, true)],
+            bytes: vec![0u8; 0x1400],
+            segments: vec![segment(0x1000, 0x1400, true)],
         };
         space.write(0x1000, &[0xC3]);
         // 无引用的 leaf：xor eax,eax; ret
@@ -3199,6 +3203,9 @@ mod tests {
         // 函数体内的 fastfail：cmp; ja; int3; ret（int3 后面不是填充）
         space.write(0x11EE, &[0xCC, 0xCC]);
         space.write(0x11F0, &[0x48, 0x39, 0xC8, 0x77, 0x02, 0xCC, 0xC3]);
+        // ret 后只跟一个 int3：同样是填充
+        space.write(0x11FE, &[0xC3, 0xCC]);
+        space.write(0x1200, &[0x8B, 0x44, 0x24, 0x04, 0xC3]);
         // 非 16 对齐
         space.write(0x11C0, &[0xCC, 0xCC]);
         space.write(0x11C2, &[0x33, 0xC0, 0xC3]);
@@ -3207,7 +3214,7 @@ mod tests {
         space.write(0x11E0, &[0x55, 0x8B, 0xEC, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
-            size: 0x1000,
+            size: 0x1400,
             name: ".text".into(),
             executable: true,
         }];
@@ -3227,7 +3234,7 @@ mod tests {
                 function.rva == rva && function.evidence.contains(&Evidence::PrologueTarget)
             })
         };
-        for rva in [0x1010u64, 0x1030, 0x11E0, 0x11F0] {
+        for rva in [0x1010u64, 0x1030, 0x11E0, 0x11F0, 0x1200] {
             assert!(
                 has(rva),
                 "padded code start {rva:#x} not discovered: {functions:?}"
