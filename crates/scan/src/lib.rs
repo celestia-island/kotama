@@ -251,6 +251,13 @@ fn discover_impl(
             .evidence
             .insert(Evidence::PrologueTarget);
     }
+    for target in frame_prologue_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PrologueTarget);
+    }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
     let rvas: Vec<u64> = table.keys().copied().collect();
@@ -1116,11 +1123,79 @@ fn prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTr
                 || (window[0] == 0x56
                     && window[1] == 0x8B
                     && window[2] == 0xF1
-                    && window[3] == 0xE8);
+                    && window[3] == 0xE8)
+                || (window[0] == 0x56
+                    && window[1] == 0x57
+                    && window[2] == 0x8B
+                    && window[3] == 0xF9
+                    && window[4] == 0x8D
+                    && window[5] == 0x77)
+                || (window[0] == 0x53
+                    && window[1] == 0x56
+                    && window[2] == 0x57
+                    && window[3] == 0x8B
+                    && window[4] == 0xF9
+                    && window[5] == 0x8B)
+                || (window[0] == 0x56
+                    && window[1] == 0x8B
+                    && window[2] == 0x74
+                    && window[3] == 0x24
+                    && window[4] == 0x08
+                    && window[5] == 0x85)
+                || (window[0] == 0x56
+                    && window[1] == 0x8B
+                    && window[2] == 0xF1
+                    && window[3] == 0x8B
+                    && window[4] == 0x46
+                    && window[5] == 0x08)
+                || (window[0] == 0x56
+                    && window[1] == 0x8B
+                    && window[2] == 0x71
+                    && window[3] == 0xF8)
+                || (window[0] == 0x51
+                    && window[1] == 0x53
+                    && window[2] == 0x8B
+                    && window[3] == 0x5C)
+                || (window[0] == 0x53
+                    && window[1] == 0x56
+                    && window[2] == 0x8B
+                    && window[3] == 0xF1)
+                || (window[0] == 0x56
+                    && window[1] == 0x8B
+                    && window[2] == 0xF1
+                    && window[3] == 0x57);
             if padded && prologue {
                 targets.insert(rva);
             }
             offset += 16;
+        }
+    }
+    targets
+}
+
+/// 4 字节对齐的 `55 8B EC` 帧指针序言。
+///
+/// 16 字节对齐 pass 会漏掉一些紧凑布局的函数；这里额外按 4 字节步长扫描，
+/// 只接受标准 `push ebp; mov ebp, esp` 形态和前置填充，避免把普通指令中间当起点。
+fn frame_prologue_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let mut targets = BTreeSet::new();
+    for (start, size) in exec_ranges {
+        let Some(bytes) = space.read(*start, usize::try_from(*size).unwrap_or(usize::MAX)) else {
+            continue;
+        };
+        let mut offset = usize::try_from((4 - (*start % 4)) % 4).unwrap_or(0);
+        while offset + 4 <= bytes.len() {
+            if offset >= 2
+                && matches!(bytes[offset - 1], 0xCC | 0x90 | 0x00)
+                && matches!(bytes[offset - 2], 0xCC | 0x90 | 0x00)
+                && bytes[offset] == 0x55
+                && bytes[offset + 1] == 0x8B
+                && bytes[offset + 2] == 0xEC
+            {
+                targets.insert(*start + u64::try_from(offset).unwrap_or(0));
+            }
+            offset += 4;
         }
     }
     targets
@@ -1739,6 +1814,9 @@ mod tests {
             0x10D0,
             &[0x56, 0x8B, 0xF1, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3],
         );
+        space.write(0x10E4, &[0x55, 0x8B, 0xEC, 0xC3]);
+        space.write(0x10F0, &[0x56, 0x57, 0x8B, 0xF9, 0x8D, 0x77, 0x00, 0xC3]);
+        space.write(0x1100, &[0x53, 0x56, 0x57, 0x8B, 0xF9, 0x8B, 0x00, 0xC3]);
         let sections = vec![SectionInfo {
             rva: 0x1000,
             size: 0x1000,
@@ -1771,7 +1849,10 @@ mod tests {
                 && prologue_targets.contains(&0x10A0)
                 && prologue_targets.contains(&0x10B0)
                 && prologue_targets.contains(&0x10C0)
-                && prologue_targets.contains(&0x10D0),
+                && prologue_targets.contains(&0x10D0)
+                && prologue_targets.contains(&0x10E4)
+                && prologue_targets.contains(&0x10F0)
+                && prologue_targets.contains(&0x1100),
             "prologue targets not discovered: {functions:?}"
         );
     }
