@@ -6,7 +6,8 @@
 //! - `dynsym`：ELF dynsym 导出的函数
 //! - `pdata`：PE64 `.pdata` 的 `RUNTIME_FUNCTION`（编译器自记的精确边界）
 //! - `entry`：映像入口点
-//! - `call`：可执行节的直接 `call`/`jmp` 目标（线性反汇编收集；strip 二进制的主要信号）
+//! - `call`：可执行节的直接 `call` 目标（线性反汇编收集；strip 二进制的主要信号）
+//! - `pointer`：非执行节里的函数指针（回调表 / vtable / 手工分派表）
 //!
 //! 长度推断：没有边界的条目按「到下一个函数条目的距离」补（`size_inferred = true`）。
 //! 确定性：所有输出按 RVA 升序、证据集合排序稳定；同一输入两次发现逐字段相同。
@@ -51,6 +52,7 @@ struct Builder {
 struct ViewAdapter<'a> {
     container: Container,
     arch: Arch,
+    image_base: u64,
     entry_rva: Option<u64>,
     sections: &'a [SectionInfo],
     symbols: &'a [SymbolInfo],
@@ -74,6 +76,8 @@ pub struct ScanView<'a> {
     pub arch: Arch,
     /// 入口 RVA（无则 `None`）。
     pub entry_rva: Option<u64>,
+    /// PE 的首选映像基址；0 表示从地址空间的 PE 头读取（活体缓存）。
+    pub image_base: u64,
     /// 节表（执行节判定 / `.pdata` 定位都靠它）。
     pub sections: &'a [SectionInfo],
     /// ELF symtab 函数符号（活体一般为空）。
@@ -92,6 +96,7 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
     let view = ScanView {
         container: module.container,
         arch: module.arch,
+        image_base: module.image_base,
         entry_rva: module.entry_rva,
         sections: &module.sections,
         symbols: &module.symbols,
@@ -111,6 +116,7 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
     let view = ViewAdapter {
         container: module.container,
         arch: module.arch,
+        image_base: module.image_base,
         entry_rva: module.entry_rva,
         sections: &module.sections,
         symbols: &module.symbols,
@@ -137,6 +143,7 @@ fn discover_impl(
     let module = ViewAdapter {
         container: view.container,
         arch: view.arch,
+        image_base: view.image_base,
         entry_rva: view.entry_rva,
         sections: view.sections,
         symbols: view.symbols,
@@ -206,20 +213,27 @@ fn discover_impl(
             .insert(Evidence::Entry);
     }
 
-    // 5) 直接 call/jmp 目标（strip 二进制的主力信号；数据岛会造成少量噪声条目，
-    //    证据标 `call` 供下游按置信度取舍）。
+    // 5) 直接 call 目标 + 非执行节里的函数指针。条件/无条件跳转目标不进入种子：
+    //    函数内跳转占绝大多数，直接当函数起点会级联出大量假函数。
     let exec_ranges: Vec<(u64, u64)> = module
         .sections
         .iter()
         .filter(|s| s.executable && s.size > 0)
         .map(|s| (s.rva, s.size))
         .collect();
-    for target in direct_branch_targets(&module, &exec_ranges) {
+    for target in direct_call_targets(&module, &exec_ranges) {
         table
             .entry(target)
             .or_default()
             .evidence
             .insert(Evidence::CallTarget);
+    }
+    for target in data_pointer_targets(&module, &exec_ranges) {
+        table
+            .entry(target)
+            .or_default()
+            .evidence
+            .insert(Evidence::PointerTarget);
     }
 
     // 6) 线性扫描精化：按解码出的终结符重算边界，并合并「其实落在前一个函数体内」的候选。
@@ -746,8 +760,97 @@ fn exception_functions_impl(
         .collect()
 }
 
-/// 线性反汇编全部执行节，收集直接（rel）call/jmp 的目标，只留落在执行节内的。
-fn direct_branch_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+/// 从 PE 可选头读取映像基址（指针可能是绝对 VA，需要它归一成 RVA）。
+fn pe_image_base(space: &dyn AddressSpace, container: Container) -> Option<u64> {
+    if !matches!(container, Container::Pe32 | Container::Pe64) {
+        return None;
+    }
+    let header = space.read(0, 0x1000).or_else(|| space.read(0, 0x400))?;
+    if header.len() < 0x40 {
+        return None;
+    }
+    let pe = u32::from_le_bytes(header.get(0x3C..0x40)?.try_into().ok()?) as usize;
+    if pe.checked_add(24 + 32)? > header.len() {
+        return None;
+    }
+    let optional = pe + 24;
+    let magic = u16::from_le_bytes(header.get(optional..optional + 2)?.try_into().ok()?);
+    match (container, magic) {
+        (Container::Pe32, 0x10B) => Some(u64::from(u32::from_le_bytes(
+            header.get(optional + 28..optional + 32)?.try_into().ok()?,
+        ))),
+        (Container::Pe64, 0x20B) => Some(u64::from_le_bytes(
+            header.get(optional + 24..optional + 32)?.try_into().ok()?,
+        )),
+        _ => None,
+    }
+}
+
+/// 扫描非执行节里的函数指针（回调表 / vtable / 手写分派表）。
+///
+/// 指针可能是绝对 VA 或已经归一过的 RVA；两者都接受。目标必须在执行节内、
+/// 按指针宽度对齐，避免把普通整数误认成函数入口。
+fn data_pointer_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
+    let space = module.address_space();
+    let image_base = if module.image_base != 0 {
+        module.image_base
+    } else if let Some(base) = pe_image_base(space, module.container) {
+        base
+    } else {
+        return BTreeSet::new();
+    };
+    let pointer_size = usize::try_from(module.arch.bitness() / 8).unwrap_or(0);
+    if pointer_size != 4 && pointer_size != 8 {
+        return BTreeSet::new();
+    }
+    let in_exec = |rva: u64| {
+        exec_ranges
+            .iter()
+            .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+    };
+    let mut targets = BTreeSet::new();
+    for section in module
+        .sections
+        .iter()
+        .filter(|section| !section.executable && section.size > 0)
+    {
+        let Ok(size) = usize::try_from(section.size) else {
+            continue;
+        };
+        let Some(bytes) = space.read(section.rva, size) else {
+            continue;
+        };
+        for chunk in bytes.chunks_exact(pointer_size) {
+            let value = if pointer_size == 4 {
+                let mut bytes = [0u8; 4];
+                bytes.copy_from_slice(chunk);
+                u64::from(u32::from_le_bytes(bytes))
+            } else {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(chunk);
+                u64::from_le_bytes(bytes)
+            };
+            let rva = if value >= image_base {
+                match value.checked_sub(image_base) {
+                    Some(rva) if in_exec(rva) => rva,
+                    Some(_) => continue,
+                    None => continue,
+                }
+            } else if in_exec(value) {
+                value
+            } else {
+                continue;
+            };
+            if rva % pointer_size as u64 == 0 {
+                targets.insert(rva);
+            }
+        }
+    }
+    targets
+}
+
+/// 线性反汇编全部执行节，收集直接（rel）call 的目标，只留落在执行节内的。
+fn direct_call_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -> BTreeSet<u64> {
     let mut targets = BTreeSet::new();
     let bitness = module.arch.bitness();
     let space = module.address_space();
@@ -761,9 +864,7 @@ fn direct_branch_targets(module: &ViewAdapter<'_>, exec_ranges: &[(u64, u64)]) -
             decoder.decode_out(&mut buffer);
 
             let direct_target = match buffer.flow_control() {
-                FlowControl::Call
-                | FlowControl::UnconditionalBranch
-                | FlowControl::ConditionalBranch => direct_near_target(&buffer),
+                FlowControl::Call => direct_near_target(&buffer),
                 _ => None,
             };
             if let Some(target) = direct_target {
@@ -1069,6 +1170,7 @@ mod tests {
         ViewAdapter {
             container: Container::Pe64,
             arch: Arch::X86_64,
+            image_base: 0,
             entry_rva: None,
             sections,
             symbols: &[],
@@ -1127,6 +1229,7 @@ mod tests {
         let view = ScanView {
             container: Container::Pe64,
             arch: Arch::X86_64,
+            image_base: 0,
             entry_rva: None,
             sections: &sections,
             symbols: &[],
@@ -1141,6 +1244,61 @@ mod tests {
         assert_eq!(function.size, 0x40);
         assert!(!function.size_inferred);
         assert!(function.evidence.contains(&Evidence::Pdata));
+    }
+
+    #[test]
+    fn pe_data_pointer_seeds_are_discovered() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![
+                segment(0x1000, 0x1000, true),
+                segment(0x2000, 0x1000, false),
+            ],
+        };
+        space.write(0x1000, &[0xC3]);
+        space.write(0x1010, &[0xC3]);
+        // Absolute VA of 0x1010 under the PE preferred base 0x400000.
+        space.write(0x2000, &0x40_1010u32.to_le_bytes());
+        let sections = vec![
+            SectionInfo {
+                rva: 0x1000,
+                size: 0x1000,
+                name: ".text".into(),
+                executable: true,
+            },
+            SectionInfo {
+                rva: 0x2000,
+                size: 0x1000,
+                name: ".data".into(),
+                executable: false,
+            },
+        ];
+        let view = ScanView {
+            container: Container::Pe32,
+            arch: Arch::X86,
+            image_base: 0x400000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().any(|function| function.rva == 0x1010
+                && function.evidence.contains(&Evidence::PointerTarget)),
+            "pointer target not discovered: {functions:?}"
+        );
     }
 
     #[test]

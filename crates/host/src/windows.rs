@@ -589,6 +589,7 @@ mod tests {
             kotama_scan::ScanView {
                 container: kotama_image::Container::Pe64,
                 arch: kotama_image::Arch::X86_64,
+                image_base: 0,
                 entry_rva: image.entry_rva,
                 sections: &image.sections,
                 symbols: image.empty_symbols(),

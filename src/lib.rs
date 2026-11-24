@@ -168,8 +168,10 @@ pub enum Evidence {
     Pdata,
     /// 映像入口点。
     Entry,
-    /// 直接 call/jmp 目标。
+    /// 直接 call 目标。
     CallTarget,
+    /// 非执行节里的函数指针（回调表 / vtable / 手写分派表）。
+    PointerTarget,
 }
 
 impl Evidence {
@@ -184,6 +186,7 @@ impl Evidence {
             Self::Pdata => "pdata",
             Self::Entry => "entry",
             Self::CallTarget => "call",
+            Self::PointerTarget => "pointer",
         }
     }
 }
