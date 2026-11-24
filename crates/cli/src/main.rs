@@ -30,7 +30,9 @@ Commands:
                              --strings          also emit string cross-references
                              --vtables          also emit the generic vtable scan
                              --rtti             also emit MSVC RTTI/vtable facts (PE/MSVC)
-  oracle <path>            Run Ghidra headless and diff its function list against ours
+  oracle <path> [--dump <ghidra-list>]
+                           Run Ghidra headless and diff its function list against ours;
+                           --dump keeps the raw Ghidra manifest for local analysis
   live attach <pid>        List modules of a running process (ELF + wine/native PE)
   live analyze <pid>       Parse the first wine/native PE module live and discover functions
   live scan <pid> --exact u32:N|f32:F|bytes:HEX [--then unchanged|changed|increased|decreased --times N]
@@ -80,7 +82,30 @@ fn main() -> ExitCode {
 }
 
 fn oracle(args: &[String]) -> ExitCode {
-    let Some(path) = args.first() else {
+    let mut path: Option<&str> = None;
+    let mut dump: Option<&str> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dump" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("kotama: --dump wants a path\n\n{USAGE}");
+                    return ExitCode::from(2);
+                };
+                dump = Some(value);
+                index += 2;
+            }
+            value if path.is_none() => {
+                path = Some(value);
+                index += 1;
+            }
+            value => {
+                eprintln!("kotama: unexpected oracle argument `{value}`\n\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(path) = path else {
         eprintln!("kotama: oracle wants a path\n\n{USAGE}");
         return ExitCode::from(2);
     };
@@ -106,6 +131,10 @@ fn oracle(args: &[String]) -> ExitCode {
         let theirs = oracle
             .function_list(Path::new(path), &work_root)
             .map_err(|e| e.to_string())?;
+        if let Some(dump_path) = dump {
+            std::fs::copy(work_root.join("functions.txt"), dump_path)
+                .map_err(|e| format!("copy Ghidra manifest to {dump_path}: {e}"))?;
+        }
         let report = kotama_backend_ghidra::differential(&functions, &theirs, 25);
         #[derive(Serialize)]
         struct OnlyOurs {
@@ -132,7 +161,7 @@ fn oracle(args: &[String]) -> ExitCode {
             binary: std::path::Path::new(path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone()),
+                .unwrap_or_else(|| path.to_string()),
             container: module.container.short(),
             ours: report.ours,
             ghidra: report.theirs,
