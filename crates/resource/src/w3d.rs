@@ -251,6 +251,214 @@ pub const fn chunk_name(type_id: u32) -> Option<&'static str> {
     })
 }
 
+/// A W3D vector (three little-endian f32 values).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct W3dVector {
+    /// X component.
+    pub x: f32,
+    /// Y component.
+    pub y: f32,
+    /// Z component.
+    pub z: f32,
+}
+
+/// A W3D triangle record.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct W3dTriangle {
+    /// Vertex indices.
+    pub vindex: [u32; 3],
+    /// Surface type.
+    pub surface_type: u32,
+    /// Plane normal.
+    pub normal: W3dVector,
+    /// Plane distance.
+    pub distance: f32,
+}
+
+/// The fixed W3D mesh header record.
+#[derive(Clone, PartialEq, Debug)]
+pub struct W3dMeshHeader {
+    /// Version.
+    pub version: u32,
+    /// Attribute flags.
+    pub attributes: u32,
+    /// Mesh name.
+    pub mesh_name: String,
+    /// Container name.
+    pub container_name: String,
+    /// Triangle count.
+    pub num_tris: u32,
+    /// Vertex count.
+    pub num_vertices: u32,
+    /// Material count.
+    pub num_materials: u32,
+    /// Damage stage count.
+    pub num_damage_stages: u32,
+    /// Sort level.
+    pub sort_level: u32,
+    /// Prelit version.
+    pub prelit_version: u32,
+    /// Future counts.
+    pub future_counts: u32,
+    /// Vertex channel flags.
+    pub vertex_channels: u32,
+    /// Face channel flags.
+    pub face_channels: u32,
+    /// Bounding-box minimum.
+    pub min: W3dVector,
+    /// Bounding-box maximum.
+    pub max: W3dVector,
+    /// Bounding-sphere center.
+    pub sphere_center: W3dVector,
+    /// Bounding-sphere radius.
+    pub sphere_radius: f32,
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .map(|raw| u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn le_f32(bytes: &[u8], offset: usize) -> Option<f32> {
+    le_u32(bytes, offset).map(f32::from_bits)
+}
+
+fn fixed_name(bytes: &[u8], offset: usize, len: usize) -> Option<String> {
+    let raw = bytes.get(offset..offset.checked_add(len)?)?;
+    let end = raw.iter().position(|byte| *byte == 0).unwrap_or(len);
+    Some(String::from_utf8_lossy(&raw[..end]).into_owned())
+}
+
+fn vector_at(bytes: &[u8], offset: usize) -> Option<W3dVector> {
+    Some(W3dVector {
+        x: le_f32(bytes, offset)?,
+        y: le_f32(bytes, offset + 4)?,
+        z: le_f32(bytes, offset + 8)?,
+    })
+}
+
+fn parse_mesh_header(payload: &[u8]) -> Option<W3dMeshHeader> {
+    if payload.len() < 116 {
+        return None;
+    }
+    Some(W3dMeshHeader {
+        version: le_u32(payload, 0)?,
+        attributes: le_u32(payload, 4)?,
+        mesh_name: fixed_name(payload, 8, 16)?,
+        container_name: fixed_name(payload, 24, 16)?,
+        num_tris: le_u32(payload, 40)?,
+        num_vertices: le_u32(payload, 44)?,
+        num_materials: le_u32(payload, 48)?,
+        num_damage_stages: le_u32(payload, 52)?,
+        sort_level: le_u32(payload, 56)?,
+        prelit_version: le_u32(payload, 60)?,
+        future_counts: le_u32(payload, 64)?,
+        vertex_channels: le_u32(payload, 68)?,
+        face_channels: le_u32(payload, 72)?,
+        min: vector_at(payload, 76)?,
+        max: vector_at(payload, 88)?,
+        sphere_center: vector_at(payload, 100)?,
+        sphere_radius: le_f32(payload, 112)?,
+    })
+}
+
+fn parse_vector_list(payload: &[u8]) -> Vec<W3dVector> {
+    let mut values = Vec::new();
+    let mut offset: usize = 0;
+    while offset
+        .checked_add(12)
+        .is_some_and(|end| end <= payload.len())
+    {
+        if let Some(value) = vector_at(payload, offset) {
+            values.push(value);
+        }
+        offset += 12;
+    }
+    values
+}
+
+fn parse_triangles(payload: &[u8]) -> Vec<W3dTriangle> {
+    let mut values = Vec::new();
+    let mut offset: usize = 0;
+    while offset
+        .checked_add(32)
+        .is_some_and(|end| end <= payload.len())
+    {
+        if let (Some(a), Some(b), Some(c), Some(surface), Some(normal), Some(distance)) = (
+            le_u32(payload, offset),
+            le_u32(payload, offset + 4),
+            le_u32(payload, offset + 8),
+            le_u32(payload, offset + 12),
+            vector_at(payload, offset + 16),
+            le_f32(payload, offset + 28),
+        ) {
+            values.push(W3dTriangle {
+                vindex: [a, b, c],
+                surface_type: surface,
+                normal,
+                distance,
+            });
+        }
+        offset += 32;
+    }
+    values
+}
+
+impl W3dFile<'_> {
+    /// Return the first mesh_header3 record.
+    #[must_use]
+    pub fn mesh_header(&self) -> Option<W3dMeshHeader> {
+        let chunk = self.chunks.iter().find(|chunk| chunk.type_id == 0x1f)?;
+        parse_mesh_header(self.payload(*chunk)?)
+    }
+
+    /// Return the first vertex array.
+    #[must_use]
+    pub fn vertices(&self) -> Vec<W3dVector> {
+        self.vector_list(0x02)
+    }
+
+    /// Return the first normal array.
+    #[must_use]
+    pub fn normals(&self) -> Vec<W3dVector> {
+        self.vector_list(0x03)
+    }
+
+    fn vector_list(&self, type_id: u32) -> Vec<W3dVector> {
+        self.chunks
+            .iter()
+            .find(|chunk| chunk.type_id == type_id)
+            .and_then(|chunk| self.payload(*chunk))
+            .map(parse_vector_list)
+            .unwrap_or_default()
+    }
+
+    /// Return the first triangle array.
+    #[must_use]
+    pub fn triangles(&self) -> Vec<W3dTriangle> {
+        self.chunks
+            .iter()
+            .find(|chunk| chunk.type_id == 0x20)
+            .and_then(|chunk| self.payload(*chunk))
+            .map(parse_triangles)
+            .unwrap_or_default()
+    }
+
+    /// Return material pass/vertex-material/shader/texture counts.
+    #[must_use]
+    pub fn material_info(&self) -> Option<[u32; 4]> {
+        let chunk = self.chunks.iter().find(|chunk| chunk.type_id == 0x28)?;
+        let payload = self.payload(*chunk)?;
+        Some([
+            le_u32(payload, 0)?,
+            le_u32(payload, 4)?,
+            le_u32(payload, 8)?,
+            le_u32(payload, 12)?,
+        ])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +474,55 @@ mod tests {
         bytes.extend_from_slice(&size.to_le_bytes());
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    fn mesh_header_payload() -> Vec<u8> {
+        let mut bytes = vec![0u8; 116];
+        bytes[0..4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[8..11].copy_from_slice(b"box");
+        bytes[24..29].copy_from_slice(b"scene");
+        bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
+        bytes[44..48].copy_from_slice(&2u32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&1u32.to_le_bytes());
+        bytes[76..80].copy_from_slice(&(-1.0f32).to_bits().to_le_bytes());
+        bytes[88..92].copy_from_slice(&1.0f32.to_bits().to_le_bytes());
+        bytes[112..116].copy_from_slice(&2.5f32.to_bits().to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn mesh_records_are_parsed() {
+        let mut vertices = Vec::new();
+        for value in [0.0f32, 1.0, 0.0, 1.0, 0.0, 0.0] {
+            vertices.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        let mut triangle = Vec::new();
+        for index in [0u32, 1, 0, 0] {
+            triangle.extend_from_slice(&index.to_le_bytes());
+        }
+        for value in [0.0f32, 0.0, 1.0, 0.0] {
+            triangle.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        let mut material = Vec::new();
+        for value in [1u32, 1, 0, 1] {
+            material.extend_from_slice(&value.to_le_bytes());
+        }
+        let payload = [
+            chunk(0x1f, &mesh_header_payload(), false),
+            chunk(0x02, &vertices, false),
+            chunk(0x20, &triangle, false),
+            chunk(0x28, &material, false),
+        ]
+        .concat();
+        let root = chunk(0, &payload, true);
+        let parsed = parse(&root).unwrap();
+        let header = parsed.mesh_header().unwrap();
+        assert_eq!(header.mesh_name, "box");
+        assert_eq!(header.container_name, "scene");
+        assert_eq!(header.num_vertices, 2);
+        assert_eq!(parsed.vertices().len(), 2);
+        assert_eq!(parsed.triangles().len(), 1);
+        assert_eq!(parsed.material_info(), Some([1, 1, 0, 1]));
     }
 
     #[test]

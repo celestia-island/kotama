@@ -246,6 +246,53 @@ fn w3d_chunks_are_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-w3d")]
+#[test]
+fn w3d_mesh_records_are_inspected() {
+    let root = temp_dir("w3d-mesh");
+    let source = root.join("mesh.w3d");
+
+    fn chunk(type_id: u32, payload: &[u8], container: bool) -> Vec<u8> {
+        let mut bytes = type_id.to_le_bytes().to_vec();
+        let size = if container {
+            0x8000_0000 | payload.len() as u32
+        } else {
+            payload.len() as u32
+        };
+        bytes.extend_from_slice(&size.to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    let mut header = vec![0u8; 116];
+    header[0..4].copy_from_slice(&1u32.to_le_bytes());
+    header[8..11].copy_from_slice(b"box");
+    header[24..29].copy_from_slice(b"scene");
+    header[44..48].copy_from_slice(&2u32.to_le_bytes());
+    let vertices = vec![0u8; 24];
+    let payload = [chunk(0x1f, &header, false), chunk(0x02, &vertices, false)].concat();
+    let bytes = chunk(0, &payload, true);
+    fs::write(&source, &bytes).unwrap();
+
+    let mesh = kotama()
+        .args(["resource", "mesh"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        mesh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mesh.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&mesh.stdout).unwrap();
+    assert_eq!(facts["mesh_name"], "box");
+    assert_eq!(facts["container_name"], "scene");
+    assert_eq!(facts["num_vertices"], 2);
+    assert_eq!(facts["vertex_count"], 2);
+    assert_eq!(facts["triangle_count"], 0);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
