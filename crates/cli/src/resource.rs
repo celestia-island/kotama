@@ -189,6 +189,12 @@ struct AptMovieJson {
 }
 
 #[derive(Serialize)]
+struct PvzReanimTrackJson {
+    name: String,
+    frame_count: u32,
+}
+
+#[derive(Serialize)]
 struct PvzReanimJson {
     kind: &'static str,
     uncompressed_size: u32,
@@ -199,6 +205,8 @@ struct PvzReanimJson {
     unknown_16: u32,
     track_count_2: u32,
     strings: Vec<String>,
+    frame_counts: Vec<u32>,
+    tracks: Vec<PvzReanimTrackJson>,
 }
 
 #[derive(Serialize)]
@@ -1699,6 +1707,15 @@ fn pvz_reanim_command(args: &[String]) -> ExitCode {
         unknown_16: info.unknown_16,
         track_count_2: info.track_count_2,
         strings: info.strings,
+        frame_counts: info.frame_counts,
+        tracks: info
+            .tracks
+            .iter()
+            .map(|track| PvzReanimTrackJson {
+                name: track.name.clone(),
+                frame_count: track.frame_count,
+            })
+            .collect(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
