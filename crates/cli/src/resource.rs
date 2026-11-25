@@ -189,9 +189,18 @@ struct AptMovieJson {
 }
 
 #[derive(Serialize)]
+struct PvzReanimFrameJson {
+    values: Vec<Option<f32>>,
+    image: Option<String>,
+    font: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Serialize)]
 struct PvzReanimTrackJson {
     name: String,
     frame_count: u32,
+    first_frame: Option<PvzReanimFrameJson>,
 }
 
 #[derive(Serialize)]
@@ -1714,6 +1723,12 @@ fn pvz_reanim_command(args: &[String]) -> ExitCode {
             .map(|track| PvzReanimTrackJson {
                 name: track.name.clone(),
                 frame_count: track.frame_count,
+                first_frame: track.first_frame.as_ref().map(|frame| PvzReanimFrameJson {
+                    values: frame.transform.values.to_vec(),
+                    image: frame.elements.image.clone(),
+                    font: frame.elements.font.clone(),
+                    text: frame.elements.text.clone(),
+                }),
             })
             .collect(),
     };
