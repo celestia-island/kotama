@@ -32,6 +32,8 @@ struct InfoJson {
     archive_version: Option<&'static str>,
     entries: Option<usize>,
     chunks: Option<usize>,
+    apt_entry_offset: Option<u32>,
+    constants: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -63,6 +65,21 @@ struct ChunksJson {
     kind: &'static str,
     count: usize,
     chunks: Vec<ChunkJson>,
+}
+
+#[derive(Serialize)]
+struct AptConstantJson {
+    type_id: u32,
+    type_name: &'static str,
+    value: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct AptJson {
+    kind: &'static str,
+    apt_data_entry_offset: u32,
+    count: usize,
+    entries: Vec<AptConstantJson>,
 }
 
 #[derive(Serialize)]
@@ -102,7 +119,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -147,6 +164,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "entries" => entries_command(&args[1..]),
         "chunks" => chunks_command(&args[1..]),
         "mesh" => mesh_command(&args[1..]),
+        "apt" => apt_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
     }
@@ -215,6 +233,8 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             archive_version: None,
             entries: None,
             chunks: None,
+            apt_entry_offset: None,
+            constants: None,
         },
         Resource::Vbs(vbs) => InfoJson {
             kind: "vbs",
@@ -229,6 +249,8 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             archive_version: None,
             entries: None,
             chunks: None,
+            apt_entry_offset: None,
+            constants: None,
         },
         Resource::DosCom(com) => InfoJson {
             kind: "dos-com",
@@ -243,6 +265,8 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             archive_version: None,
             entries: None,
             chunks: None,
+            apt_entry_offset: None,
+            constants: None,
         },
         Resource::Big(archive) => InfoJson {
             kind: "big",
@@ -257,6 +281,8 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             archive_version: Some(archive.version.short()),
             entries: Some(archive.entries.len()),
             chunks: None,
+            apt_entry_offset: None,
+            constants: None,
         },
         Resource::W3d(file) => InfoJson {
             kind: "w3d",
@@ -271,6 +297,24 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             archive_version: None,
             entries: None,
             chunks: Some(file.chunks.len()),
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptConst(file) => InfoJson {
+            kind: "apt-const",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: Some(file.apt_data_entry_offset),
+            constants: Some(file.entries.len()),
         },
     }
 }
@@ -497,6 +541,57 @@ fn mesh_command(args: &[String]) -> ExitCode {
         vertex_material_names: file.vertex_material_names(),
         texture_names: file.texture_names(),
         user_text: file.user_text(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn apt_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AptConst(file) = resource else {
+        return fail("apt requires an APT constant file");
+    };
+    let entries = file
+        .entries
+        .iter()
+        .map(|entry| AptConstantJson {
+            type_id: entry.type_id,
+            type_name: entry.type_name(),
+            value: match &entry.value {
+                kotama_resource::apt::AptValue::None => serde_json::Value::Null,
+                kotama_resource::apt::AptValue::String(value) => {
+                    serde_json::Value::String(value.clone())
+                }
+                kotama_resource::apt::AptValue::Register(value)
+                | kotama_resource::apt::AptValue::Lookup(value)
+                | kotama_resource::apt::AptValue::Property(value) => serde_json::json!(value),
+                kotama_resource::apt::AptValue::Boolean(value) => serde_json::json!(value),
+                kotama_resource::apt::AptValue::Float(value) => serde_json::json!(value),
+                kotama_resource::apt::AptValue::Integer(value) => serde_json::json!(value),
+            },
+        })
+        .collect();
+    let json = AptJson {
+        kind: "apt-const",
+        apt_data_entry_offset: file.apt_data_entry_offset,
+        count: file.entries.len(),
+        entries,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {

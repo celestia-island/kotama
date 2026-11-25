@@ -16,6 +16,7 @@ vbs = []
 dos-com = []
 big = []
 w3d = []
+apt-const = []
 
 [dependencies]
 flate2 = { version = "^1", optional = true, default-features = false, features = ["rust_backend"] }
