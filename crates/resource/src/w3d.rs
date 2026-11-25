@@ -481,6 +481,59 @@ impl W3dFile<'_> {
         self.strings_by_type(0x0c)
     }
 
+    /// Number of material-pass chunks.
+    #[must_use]
+    pub fn material_pass_count(&self) -> usize {
+        self.chunks
+            .iter()
+            .filter(|chunk| chunk.type_id == 0x38)
+            .count()
+    }
+
+    /// Number of texture-stage chunks.
+    #[must_use]
+    pub fn texture_stage_count(&self) -> usize {
+        self.chunks
+            .iter()
+            .filter(|chunk| chunk.type_id == 0x48)
+            .count()
+    }
+
+    /// Texture IDs from the first texture-ids chunk.
+    #[must_use]
+    pub fn texture_ids(&self) -> Vec<u32> {
+        self.chunks
+            .iter()
+            .find(|chunk| chunk.type_id == 0x49)
+            .and_then(|chunk| self.payload(*chunk))
+            .map(|payload| {
+                let mut values = Vec::new();
+                let mut offset: usize = 0;
+                while offset
+                    .checked_add(4)
+                    .is_some_and(|end| end <= payload.len())
+                {
+                    if let Some(value) = le_u32(payload, offset) {
+                        values.push(value);
+                    }
+                    offset += 4;
+                }
+                values
+            })
+            .unwrap_or_default()
+    }
+
+    /// Number of texture-coordinate records from the first stage-texcoords chunk.
+    #[must_use]
+    pub fn stage_texcoord_count(&self) -> usize {
+        self.chunks
+            .iter()
+            .find(|chunk| chunk.type_id == 0x4a)
+            .and_then(|chunk| self.payload(*chunk))
+            .map(|payload| payload.len() / 8)
+            .unwrap_or(0)
+    }
+
     /// Return material pass/vertex-material/shader/texture counts.
     #[must_use]
     pub fn material_info(&self) -> Option<[u32; 4]> {
@@ -543,11 +596,26 @@ mod tests {
         for value in [1u32, 1, 0, 1] {
             material.extend_from_slice(&value.to_le_bytes());
         }
+        let mut texture_ids = Vec::new();
+        for value in [1u32, 2] {
+            texture_ids.extend_from_slice(&value.to_le_bytes());
+        }
+        let texture_stage = chunk(
+            0x48,
+            &[
+                chunk(0x49, &texture_ids, false),
+                chunk(0x4a, &[0u8; 16], false),
+            ]
+            .concat(),
+            true,
+        );
         let payload = [
             chunk(0x1f, &mesh_header_payload(), false),
             chunk(0x02, &vertices, false),
             chunk(0x20, &triangle, false),
             chunk(0x28, &material, false),
+            chunk(0x38, &[], true),
+            texture_stage,
         ]
         .concat();
         let root = chunk(0, &payload, true);
@@ -559,6 +627,10 @@ mod tests {
         assert_eq!(parsed.vertices().len(), 2);
         assert_eq!(parsed.triangles().len(), 1);
         assert_eq!(parsed.material_info(), Some([1, 1, 0, 1]));
+        assert_eq!(parsed.material_pass_count(), 1);
+        assert_eq!(parsed.texture_stage_count(), 1);
+        assert_eq!(parsed.texture_ids(), vec![1, 2]);
+        assert_eq!(parsed.stage_texcoord_count(), 2);
     }
 
     #[test]
