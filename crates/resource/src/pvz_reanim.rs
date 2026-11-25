@@ -5,6 +5,15 @@
 
 use crate::ResourceError;
 
+/// One Reanim track.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PvzReanimTrack {
+    /// Track name.
+    pub name: String,
+    /// Frame count.
+    pub frame_count: u32,
+}
+
 /// Parsed PvZ Reanim container/header facts.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PvzReanimInfo {
@@ -24,6 +33,10 @@ pub struct PvzReanimInfo {
     pub track_count_2: u32,
     /// Printable strings found after the body header.
     pub strings: Vec<String>,
+    /// Frame counts in track order.
+    pub frame_counts: Vec<u32>,
+    /// Tracks discovered by scanning length-prefixed names.
+    pub tracks: Vec<PvzReanimTrack>,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -36,6 +49,41 @@ fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
 #[must_use]
 pub fn has_magic(bytes: &[u8]) -> bool {
     u32_at(bytes, 0) == Some(0xDEAD_FED4)
+}
+
+/// Parse and validate a Reanim compiled container.
+///
+/// # Errors
+/// Returns ResourceError::Invalid for a short container, a size mismatch, a
+/// zlib error or a bad body magic.
+#[cfg(feature = "pvz-reanim")]
+fn scan_track_names(bytes: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for offset in 24..bytes.len().saturating_sub(5) {
+        let Some(length) = u32_at(bytes, offset) else {
+            continue;
+        };
+        let length = length as usize;
+        if !(3..=64).contains(&length) {
+            continue;
+        }
+        let Some(text) = bytes.get(offset + 4..offset + 4 + length) else {
+            continue;
+        };
+        if bytes.get(offset + 4 + length) != Some(&0x2C) {
+            continue;
+        }
+        if !text
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        {
+            continue;
+        }
+        if let Ok(text) = std::str::from_utf8(text) {
+            names.push(text.to_string());
+        }
+    }
+    names
 }
 
 /// Parse and validate a Reanim compiled container.
@@ -85,6 +133,20 @@ pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
             .try_into()
             .map_err(|_| ResourceError::Invalid("Reanim fps is unreadable".to_string()))?,
     );
+    let track_count = u32_at(&body, 8)
+        .ok_or_else(|| ResourceError::Invalid("Reanim track count is unreadable".to_string()))?;
+    let frame_counts = (0..track_count as usize)
+        .filter_map(|index| u32_at(&body, 24 + index * 12 + 8))
+        .collect::<Vec<_>>();
+    let track_names = scan_track_names(&body);
+    let tracks = frame_counts
+        .iter()
+        .zip(track_names)
+        .map(|(frame_count, name)| PvzReanimTrack {
+            name,
+            frame_count: *frame_count,
+        })
+        .collect();
     let mut strings = Vec::new();
     let mut start: Option<usize> = None;
     for (offset, byte) in body.iter().enumerate().skip(24) {
@@ -101,14 +163,19 @@ pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
             start = None;
         }
     }
+    if let Some(begin) = start {
+        if body.len() - begin >= 3 {
+            if let Ok(text) = std::str::from_utf8(&body[begin..]) {
+                strings.push(text.to_string());
+            }
+        }
+    }
     Ok(PvzReanimInfo {
         uncompressed_size,
         body_magic,
         unknown_4: u32_at(&body, 4)
             .ok_or_else(|| ResourceError::Invalid("Reanim field 4 is unreadable".to_string()))?,
-        track_count: u32_at(&body, 8).ok_or_else(|| {
-            ResourceError::Invalid("Reanim track count is unreadable".to_string())
-        })?,
+        track_count,
         fps,
         unknown_16: u32_at(&body, 16)
             .ok_or_else(|| ResourceError::Invalid("Reanim field 16 is unreadable".to_string()))?,
@@ -116,6 +183,8 @@ pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
             ResourceError::Invalid("Reanim track count 2 is unreadable".to_string())
         })?,
         strings,
+        frame_counts,
+        tracks,
     })
 }
 
@@ -145,7 +214,11 @@ mod tests {
         body.extend_from_slice(&12.0f32.to_le_bytes());
         body.extend_from_slice(&0u32.to_le_bytes());
         body.extend_from_slice(&12u32.to_le_bytes());
-        body.extend_from_slice(b"anim_idle\0");
+        body.extend_from_slice(&[0; 8]);
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&9u32.to_le_bytes());
+        body.extend_from_slice(b"anim_idle");
+        body.push(0x2C);
         let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         zlib.write_all(&body).unwrap();
         let compressed = zlib.finish().unwrap();
@@ -156,7 +229,10 @@ mod tests {
         assert_eq!(info.track_count, 11);
         assert_eq!(info.fps, 12.0);
         assert_eq!(info.track_count_2, 12);
-        assert_eq!(info.strings, vec!["anim_idle"]);
+        assert_eq!(info.strings, vec!["anim_idle,"], "{:?}", info.strings);
+        assert_eq!(info.tracks.len(), 1);
+        assert_eq!(info.tracks[0].name, "anim_idle");
+        assert_eq!(info.tracks[0].frame_count, 1);
     }
 
     #[test]
