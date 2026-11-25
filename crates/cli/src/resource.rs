@@ -1,5 +1,6 @@
 //! kotama resource: identify, inspect and extract non-image resources.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -126,6 +127,8 @@ struct AssetPropertyJson {
     name_hash: u32,
     type_hash: u32,
     value_or_offset: u32,
+    name: Option<String>,
+    property_type: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -263,7 +266,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -1160,10 +1163,57 @@ fn manifest_command(args: &[String]) -> ExitCode {
     }
 }
 
+fn parse_asset_options(
+    args: &[String],
+) -> Result<(PathBuf, Option<ResourceKind>, Option<PathBuf>), ExitCode> {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return Err(usage());
+    };
+    let mut kind = None;
+    let mut hash_map = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => kind = kind_arg(args, &mut index)?,
+            "--hash-map" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(usage());
+                };
+                hash_map = Some(PathBuf::from(value));
+                index += 1;
+            }
+            _ => return Err(usage()),
+        }
+        index += 1;
+    }
+    Ok((PathBuf::from(path), kind, hash_map))
+}
+
+fn read_hash_map(path: &Path) -> Result<HashMap<u32, String>, ExitCode> {
+    let text = fs::read_to_string(path).map_err(fail)?;
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let Some((hash, text)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Ok(hash) = hash.parse::<u32>() {
+            map.insert(hash, text.to_string());
+        }
+    }
+    Ok(map)
+}
+
 fn asset_command(args: &[String]) -> ExitCode {
-    let (path, kind) = match parse_info_options(args) {
+    let (path, kind, hash_map_path) = match parse_asset_options(args) {
         Ok(values) => values,
         Err(code) => return code,
+    };
+    let hash_map = match hash_map_path {
+        Some(path) => match read_hash_map(&path) {
+            Ok(map) => Some(map),
+            Err(code) => return code,
+        },
+        None => None,
     };
     let bytes = match read_file(&path) {
         Ok(bytes) => bytes,
@@ -1198,6 +1248,12 @@ fn asset_command(args: &[String]) -> ExitCode {
                 name_hash: property.name_hash,
                 type_hash: property.type_hash,
                 value_or_offset: property.value_or_offset,
+                name: hash_map
+                    .as_ref()
+                    .and_then(|map| map.get(&property.name_hash).cloned()),
+                property_type: hash_map
+                    .as_ref()
+                    .and_then(|map| map.get(&property.type_hash).cloned()),
             })
             .collect(),
     };
