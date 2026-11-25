@@ -13,6 +13,7 @@
 
 pub mod pe_export;
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use gimli::Dwarf;
@@ -231,6 +232,17 @@ pub struct PeResource {
     pub size: u64,
 }
 
+/// PE `RT_VERSION` 的 fixed file info 与 StringFileInfo。
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct PeVersionInfo {
+    /// FileVersionMS / FileVersionLS。
+    pub file_version: Option<(u32, u32)>,
+    /// ProductVersionMS / ProductVersionLS。
+    pub product_version: Option<(u32, u32)>,
+    /// StringFileInfo 的键值（已去除尾随 NUL）。
+    pub strings: BTreeMap<String, String>,
+}
+
 /// PE CodeView/RSDS 与 PDB 共有的身份。
 ///
 /// `guid` 使用 UUID canonical 字节序（RSDS 的前三个小端字段已归一），
@@ -309,6 +321,8 @@ pub struct LoadedModule {
     pub exception_directory: Option<DataDirectory>,
     /// PE 资源目录中的叶子资源（DataDirectory 索引 2）。
     pub resources: Vec<PeResource>,
+    /// PE `RT_VERSION`（资源类型 16）解析结果。
+    pub version_info: Option<PeVersionInfo>,
     /// PE CodeView/RSDS 中的伴生 PDB 身份。
     pub pdb_identity: Option<PdbIdentity>,
     /// 归一基址（ELF = 最小 LOAD 段 vaddr；PE = ImageBase）。解码文件里的原始指针时
@@ -650,6 +664,129 @@ fn pe_resources(data: &[u8], backing: &[BackingRange], container: Container) -> 
     pe_data_directory(data, container, 2)
         .map(|directory| parse_resource_tree(data, backing, directory))
         .unwrap_or_default()
+}
+
+fn version_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    bytes
+        .get(offset..offset.checked_add(2)?)
+        .map(|raw| u16::from_le_bytes([raw[0], raw[1]]))
+}
+
+fn version_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .map(|raw| u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn version_utf16_z(bytes: &[u8], start: usize, end: usize) -> Option<(String, usize)> {
+    let mut units = Vec::new();
+    let mut offset = start;
+    while offset.checked_add(2)? <= end {
+        let unit = version_u16(bytes, offset)?;
+        offset += 2;
+        if unit == 0 {
+            return Some((String::from_utf16(&units).ok()?, offset));
+        }
+        units.push(unit);
+    }
+    None
+}
+
+fn version_align(offset: usize) -> usize {
+    offset
+        .checked_add(3)
+        .map(|value| value & !3)
+        .unwrap_or(usize::MAX)
+}
+
+fn parse_version_block(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    depth: u8,
+    info: &mut PeVersionInfo,
+) {
+    if depth > 8 || start.checked_add(6).is_none_or(|value| value > end) {
+        return;
+    }
+    let length = version_u16(bytes, start).unwrap_or(0) as usize;
+    let value_length = version_u16(bytes, start + 2).unwrap_or(0) as usize;
+    let value_type = version_u16(bytes, start + 4).unwrap_or(0);
+    let Some(block_end) = start
+        .checked_add(length)
+        .filter(|value| *value <= end && *value > start)
+    else {
+        return;
+    };
+    let Some((key, after_key)) = version_utf16_z(bytes, start + 6, block_end) else {
+        return;
+    };
+    let value_start = version_align(after_key).min(block_end);
+    let mut children_start = value_start;
+    if key == "VS_VERSION_INFO" {
+        if value_start
+            .checked_add(52)
+            .is_some_and(|value| value <= block_end)
+            && version_u32(bytes, value_start) == Some(0xfeef_04bd)
+        {
+            info.file_version =
+                version_u32(bytes, value_start + 8).zip(version_u32(bytes, value_start + 12));
+            info.product_version =
+                version_u32(bytes, value_start + 16).zip(version_u32(bytes, value_start + 20));
+            children_start = version_align(value_start + 52);
+        }
+    } else if value_length > 0 && value_type == 1 && key != "VS_VERSION_INFO" {
+        let value_bytes = if value_type == 1 {
+            value_length.saturating_mul(2)
+        } else {
+            value_length
+        };
+        let value_end = value_start.saturating_add(value_bytes).min(block_end);
+        if value_type == 1 {
+            if let Some((value, _)) = version_utf16_z(bytes, value_start, value_end) {
+                info.strings.insert(key, value);
+            }
+        }
+        children_start = version_align(value_end);
+    }
+    let mut child = children_start;
+    while child.checked_add(6).is_some_and(|value| value <= block_end) {
+        let child_length = version_u16(bytes, child).unwrap_or(0) as usize;
+        if child_length == 0 {
+            break;
+        }
+        let Some(next) = child
+            .checked_add(child_length)
+            .filter(|value| *value <= block_end)
+        else {
+            break;
+        };
+        parse_version_block(bytes, child, next, depth + 1, info);
+        child = version_align(next);
+    }
+}
+
+/// Parse a VS_VERSIONINFO resource blob.
+#[must_use]
+pub fn parse_vs_version_info(bytes: &[u8]) -> Option<PeVersionInfo> {
+    if bytes.len() < 6 {
+        return None;
+    }
+    let mut info = PeVersionInfo::default();
+    parse_version_block(bytes, 0, bytes.len(), 0, &mut info);
+    (info.file_version.is_some() || info.product_version.is_some() || !info.strings.is_empty())
+        .then_some(info)
+}
+
+fn pe_version_info(
+    data: &[u8],
+    backing: &[BackingRange],
+    resources: &[PeResource],
+) -> Option<PeVersionInfo> {
+    let resource = resources.iter().find(|resource| resource.type_id == 16)?;
+    let size = usize::try_from(resource.size).ok()?;
+    let bytes = read_backed(data, backing, resource.rva, size)?;
+    parse_vs_version_info(bytes)
 }
 
 /// 从文件背书范围读取 RVA；与 FileAddressSpace 一样不跨范围。
@@ -1106,6 +1243,7 @@ impl LoadedModule {
         let exception_directory = pe_data_directory(data, container, 3);
         let pdb_identity = pe_pdb_identity(data, &backing, container);
         let resources = pe_resources(data, &backing, container);
+        let version_info = pe_version_info(data, &backing, &resources);
 
         Ok(Self {
             container,
@@ -1119,6 +1257,7 @@ impl LoadedModule {
             debug_functions,
             exception_directory,
             resources,
+            version_info,
             pdb_identity,
             image_base: base,
             relative_relocations,
@@ -1199,6 +1338,58 @@ mod tests {
         assert_eq!(resources[0].code_page, 1252);
         assert_eq!(resources[0].rva, 0x2000);
         assert_eq!(resources[0].size, 4);
+    }
+
+    fn version_block(key: &str, value: &[u8], value_type: u16, children: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0, 0]);
+        let value_length = if value_type == 1 {
+            value.len() / 2
+        } else {
+            value.len()
+        };
+        bytes.extend_from_slice(&(value_length as u16).to_le_bytes());
+        bytes.extend_from_slice(&value_type.to_le_bytes());
+        for unit in key.encode_utf16().chain(Some(0)) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(value);
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(children);
+        let length = bytes.len() as u16;
+        bytes[0..2].copy_from_slice(&length.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn pe_version_info_is_parsed_from_synthetic_resource() {
+        let mut fixed = vec![0u8; 52];
+        fixed[0..4].copy_from_slice(&0xfeef_04bdu32.to_le_bytes());
+        fixed[4..8].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        fixed[8..12].copy_from_slice(&1u32.to_le_bytes());
+        fixed[12..16].copy_from_slice(&2u32.to_le_bytes());
+        fixed[16..20].copy_from_slice(&3u32.to_le_bytes());
+        fixed[20..24].copy_from_slice(&4u32.to_le_bytes());
+        let value: Vec<u8> = "Kotama\0"
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let string = version_block("CompanyName", &value, 1, &[]);
+        let table = version_block("040904b0", &[], 1, &string);
+        let string_file = version_block("StringFileInfo", &[], 1, &table);
+        let root = version_block("VS_VERSION_INFO", &fixed, 0, &string_file);
+        let info = parse_vs_version_info(&root).unwrap();
+        assert_eq!(info.file_version, Some((1, 2)));
+        assert_eq!(info.product_version, Some((3, 4)));
+        assert_eq!(
+            info.strings.get("CompanyName").map(String::as_str),
+            Some("Kotama")
+        );
     }
 
     #[test]
