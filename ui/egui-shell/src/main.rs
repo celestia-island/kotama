@@ -4,6 +4,7 @@
 //! are printed to stdout; this demo never touches a target process.
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -17,6 +18,8 @@ struct Shell {
     deadline: Option<Instant>,
     screenshot: Option<PathBuf>,
     screenshot_requested: bool,
+    adapter: Vec<String>,
+    initial_action: Option<String>,
 }
 
 impl Shell {
@@ -27,6 +30,23 @@ impl Shell {
             deadline: seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds)),
             screenshot: None,
             screenshot_requested: false,
+            adapter: Vec::new(),
+            initial_action: None,
+        }
+    }
+
+    fn run_adapter(&self, action: &str) {
+        let Some(program) = self.adapter.first() else {
+            return;
+        };
+        match Command::new(program)
+            .args(&self.adapter[1..])
+            .arg(action)
+            .status()
+        {
+            Ok(status) if status.success() => println!("adapter={action} ok"),
+            Ok(status) => eprintln!("adapter={action} failed: {status}"),
+            Err(error) => eprintln!("adapter={action} spawn failed: {error}"),
         }
     }
 
@@ -35,6 +55,7 @@ impl Shell {
             ActionOutcome::Allowed => {
                 self.message = format!("invoked {}", request.id);
                 println!("action={}", request.id);
+                self.run_adapter(&request.id);
             }
             ActionOutcome::Denied { required, granted } => {
                 self.message = format!("denied {} ({required:?} > {granted:?})", request.id);
@@ -60,6 +81,9 @@ impl Shell {
 impl eframe::App for Shell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(id) = self.initial_action.take() {
+            self.apply(ActionRequest { id });
+        }
         if self
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -204,6 +228,9 @@ fn main() -> eframe::Result {
     let mut seconds: Option<u64> = None;
     let mut expanded = false;
     let mut screenshot: Option<PathBuf> = None;
+    let mut adapter: Vec<String> = Vec::new();
+    let mut invoke: Option<String> = None;
+    let mut grant_write = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -211,9 +238,21 @@ fn main() -> eframe::Result {
             "--seconds" => seconds = args.next().and_then(|value| value.parse().ok()),
             "--expanded" => expanded = true,
             "--screenshot" => screenshot = args.next().map(PathBuf::from),
+            "--adapter" => {
+                if let Some(program) = args.next() {
+                    adapter.push(program);
+                }
+            }
+            "--adapter-arg" => {
+                if let Some(argument) = args.next() {
+                    adapter.push(argument);
+                }
+            }
+            "--invoke" => invoke = args.next(),
+            "--grant-write" => grant_write = true,
             "--help" => {
                 println!(
-                    "usage: kotama-overlay-egui [--setup actions.json] [--seconds N] [--expanded] [--screenshot path]"
+                    "usage: kotama-overlay-egui [--setup actions.json] [--seconds N] [--expanded] [--screenshot path] [--adapter program] [--adapter-arg arg]... [--invoke action-id] [--grant-write]"
                 );
                 return Ok(());
             }
@@ -240,6 +279,9 @@ fn main() -> eframe::Result {
     if expanded {
         model.expand();
     }
+    if grant_write {
+        model.grant_write();
+    }
     let size = model.window_rect();
     if let Ok(path) = std::env::var("KOTAMA_UI_DEBUG") {
         let _ = std::fs::write(
@@ -265,6 +307,8 @@ fn main() -> eframe::Result {
         Box::new(move |_cc| {
             let mut shell = Shell::new(model, seconds);
             shell.screenshot = screenshot;
+            shell.adapter = adapter;
+            shell.initial_action = invoke;
             Ok(Box::new(shell))
         }),
     )

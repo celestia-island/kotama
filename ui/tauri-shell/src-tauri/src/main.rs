@@ -19,6 +19,7 @@ const SETUP_JSON: &str = include_str!("../../../demo-actions.json");
 struct Session {
     model: OverlayModel,
     origin: (i32, i32),
+    adapter: Vec<String>,
 }
 
 type Shared = Mutex<Session>;
@@ -82,7 +83,7 @@ fn click(state: State<'_, Shared>, x: i32, y: i32) -> Result<Invoked, String> {
     let request = session
         .model
         .click(x + session.origin.0, y + session.origin.1);
-    Ok(invoke(&session.model, request))
+    Ok(invoke(&session.model, &session.adapter, request))
 }
 
 #[tauri::command]
@@ -110,7 +111,11 @@ fn press_shortcut(
         key,
     };
     let session = state.lock().map_err(|error| error.to_string())?;
-    Ok(invoke(&session.model, session.model.shortcut(shortcut)))
+    Ok(invoke(
+        &session.model,
+        &session.adapter,
+        session.model.shortcut(shortcut),
+    ))
 }
 
 #[tauri::command]
@@ -120,7 +125,7 @@ fn grant_write(state: State<'_, Shared>) -> Result<OverlaySnapshot, String> {
     Ok(session.model.snapshot())
 }
 
-fn invoke(model: &OverlayModel, request: Option<ActionRequest>) -> Invoked {
+fn invoke(model: &OverlayModel, adapter: &[String], request: Option<ActionRequest>) -> Invoked {
     let Some(request) = request else {
         return Invoked {
             id: None,
@@ -130,6 +135,17 @@ fn invoke(model: &OverlayModel, request: Option<ActionRequest>) -> Invoked {
     let outcome = model.authorize(&request);
     if outcome == ActionOutcome::Allowed {
         println!("action={}", request.id);
+        if let Some(program) = adapter.first() {
+            match std::process::Command::new(program)
+                .args(&adapter[1..])
+                .arg(&request.id)
+                .status()
+            {
+                Ok(status) if status.success() => println!("adapter={} ok", request.id),
+                Ok(status) => eprintln!("adapter={} failed: {status}", request.id),
+                Err(error) => eprintln!("adapter={} spawn failed: {error}", request.id),
+            }
+        }
     }
     Invoked {
         id: Some(request.id),
@@ -146,6 +162,27 @@ fn resize(window: &WebviewWindow, snapshot: &OverlaySnapshot) -> Result<(), Stri
         .map_err(|error| error.to_string())
 }
 
+fn adapter_args() -> Vec<String> {
+    let mut adapter = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--adapter" => {
+                if let Some(program) = args.next() {
+                    adapter.push(program);
+                }
+            }
+            "--adapter-arg" => {
+                if let Some(argument) = args.next() {
+                    adapter.push(argument);
+                }
+            }
+            _ => {}
+        }
+    }
+    adapter
+}
+
 fn main() {
     let setup: OverlaySetup = serde_json::from_str(SETUP_JSON).expect("embedded setup must parse");
     let mut model = OverlayModel::from_setup(setup).expect("embedded setup must be valid");
@@ -155,8 +192,13 @@ fn main() {
     }
     let initial_size = model.window_rect();
     let origin = (initial_size.x, initial_size.y);
+    let adapter = adapter_args();
     tauri::Builder::default()
-        .manage(Shared::new(Session { model, origin }))
+        .manage(Shared::new(Session {
+            model,
+            origin,
+            adapter,
+        }))
         .invoke_handler(tauri::generate_handler![
             snapshot_view,
             pointer_moved,
