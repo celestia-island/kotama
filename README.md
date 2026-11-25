@@ -98,6 +98,7 @@ cargo run -p kotama-cli -- live inject --payload my_hook.dll --pid <pid> --load-
 cargo run -p kotama-cli -- proxy inspect <dll>                                                      # complete PE export facts (aliases, ordinals, forwarders)
 cargo run -p kotama-cli -- proxy generate <dll> --output out --build                                # buildable forwarding mirror + manifest
 cargo run -p kotama-cli -- proxy generate <dll> --output out --override <name> --hooks hooks.c --build  # selected local overrides; every other export still forwards
+cargo run -p kotama-cli -- proxy generate <dll> --output out --log-regex '^MessageBox' --log-exclude-regex 'Timeout' --build  # entry logging with a regex allow/deny list
 cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource identify <file>   # SWF / VBS / DOS COM identification
 cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource info <file>       # format metadata as JSON
 cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource extract <file> --output out.bin
@@ -113,8 +114,16 @@ copy the original to that name (drop-in replacement). For a DLL that cannot load
 
 Selected overrides need `--hooks <file.c>`; the generated manifest lists the exact
 `KOTAMA_OVERRIDE_<ordinal>` symbol for every overridden export group (aliases share one symbol),
-records `action: override|forward` per export, and hashes the hooks source. No function ABI is
+records `action: override|log|forward` per export, and hashes the hooks source. No function ABI is
 guessed: the hooks file must declare the correct signature.
+
+Selected entry logging (`--log-all`, `--log`, `--log-ordinal`, `--log-regex`, narrowed by
+`--log-exclude*`) generates `KOTAMA_LOG_STUB_<ordinal>` assembly: general registers, flags and
+XMM0–5 are saved, an ordinal/thread/tick record is published to a fixed 1024-entry ring, then the
+original body is tail-jumped. The ring is drained by a worker thread to `KOTAMA_PROXY_LOG` (or
+`kotama-proxy.log`); the callback itself allocates, locks and performs no I/O. Logging is
+best-effort and may drop records under a full ring; it records entry ordinals only, never guessed
+argument values. Overrides and logs cannot share one generator invocation yet.
 
 Resource parsers are opt-in: SWF (`resource-swf`, pure-Rust zlib; ZWS/LZMA is recognized but not extracted),
 VBScript text (`resource-vbs`; strict UTF-8/UTF-16 decoding, no execution), and DOS COM

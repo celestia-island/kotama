@@ -53,6 +53,8 @@ Commands:
                            Generate a complete forwarding mirror and manifest; optionally build it with Zig
                              --override <name> / --override-ordinal <n>   local symbols from --hooks <file.c>
                              --exclude <name> / --exclude-ordinal <n>     deny wins over include
+                             --log-all / --log <name> / --log-ordinal <n> / --log-regex <re>
+                             --log-exclude*                               entry logging; deny wins
   resource identify <path> Identify SWF / VBS / DOS COM
   resource info <path>     [--kind swf|vbs|dos-com] parsed metadata as JSON
   resource extract <path> --output <path> [--kind ...] [--max-output <bytes>]
