@@ -126,7 +126,8 @@ original body is tail-jumped. The ring is drained by a worker thread to `KOTAMA_
 best-effort and may drop records under a full ring; it records entry ordinals only, never guessed
 argument values. Overrides and logs cannot share one generator invocation yet.
 
-`kotama-overlay` is the shared, I/O-free model behind the planned Tauri 2 and egui shells:
+`kotama-overlay` is the shared, I/O-free model behind the Tauri 2 and egui shells in
+`ui/` (separate workspace; Hikari Vue frontend + egui shell, both consume the same action JSON):
 hover expand/collapse, row hit testing, shortcut normalization, deterministic frame snapshots,
 and a capability gate that denies write actions until the host explicitly grants them. It holds no
 platform handles and executes no actions; game-specific ids and effects stay in the host.

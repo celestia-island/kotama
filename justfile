@@ -35,6 +35,16 @@ licenses:
 # One-shot gate.
 gate: fmt lint test licenses
 
+# Build the optional desktop shells (Tauri frontend must be built first).
+ui-build:
+    cargo build --manifest-path ui/Cargo.toml --workspace
+
+# Check the optional desktop shells (format, clippy, tests).
+ui-check:
+    cargo fmt --all --manifest-path ui/Cargo.toml -- --check
+    cargo clippy --manifest-path ui/Cargo.toml --workspace --all-targets -- -D warnings
+    cargo test --manifest-path ui/Cargo.toml --workspace
+
 # Native Windows bench: fixtures, gate, pack/load and live e2e.
 bench-windows *args:
     python tools/windows_bench.py {{args}}
