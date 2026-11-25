@@ -17,6 +17,8 @@ use kotama_scan::string_xrefs;
 use kotama_scan::vtables_with_rtti;
 use serde::Serialize;
 
+mod proxy;
+
 const USAGE: &str = "\
 kotama — static dissection and live instrumentation for binaries
 
@@ -45,6 +47,9 @@ Commands:
                              Launch or attach, inject, handshake (Windows); --load-only skips the agent protocol
   export <path>            Emit annotation scripts for other RE tools
                              --format idc|idapython|rizin   (required)
+  proxy inspect <dll>      Show the complete PE export table
+  proxy generate <dll> --output <dir> [--backing <name>] [--build]
+                           Generate a complete forwarding mirror and manifest; optionally build it with Zig
   serve                    Start the service surface (web UI + MCP)       (not wired yet)
 
 Options:
@@ -70,6 +75,7 @@ fn main() -> ExitCode {
         Some("export") => export(&args.collect::<Vec<_>>()),
         Some("live") => live(&args.collect::<Vec<_>>()),
         Some("pack") => pack(&args.collect::<Vec<_>>()),
+        Some("proxy") => proxy::run(&args.collect::<Vec<_>>()),
         Some(command) => {
             eprintln!("kotama: unknown command `{command}`\n\n{USAGE}");
             ExitCode::from(2)

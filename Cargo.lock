@@ -217,9 +217,11 @@ dependencies = [
  "kotama-image",
  "kotama-pack",
  "kotama-proto",
+ "kotama-proxy",
  "kotama-scan",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -285,6 +287,15 @@ dependencies = [
  "kotama",
  "rmp-serde",
  "serde",
+]
+
+[[package]]
+name = "kotama-proxy"
+version = "0.1.0"
+dependencies = [
+ "kotama-image",
+ "serde",
+ "sha2",
 ]
 
 [[package]]

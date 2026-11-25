@@ -1,0 +1,18 @@
+[package]
+name = "kotama-proxy"
+description = "Deterministic DLL export mirrors and forwarding plans."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+kotama-image.workspace = true
+serde.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
