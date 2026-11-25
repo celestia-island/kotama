@@ -648,6 +648,20 @@ fn asset_header_is_inspected() {
     assert_eq!(facts["properties"][0]["name_hash"], 0xffe88740u64);
     assert_eq!(facts["properties"][0]["type_hash"], 0x645864f3u64);
     assert_eq!(facts["properties"][0]["value_or_offset"], 0x2d4u64);
+
+    let map = root.join("hash-map.tsv");
+    fs::write(&map, b"4293429056\tDefault\n1683514611\tfloat_t\n").unwrap();
+    let resolved = kotama()
+        .args(["resource", "asset"])
+        .arg(&source)
+        .arg("--hash-map")
+        .arg(&map)
+        .output()
+        .unwrap();
+    assert!(resolved.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&resolved.stdout).unwrap();
+    assert_eq!(facts["properties"][0]["name"], "Default");
+    assert_eq!(facts["properties"][0]["property_type"], "float_t");
     fs::remove_dir_all(&root).unwrap();
 }
 
