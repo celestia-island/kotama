@@ -212,5 +212,76 @@ int main(void) {
         .arg(out_override.join("client.exe"))
         .arg(out_override.join("client_override.c")));
     run(Command::new(out_override.join("client.exe")).current_dir(&out_override));
+
+    let out_log = root.join("log");
+    let log_output = Command::new(env!("CARGO_BIN_EXE_kotama"))
+        .args(["proxy", "generate"])
+        .arg(&original)
+        .arg("--output")
+        .arg(&out_log)
+        .arg("--backing")
+        .arg("original_real.dll")
+        .args(["--log", "Alpha", "--log-ordinal", "7", "--build"])
+        .env("KOTAMA_ZIG", &zig)
+        .output()
+        .expect("generate log mirror");
+    assert!(
+        log_output.status.success(),
+        "log generation failed:\n{}\n{}",
+        String::from_utf8_lossy(&log_output.stdout),
+        String::from_utf8_lossy(&log_output.stderr)
+    );
+    fs::copy(&original, out_log.join("original_real.dll")).unwrap();
+    write(
+        &out_log.join("client_log.c"),
+        r#"#include <windows.h>
+typedef int (__cdecl *IntFn)(void);
+int main(void) {
+    HMODULE module = LoadLibraryW(L"mirror.dll");
+    if (!module) return 30;
+    IntFn alpha = (IntFn)GetProcAddress(module, "Alpha");
+    IntFn alias = (IntFn)GetProcAddress(module, "Alias");
+    IntFn plain = (IntFn)GetProcAddress(module, (LPCSTR)7);
+    if (!alpha || !alias || !plain) return 31;
+    if (alpha() != 42 || alias() != 42 || plain() != 7) return 32;
+    Sleep(300);
+    return 0;
+}
+"#,
+    );
+    run(cc(&zig, target)
+        .arg("-o")
+        .arg(out_log.join("client.exe"))
+        .arg(out_log.join("client_log.c")));
+    let log_path = out_log.join("calls.txt");
+    run(Command::new(out_log.join("client.exe"))
+        .current_dir(&out_log)
+        .env("KOTAMA_PROXY_LOG", &log_path));
+    let mut text = String::new();
+    for _ in 0..40 {
+        text = fs::read_to_string(&log_path).unwrap_or_default();
+        if text.contains("ord=5") && text.contains("ord=7") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(text.contains("ord=5"), "log missing ordinal 5: {text:?}");
+    assert!(text.contains("ord=7"), "log missing ordinal 7: {text:?}");
+    assert!(
+        !text.contains("ord=6"),
+        "unselected alias was logged: {text:?}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(out_log.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["log_count"], 2);
+    assert_eq!(
+        manifest["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|export| export["action"] == "log")
+            .count(),
+        2
+    );
     fs::remove_dir_all(&root).unwrap();
 }
