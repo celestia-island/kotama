@@ -186,6 +186,10 @@ struct MeshJson {
     vertex_material_names: Vec<String>,
     texture_names: Vec<String>,
     user_text: Vec<String>,
+    material_pass_count: usize,
+    texture_stage_count: usize,
+    texture_ids: Vec<u32>,
+    stage_texcoord_count: usize,
 }
 
 #[derive(Serialize)]
@@ -704,6 +708,10 @@ fn mesh_command(args: &[String]) -> ExitCode {
         vertex_material_names: file.vertex_material_names(),
         texture_names: file.texture_names(),
         user_text: file.user_text(),
+        material_pass_count: file.material_pass_count(),
+        texture_stage_count: file.texture_stage_count(),
+        texture_ids: file.texture_ids(),
+        stage_texcoord_count: file.stage_texcoord_count(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
