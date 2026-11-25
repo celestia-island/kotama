@@ -397,6 +397,45 @@ fn csf_labels_are_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-apt-geometry")]
+#[test]
+fn apt_geometry_is_inspected() {
+    let root = temp_dir("apt-geometry");
+    let source = root.join("shape.ru");
+    fs::write(
+        &source,
+        "c\ns s:255:255:255:255\nt -1:-1:-2:-2:2:-2\nt 1:1:2:2:2:2\nl 0:0:1:1\n",
+    )
+    .unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "apt-geometry");
+    assert_eq!(facts["basis"], "extension");
+
+    let geometry = kotama()
+        .args(["resource", "geometry"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        geometry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&geometry.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&geometry.stdout).unwrap();
+    assert_eq!(facts["styles"][0]["kind"], "s");
+    assert_eq!(facts["triangle_count"], 2);
+    assert_eq!(facts["line_count"], 1);
+    assert_eq!(facts["bounds"], serde_json::json!([-2.0, -2.0, 2.0, 2.0]));
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

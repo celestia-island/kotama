@@ -75,6 +75,21 @@ struct AptConstantJson {
 }
 
 #[derive(Serialize)]
+struct GeometryStyleJson {
+    kind: String,
+    color: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct GeometryJson {
+    kind: &'static str,
+    styles: Vec<GeometryStyleJson>,
+    triangle_count: usize,
+    line_count: usize,
+    bounds: Option<Vec<f32>>,
+}
+
+#[derive(Serialize)]
 struct AptJson {
     kind: &'static str,
     apt_data_entry_offset: u32,
@@ -135,7 +150,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -182,6 +197,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "mesh" => mesh_command(&args[1..]),
         "apt" => apt_command(&args[1..]),
         "csf" => csf_command(&args[1..]),
+        "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
     }
@@ -348,6 +364,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             chunks: None,
             apt_entry_offset: None,
             constants: Some(file.string_count as usize),
+        },
+        Resource::AptGeometry(_) => InfoJson {
+            kind: "apt-geometry",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
         },
     }
 }
@@ -695,6 +727,45 @@ fn csf_command(args: &[String]) -> ExitCode {
                     .collect(),
             })
             .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn geometry_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AptGeometry(geometry) = resource else {
+        return fail("geometry requires an APT .ru text file");
+    };
+    let json = GeometryJson {
+        kind: "apt-geometry",
+        styles: geometry
+            .styles
+            .iter()
+            .map(|style| GeometryStyleJson {
+                kind: style.kind.clone(),
+                color: style.color.to_vec(),
+            })
+            .collect(),
+        triangle_count: geometry.triangles.len(),
+        line_count: geometry.lines,
+        bounds: geometry.bounds().map(|value| value.to_vec()),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {

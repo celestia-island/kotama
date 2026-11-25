@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 pub mod apt;
+pub mod apt_geometry;
 pub mod big;
 pub mod csf;
 pub mod dos_com;
@@ -31,6 +32,8 @@ pub enum ResourceKind {
     AptConst,
     /// CSF string table.
     Csf,
+    /// APT geometry text.
+    AptGeometry,
 }
 
 impl ResourceKind {
@@ -45,6 +48,7 @@ impl ResourceKind {
             Self::W3d => "w3d",
             Self::AptConst => "apt-const",
             Self::Csf => "csf",
+            Self::AptGeometry => "apt-geometry",
         }
     }
 
@@ -59,6 +63,7 @@ impl ResourceKind {
             "w3d" => Some(Self::W3d),
             "apt-const" => Some(Self::AptConst),
             "csf" => Some(Self::Csf),
+            "apt-geometry" => Some(Self::AptGeometry),
             _ => None,
         }
     }
@@ -74,6 +79,7 @@ impl ResourceKind {
             Self::W3d => "w3d",
             Self::AptConst => "apt-const",
             Self::Csf => "csf",
+            Self::AptGeometry => "apt-geometry",
         }
     }
 
@@ -88,6 +94,7 @@ impl ResourceKind {
             Self::W3d => cfg!(feature = "w3d"),
             Self::AptConst => cfg!(feature = "apt-const"),
             Self::Csf => cfg!(feature = "csf"),
+            Self::AptGeometry => cfg!(feature = "apt-geometry"),
         }
     }
 }
@@ -129,6 +136,8 @@ pub enum Resource<'a> {
     AptConst(apt::AptConstFile),
     /// CSF string table.
     Csf(csf::CsfFile),
+    /// APT geometry text.
+    AptGeometry(apt_geometry::AptGeometry),
 }
 
 impl Resource<'_> {
@@ -143,6 +152,7 @@ impl Resource<'_> {
             Self::W3d(_) => ResourceKind::W3d,
             Self::AptConst(_) => ResourceKind::AptConst,
             Self::Csf(_) => ResourceKind::Csf,
+            Self::AptGeometry(_) => ResourceKind::AptGeometry,
         }
     }
 }
@@ -177,6 +187,9 @@ impl Resource<'_> {
             )),
             Self::Csf(_) => Err(ResourceError::Unsupported(
                 "CSF is a string table; inspect labels".to_string(),
+            )),
+            Self::AptGeometry(_) => Err(ResourceError::Unsupported(
+                "APT geometry is a text scene; inspect records".to_string(),
             )),
         }
     }
@@ -277,6 +290,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Vbs.enabled(),
         });
     }
+    if extension_matches(extension, "ru") {
+        return Some(Identification {
+            kind: ResourceKind::AptGeometry,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::AptGeometry.enabled(),
+        });
+    }
     if extension_matches(extension, "w3d") {
         return Some(Identification {
             kind: ResourceKind::W3d,
@@ -322,6 +342,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::W3d => w3d::parse(bytes).map(Resource::W3d),
         ResourceKind::AptConst => apt::parse(bytes).map(Resource::AptConst),
         ResourceKind::Csf => csf::parse(bytes).map(Resource::Csf),
+        ResourceKind::AptGeometry => apt_geometry::parse(bytes).map(Resource::AptGeometry),
     }
 }
 
