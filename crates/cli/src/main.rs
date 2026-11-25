@@ -277,6 +277,7 @@ struct ExceptionJson {
 struct VtableJson {
     rva: String,
     targets: Vec<String>,
+    kind: &'static str,
 }
 
 /// 一条字符串引用（`--strings` 时才有）。
@@ -1562,6 +1563,10 @@ fn analyze(args: &[String]) -> ExitCode {
                         .iter()
                         .map(|target| format!("0x{target:x}"))
                         .collect(),
+                    kind: match table.kind {
+                        kotama_scan::VtableKind::PointerTable => "pointer-table",
+                        kotama_scan::VtableKind::RttiAnchored => "rtti-anchored",
+                    },
                 })
                 .collect()
         }),
