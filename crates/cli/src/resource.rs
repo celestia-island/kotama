@@ -153,6 +153,8 @@ struct AptCharacterJson {
     offset: u32,
     type_id: u32,
     type_name: &'static str,
+    bounds: Option<Vec<f32>>,
+    geometry: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1571,6 +1573,8 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                 offset: character.offset,
                 type_id: character.type_id,
                 type_name: character.type_name,
+                bounds: character.bounds.map(|values| values.to_vec()),
+                geometry: character.geometry,
             })
             .collect(),
         imports: info
