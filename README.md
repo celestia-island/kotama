@@ -124,7 +124,11 @@ XMM0–5 are saved, an ordinal/thread/tick record is published to a fixed 1024-e
 original body is tail-jumped. The ring is drained by a worker thread to `KOTAMA_PROXY_LOG` (or
 `kotama-proxy.log`); the callback itself allocates, locks and performs no I/O. Logging is
 best-effort and may drop records under a full ring; it records entry ordinals only, never guessed
-argument values. Overrides and logs cannot share one generator invocation yet.
+argument values.
+
+Overrides and logs may share one mirror when their ordinals are disjoint: selected exports are
+overridden, other selected exports are logged, and the rest forward. An ordinal selected for both
+is rejected, so the manifest never has two actions on one export.
 
 `kotama-overlay` is the shared, I/O-free model behind the Tauri 2 and egui shells in
 `ui/` (separate workspace; Hikari Vue frontend + egui shell, both consume the same action JSON):
