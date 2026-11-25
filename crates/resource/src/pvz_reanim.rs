@@ -281,6 +281,75 @@ pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
     })
 }
 
+#[cfg(feature = "pvz-reanim")]
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+/// Render parsed Reanim data as `.reanim`-style XML.
+///
+/// This is a structural export, not a byte-identical reproduction of the
+/// original XML formatting.
+#[cfg(feature = "pvz-reanim")]
+#[must_use]
+pub fn to_xml(info: &PvzReanimInfo) -> String {
+    use std::fmt::Write;
+
+    let mut xml = String::new();
+    let _ = writeln!(xml, "<fps>{}</fps>", info.fps);
+    for track in &info.tracks {
+        let _ = writeln!(xml, "<track>");
+        let _ = writeln!(xml, "<name>{}</name>", xml_escape(&track.name));
+        for frame in &track.frames {
+            let _ = writeln!(xml, "<t>");
+            for (label, value) in [
+                ("x", frame.transform.values[0]),
+                ("y", frame.transform.values[1]),
+                ("kx", frame.transform.values[2]),
+                ("ky", frame.transform.values[3]),
+                ("sx", frame.transform.values[4]),
+                ("sy", frame.transform.values[5]),
+                ("f", frame.transform.values[6]),
+                ("a", frame.transform.values[7]),
+            ] {
+                if let Some(value) = value {
+                    let _ = writeln!(xml, "<{label}>{value}</{label}>");
+                }
+            }
+            if let Some(image) = &frame.elements.image {
+                let _ = writeln!(xml, "<i>{}</i>", xml_escape(image));
+            }
+            if let Some(font) = &frame.elements.font {
+                let _ = writeln!(xml, "<font>{}</font>", xml_escape(font));
+            }
+            if let Some(text) = &frame.elements.text {
+                let _ = writeln!(xml, "<text>{}</text>", xml_escape(text));
+            }
+            let _ = writeln!(xml, "</t>");
+        }
+        let _ = writeln!(xml, "</track>");
+    }
+    xml
+}
+
+#[cfg(not(feature = "pvz-reanim"))]
+/// Render parsed Reanim data as XML (disabled build).
+#[must_use]
+pub fn to_xml(_info: &PvzReanimInfo) -> String {
+    String::new()
+}
+
 #[cfg(not(feature = "pvz-reanim"))]
 /// Parse a Reanim container (disabled build).
 ///
@@ -334,6 +403,10 @@ mod tests {
         let frame = info.tracks[0].frames.first().unwrap();
         assert_eq!(frame.transform.values, [None; 8]);
         assert_eq!(frame.elements.image, None);
+        let xml = to_xml(&info);
+        assert!(xml.contains("<fps>12</fps>"));
+        assert!(xml.contains("<name>anim_idle</name>"));
+        assert!(xml.contains("<t>"));
     }
 
     #[test]

@@ -1691,10 +1691,29 @@ fn apt_image_map_command(args: &[String]) -> ExitCode {
 }
 
 fn pvz_reanim_command(args: &[String]) -> ExitCode {
-    let (path, kind) = match parse_info_options(args) {
-        Ok(values) => values,
-        Err(code) => return code,
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
     };
+    let mut xml = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--xml" => xml = true,
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "pvz-reanim" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let kind = Some(ResourceKind::PvzReanim);
     let bytes = match read_file(&path) {
         Ok(bytes) => bytes,
         Err(error) => return fail(error),
@@ -1706,6 +1725,7 @@ fn pvz_reanim_command(args: &[String]) -> ExitCode {
     let Resource::PvzReanim(info) = resource else {
         return fail("pvz-reanim requires a Reanim container");
     };
+    let xml_text = xml.then(|| kotama_resource::pvz_reanim::to_xml(&info));
     let json = PvzReanimJson {
         kind: "pvz-reanim",
         uncompressed_size: info.uncompressed_size,
@@ -1736,6 +1756,10 @@ fn pvz_reanim_command(args: &[String]) -> ExitCode {
             })
             .collect(),
     };
+    if let Some(text) = xml_text {
+        print!("{text}");
+        return ExitCode::SUCCESS;
+    }
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
             println!("{text}");
