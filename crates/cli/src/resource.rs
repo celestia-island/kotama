@@ -183,6 +183,7 @@ struct AptMovieJson {
     characters: Vec<AptCharacterJson>,
     imports: Vec<AptImportJson>,
     exports: Vec<AptExportJson>,
+    texture_ids: Vec<u32>,
 }
 
 #[derive(Serialize)]
@@ -1560,6 +1561,7 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                 character: export.character,
             })
             .collect(),
+        texture_ids: info.texture_ids.clone(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
