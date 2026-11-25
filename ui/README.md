@@ -60,6 +60,9 @@ The repository ships no adapter implementation; game- or product-specific code s
 Environment switches used by capture harnesses:
 
 - `KOTAMA_OVERLAY_EXPANDED=1` starts the Tauri shell expanded (and resizes on the first snapshot).
+- `KOTAMA_OVERLAY_SETUP=<path>` loads a Tauri action manifest instead of the embedded demo one.
+- `KOTAMA_OVERLAY_GRANT_WRITE=1` starts the Tauri model writable (local test harness only).
+- `KOTAMA_OVERLAY_INVOKE=<id>` applies one action during Tauri startup (local headless test hook).
 - `KOTAMA_UI_DEBUG=<path>` writes the egui shell's computed initial size.
 
 ## Check
