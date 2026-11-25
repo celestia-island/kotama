@@ -696,6 +696,41 @@ fn asset_header_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-asset-relocation")]
+#[test]
+fn relocation_table_is_inspected() {
+    let root = temp_dir("relocation");
+    let source = root.join("sample.relo");
+    let mut bytes = 0x6d1ddbe1u32.to_le_bytes().to_vec();
+    for value in [4u32, 0xffff_ffff, 4, 0x1234_5678] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "asset-relocation");
+    assert_eq!(facts["basis"], "extension");
+
+    let relocation = kotama()
+        .args(["resource", "relocation"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(relocation.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&relocation.stdout).unwrap();
+    assert_eq!(facts["checksum"], 1830673377u64);
+    assert_eq!(facts["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(facts["entries"][0]["kind"], 4);
+    assert_eq!(facts["entries"][0]["offset"], 4294967295u64);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

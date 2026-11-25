@@ -10,6 +10,7 @@ pub mod apt;
 pub mod apt_geometry;
 pub mod asset;
 pub mod asset_manifest;
+pub mod asset_relocation;
 pub mod big;
 pub mod csf;
 pub mod dds;
@@ -49,6 +50,8 @@ pub enum ResourceKind {
     AssetManifest,
     /// RA3 binary asset header.
     Asset,
+    /// Compiled asset relocation table.
+    AssetRelocation,
 }
 
 impl ResourceKind {
@@ -69,6 +72,7 @@ impl ResourceKind {
             Self::Vp6 => "vp6",
             Self::AssetManifest => "asset-manifest",
             Self::Asset => "asset",
+            Self::AssetRelocation => "asset-relocation",
         }
     }
 
@@ -89,6 +93,7 @@ impl ResourceKind {
             "vp6" => Some(Self::Vp6),
             "asset-manifest" => Some(Self::AssetManifest),
             "asset" => Some(Self::Asset),
+            "asset-relocation" => Some(Self::AssetRelocation),
             _ => None,
         }
     }
@@ -110,6 +115,7 @@ impl ResourceKind {
             Self::Vp6 => "vp6",
             Self::AssetManifest => "asset-manifest",
             Self::Asset => "asset",
+            Self::AssetRelocation => "asset-relocation",
         }
     }
 
@@ -130,6 +136,7 @@ impl ResourceKind {
             Self::Vp6 => cfg!(feature = "vp6"),
             Self::AssetManifest => cfg!(feature = "asset-manifest"),
             Self::Asset => cfg!(feature = "asset"),
+            Self::AssetRelocation => cfg!(feature = "asset-relocation"),
         }
     }
 }
@@ -183,6 +190,8 @@ pub enum Resource<'a> {
     AssetManifest(asset_manifest::AssetManifestInfo),
     /// RA3 binary asset header.
     Asset(asset::AssetInfo),
+    /// Compiled asset relocation table.
+    AssetRelocation(asset_relocation::AssetRelocation),
 }
 
 impl Resource<'_> {
@@ -203,6 +212,7 @@ impl Resource<'_> {
             Self::Vp6(_) => ResourceKind::Vp6,
             Self::AssetManifest(_) => ResourceKind::AssetManifest,
             Self::Asset(_) => ResourceKind::Asset,
+            Self::AssetRelocation(_) => ResourceKind::AssetRelocation,
         }
     }
 }
@@ -255,6 +265,9 @@ impl Resource<'_> {
             )),
             Self::Asset(_) => Err(ResourceError::Unsupported(
                 "asset property values are opaque; inspect header".to_string(),
+            )),
+            Self::AssetRelocation(_) => Err(ResourceError::Unsupported(
+                "relocation entries are opaque; inspect table".to_string(),
             )),
         }
     }
@@ -376,6 +389,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if extension_matches(extension, "relo") {
+        return Some(Identification {
+            kind: ResourceKind::AssetRelocation,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::AssetRelocation.enabled(),
+        });
+    }
     if extension_matches(extension, "asset") {
         return Some(Identification {
             kind: ResourceKind::Asset,
@@ -448,6 +468,9 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Vp6 => vp6::parse(bytes).map(Resource::Vp6),
         ResourceKind::AssetManifest => asset_manifest::parse(bytes).map(Resource::AssetManifest),
         ResourceKind::Asset => asset::parse(bytes).map(Resource::Asset),
+        ResourceKind::AssetRelocation => {
+            asset_relocation::parse(bytes).map(Resource::AssetRelocation)
+        }
     }
 }
 
