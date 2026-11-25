@@ -445,6 +445,42 @@ impl W3dFile<'_> {
             .unwrap_or_default()
     }
 
+    /// Return all NUL-terminated strings stored under a chunk type.
+    #[must_use]
+    pub fn strings_by_type(&self, type_id: u32) -> Vec<String> {
+        self.chunks
+            .iter()
+            .filter(|chunk| chunk.type_id == type_id)
+            .filter_map(|chunk| {
+                let payload = self.payload(*chunk)?;
+                let end = payload
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(payload.len());
+                Some(String::from_utf8_lossy(&payload[..end]).trim().to_string())
+            })
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
+    /// Vertex material names (type 0x2c).
+    #[must_use]
+    pub fn vertex_material_names(&self) -> Vec<String> {
+        self.strings_by_type(0x2c)
+    }
+
+    /// Texture names (type 0x32).
+    #[must_use]
+    pub fn texture_names(&self) -> Vec<String> {
+        self.strings_by_type(0x32)
+    }
+
+    /// Mesh user text (type 0x0c).
+    #[must_use]
+    pub fn user_text(&self) -> Vec<String> {
+        self.strings_by_type(0x0c)
+    }
+
     /// Return material pass/vertex-material/shader/texture counts.
     #[must_use]
     pub fn material_info(&self) -> Option<[u32; 4]> {
@@ -523,6 +559,24 @@ mod tests {
         assert_eq!(parsed.vertices().len(), 2);
         assert_eq!(parsed.triangles().len(), 1);
         assert_eq!(parsed.material_info(), Some([1, 1, 0, 1]));
+    }
+
+    #[test]
+    fn mesh_names_are_collected() {
+        let header = chunk(0x1f, &mesh_header_payload(), false);
+        let material_name = chunk(0x2c, b"mat1\0", false);
+        let material = chunk(0x2b, &material_name, true);
+        let materials = chunk(0x2a, &material, true);
+        let texture_name = chunk(0x32, b"tex.tga\0", false);
+        let texture = chunk(0x31, &texture_name, true);
+        let textures = chunk(0x30, &texture, true);
+        let user_text = chunk(0x0c, b"comment\0", false);
+        let payload = [header, materials, textures, user_text].concat();
+        let root = chunk(0, &payload, true);
+        let parsed = parse(&root).unwrap();
+        assert_eq!(parsed.vertex_material_names(), vec!["mat1"]);
+        assert_eq!(parsed.texture_names(), vec!["tex.tga"]);
+        assert_eq!(parsed.user_text(), vec!["comment"]);
     }
 
     #[test]
