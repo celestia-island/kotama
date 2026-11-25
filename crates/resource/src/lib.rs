@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
+pub mod apt;
 pub mod big;
 pub mod dos_com;
 pub mod swf;
@@ -25,6 +26,8 @@ pub enum ResourceKind {
     Big,
     /// W3D chunk container.
     W3d,
+    /// APT constant file.
+    AptConst,
 }
 
 impl ResourceKind {
@@ -37,6 +40,7 @@ impl ResourceKind {
             Self::DosCom => "dos-com",
             Self::Big => "big",
             Self::W3d => "w3d",
+            Self::AptConst => "apt-const",
         }
     }
 
@@ -49,6 +53,7 @@ impl ResourceKind {
             "dos-com" | "com" => Some(Self::DosCom),
             "big" | "bigf" | "big4" => Some(Self::Big),
             "w3d" => Some(Self::W3d),
+            "apt-const" => Some(Self::AptConst),
             _ => None,
         }
     }
@@ -62,6 +67,7 @@ impl ResourceKind {
             Self::DosCom => "dos-com",
             Self::Big => "big",
             Self::W3d => "w3d",
+            Self::AptConst => "apt-const",
         }
     }
 
@@ -74,6 +80,7 @@ impl ResourceKind {
             Self::DosCom => cfg!(feature = "dos-com"),
             Self::Big => cfg!(feature = "big"),
             Self::W3d => cfg!(feature = "w3d"),
+            Self::AptConst => cfg!(feature = "apt-const"),
         }
     }
 }
@@ -111,6 +118,8 @@ pub enum Resource<'a> {
     Big(big::BigArchive<'a>),
     /// W3D chunk container.
     W3d(w3d::W3dFile<'a>),
+    /// APT constant file.
+    AptConst(apt::AptConstFile),
 }
 
 impl Resource<'_> {
@@ -123,6 +132,7 @@ impl Resource<'_> {
             Self::DosCom(_) => ResourceKind::DosCom,
             Self::Big(_) => ResourceKind::Big,
             Self::W3d(_) => ResourceKind::W3d,
+            Self::AptConst(_) => ResourceKind::AptConst,
         }
     }
 }
@@ -151,6 +161,9 @@ impl Resource<'_> {
             )),
             Self::W3d(_) => Err(ResourceError::Unsupported(
                 "W3D is a chunk container; select a chunk".to_string(),
+            )),
+            Self::AptConst(_) => Err(ResourceError::Unsupported(
+                "APT constants are a table; inspect entries".to_string(),
             )),
         }
     }
@@ -214,6 +227,15 @@ fn extension_matches(extension: Option<&str>, wanted: &str) -> bool {
 /// Identify a resource from contents and an optional extension hint.
 #[must_use]
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification> {
+    if bytes.get(..17) == Some(b"Apt constant file".as_slice())
+        || bytes.get(16..33) == Some(b"Apt constant file".as_slice())
+    {
+        return Some(Identification {
+            kind: ResourceKind::AptConst,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::AptConst.enabled(),
+        });
+    }
     if big::has_magic(bytes) {
         return Some(Identification {
             kind: ResourceKind::Big,
@@ -278,6 +300,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::DosCom => dos_com::parse(bytes).map(Resource::DosCom),
         ResourceKind::Big => big::parse(bytes).map(Resource::Big),
         ResourceKind::W3d => w3d::parse(bytes).map(Resource::W3d),
+        ResourceKind::AptConst => apt::parse(bytes).map(Resource::AptConst),
     }
 }
 

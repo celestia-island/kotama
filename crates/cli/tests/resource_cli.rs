@@ -293,6 +293,56 @@ fn w3d_mesh_records_are_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-apt-const")]
+#[test]
+fn apt_constants_are_inspected() {
+    let root = temp_dir("apt");
+    let source = root.join("sample.const");
+    let mut bytes = b"Apt constant file".to_vec();
+    bytes.extend_from_slice(&[0; 3]);
+    bytes.extend_from_slice(&0x50cu32.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&32u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&48u32.to_le_bytes());
+    bytes.extend_from_slice(&7u32.to_le_bytes());
+    bytes.extend_from_slice(&42i32.to_le_bytes());
+    bytes.extend_from_slice(b"hello\0");
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "apt-const");
+    assert_eq!(facts["basis"], "magic");
+
+    let info = kotama()
+        .args(["resource", "info"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(info.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(facts["apt_entry_offset"], 0x50c);
+    assert_eq!(facts["constants"], 2);
+
+    let apt = kotama()
+        .args(["resource", "apt"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(apt.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&apt.stdout).unwrap();
+    assert_eq!(facts["count"], 2);
+    assert_eq!(facts["entries"][0]["value"], "hello");
+    assert_eq!(facts["entries"][1]["value"], 42);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
