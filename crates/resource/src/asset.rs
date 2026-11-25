@@ -21,8 +21,12 @@ pub struct AssetProperty {
 pub struct AssetInfo {
     /// 16-byte asset identifier.
     pub id: [u8; 16],
-    /// Unknown u32 at offset 16.
-    pub unknown_16: u32,
+    /// Header version (0 or 1).
+    pub version: u32,
+    /// Type hash (version 1 only).
+    pub type_hash: Option<u32>,
+    /// Instance hash (version 1 only).
+    pub instance_hash: Option<u32>,
     /// Property data size.
     pub data_size: u32,
     /// Property count.
@@ -56,10 +60,27 @@ pub fn parse(bytes: &[u8]) -> Result<AssetInfo, ResourceError> {
             "asset header is shorter than 36 bytes".to_string(),
         ));
     }
-    let type_len = u32_at(bytes, 32)
+    let version = u32_at(bytes, 16)
+        .ok_or_else(|| ResourceError::Invalid("asset version is unreadable".to_string()))?;
+    if version > 1 {
+        return Err(ResourceError::Invalid(format!(
+            "unsupported asset header version {version}"
+        )));
+    }
+    let (type_len_offset, type_start, type_hash, instance_hash) = if version == 1 {
+        (40, 44, u32_at(bytes, 32), u32_at(bytes, 36))
+    } else {
+        (32, 36, None, None)
+    };
+    if bytes.len() < type_start {
+        return Err(ResourceError::Invalid(
+            "asset header is shorter than its type name".to_string(),
+        ));
+    }
+    let type_len = u32_at(bytes, type_len_offset)
         .ok_or_else(|| ResourceError::Invalid("asset type length is unreadable".to_string()))?
         as usize;
-    let type_start: usize = 36;
+    let type_start: usize = type_start;
     let type_end = bytes[type_start..]
         .iter()
         .position(|byte| *byte == 0)
@@ -140,8 +161,9 @@ pub fn parse(bytes: &[u8]) -> Result<AssetInfo, ResourceError> {
     id.copy_from_slice(&bytes[..16]);
     Ok(AssetInfo {
         id,
-        unknown_16: u32_at(bytes, 16)
-            .ok_or_else(|| ResourceError::Invalid("asset field 16 is unreadable".to_string()))?,
+        version,
+        type_hash,
+        instance_hash,
         data_size: u32_at(bytes, 20)
             .ok_or_else(|| ResourceError::Invalid("asset data size is unreadable".to_string()))?,
         property_count,
@@ -186,6 +208,33 @@ mod tests {
         assert_eq!(info.properties[0].name_hash, 0xffe88740);
         assert_eq!(info.properties[0].type_hash, 0x645864f3);
         assert_eq!(info.properties[0].value_or_offset, 0x2d4);
+    }
+
+    #[test]
+    fn parses_version_1_header() {
+        let mut bytes = vec![0u8; 44];
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&2652u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&52u32.to_le_bytes());
+        bytes[32..36].copy_from_slice(&0xc2b1_a262u32.to_le_bytes());
+        bytes[36..40].copy_from_slice(&0x2ef0_cb34u32.to_le_bytes());
+        bytes[40..44].copy_from_slice(&22u32.to_le_bytes());
+        bytes.extend_from_slice(b"GameObject:AM_Debris01:");
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(b"DATA:civilian/amsterdam_am/optimized_props/am_debris01.xml");
+        for value in [0u32; 52 * 3] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let info = parse(&bytes).unwrap();
+        assert_eq!(info.version, 1);
+        assert_eq!(info.type_hash, Some(0xc2b1_a262));
+        assert_eq!(info.instance_hash, Some(0x2ef0_cb34));
+        assert_eq!(info.type_name, "GameObject:AM_Debris01:");
+        assert_eq!(
+            info.data_path,
+            "civilian/amsterdam_am/optimized_props/am_debris01.xml"
+        );
+        assert_eq!(info.property_count, 52);
     }
 
     #[test]
