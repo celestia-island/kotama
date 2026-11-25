@@ -43,8 +43,8 @@ pub struct PvzReanimTrack {
     pub name: String,
     /// Frame count.
     pub frame_count: u32,
-    /// First frame, when present.
-    pub first_frame: Option<PvzReanimFrame>,
+    /// All frames.
+    pub frames: Vec<PvzReanimFrame>,
 }
 
 /// Parsed PvZ Reanim container/header facts.
@@ -106,9 +106,9 @@ fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<Option<String>, Resou
 fn parse_frame_at(
     bytes: &[u8],
     transform_offset: usize,
-    elements_offset: usize,
+    element_cursor: &mut usize,
 ) -> Result<PvzReanimFrame, ResourceError> {
-    let mut cursor = transform_offset;
+    let cursor = transform_offset;
     let mut values = [None; 8];
     for (index, slot) in values.iter_mut().enumerate() {
         let raw = u32_at(bytes, cursor + index * 4).ok_or_else(|| {
@@ -116,10 +116,9 @@ fn parse_frame_at(
         })?;
         *slot = (raw != OPTIONAL_SENTINEL).then(|| f32::from_bits(raw));
     }
-    cursor = elements_offset;
-    let image = read_string(bytes, &mut cursor)?;
-    let font = read_string(bytes, &mut cursor)?;
-    let text = read_string(bytes, &mut cursor)?;
+    let image = read_string(bytes, element_cursor)?;
+    let font = read_string(bytes, element_cursor)?;
+    let text = read_string(bytes, element_cursor)?;
     Ok(PvzReanimFrame {
         transform: PvzReanimTransform { values },
         elements: PvzReanimElements { image, font, text },
@@ -158,16 +157,23 @@ fn scan_tracks(bytes: &[u8], frame_counts: &[u32]) -> Vec<PvzReanimTrack> {
         };
         count_index += 1;
         let transform_offset = offset + 4 + length + 1 + 3;
-        let elements_offset = transform_offset + frame_count as usize * 44;
-        let first_frame = (frame_count > 0)
-            .then(|| parse_frame_at(bytes, transform_offset, elements_offset))
-            .transpose()
-            .ok()
-            .flatten();
+        let mut element_cursor = transform_offset + frame_count as usize * 44;
+        let mut frames = Vec::with_capacity(frame_count as usize);
+        for frame_index in 0..frame_count as usize {
+            let Some(frame) = parse_frame_at(
+                bytes,
+                transform_offset + frame_index * 44,
+                &mut element_cursor,
+            )
+            .ok() else {
+                break;
+            };
+            frames.push(frame);
+        }
         tracks.push(PvzReanimTrack {
             name: name.to_string(),
             frame_count,
-            first_frame,
+            frames,
         });
         if count_index == frame_counts.len() {
             break;
@@ -325,7 +331,7 @@ mod tests {
         assert_eq!(info.fps, 12.0);
         assert_eq!(info.tracks.len(), 1);
         assert_eq!(info.tracks[0].name, "anim_idle");
-        let frame = info.tracks[0].first_frame.as_ref().unwrap();
+        let frame = info.tracks[0].frames.first().unwrap();
         assert_eq!(frame.transform.values, [None; 8]);
         assert_eq!(frame.elements.image, None);
     }
