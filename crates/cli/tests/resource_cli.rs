@@ -758,6 +758,49 @@ fn relocation_table_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-apt-movie")]
+#[test]
+fn apt_movie_is_inspected() {
+    let root = temp_dir("apt-movie");
+    let source = root.join("sample.apt");
+    let mut bytes = vec![0u8; 16];
+    bytes.extend_from_slice(&9u32.to_le_bytes());
+    bytes.extend_from_slice(&0x0987_6543u32.to_le_bytes());
+    bytes.extend_from_slice(&[0; 12]);
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&56u32.to_le_bytes());
+    bytes.extend_from_slice(&800u32.to_le_bytes());
+    bytes.extend_from_slice(&600u32.to_le_bytes());
+    bytes.extend_from_slice(&33u32.to_le_bytes());
+    bytes.extend_from_slice(&[0; 16]);
+    bytes.resize(72, 0);
+    bytes.extend_from_slice(&64u32.to_le_bytes());
+    bytes.resize(80, 0);
+    bytes.extend_from_slice(&5u32.to_le_bytes());
+    bytes.extend_from_slice(&0x0987_6543u32.to_le_bytes());
+    fs::write(&source, &bytes).unwrap();
+
+    let movie = kotama()
+        .args(["resource", "apt-movie"])
+        .arg(&source)
+        .arg("--entry-offset")
+        .arg("16")
+        .output()
+        .unwrap();
+    assert!(
+        movie.status.success(),
+        "{}",
+        String::from_utf8_lossy(&movie.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&movie.stdout).unwrap();
+    assert_eq!(facts["frame_count"], 0);
+    assert_eq!(facts["character_count"], 1);
+    assert_eq!(facts["screen_width"], 800);
+    assert_eq!(facts["screen_height"], 600);
+    assert_eq!(facts["characters"][0]["type_name"], "sprite");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
