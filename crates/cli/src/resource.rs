@@ -136,7 +136,9 @@ struct AssetPropertyJson {
 struct AssetJson {
     kind: &'static str,
     id: String,
-    unknown_16: u32,
+    version: u32,
+    type_hash: Option<u32>,
+    instance_hash: Option<u32>,
     data_size: u32,
     property_count: u32,
     unknown_28: u32,
@@ -1248,7 +1250,7 @@ fn parse_string_list(bytes: &[u8], table_offset: usize, raw: u32) -> Option<serd
             cursor += 12;
             continue;
         }
-        if kind != 0 {
+        if name != 0xb151_a0eb || kind != 0 {
             break;
         }
         let pointer = value as usize;
@@ -1256,14 +1258,25 @@ fn parse_string_list(bytes: &[u8], table_offset: usize, raw: u32) -> Option<serd
             break;
         };
         let string_offset = u32::from_le_bytes(pointer_bytes.try_into().ok()?) as usize;
+        if string_offset >= bytes.len() {
+            break;
+        }
         let Some(end) = bytes[string_offset..].iter().position(|byte| *byte == 0) else {
             break;
         };
         let end = end + string_offset;
-        strings.push(String::from_utf8_lossy(&bytes[string_offset..end]).to_string());
+        let text = &bytes[string_offset..end];
+        if text.is_empty()
+            || !text
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        {
+            return None;
+        }
+        strings.push(String::from_utf8_lossy(text).to_string());
         cursor += 12;
     }
-    Some(serde_json::json!(strings))
+    (!strings.is_empty()).then(|| serde_json::json!(strings))
 }
 
 fn asset_property_value(
@@ -1336,7 +1349,9 @@ fn asset_command(args: &[String]) -> ExitCode {
             .map(|byte| format!("{byte:02x}"))
             .collect::<Vec<_>>()
             .join(""),
-        unknown_16: info.unknown_16,
+        version: info.version,
+        type_hash: info.type_hash,
+        instance_hash: info.instance_hash,
         data_size: info.data_size,
         property_count: info.property_count,
         unknown_28: info.unknown_28,
