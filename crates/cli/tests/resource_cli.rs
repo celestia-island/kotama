@@ -603,6 +603,48 @@ fn asset_manifest_header_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-asset")]
+#[test]
+fn asset_header_is_inspected() {
+    let root = temp_dir("asset");
+    let source = root.join("sample.asset");
+    let mut bytes = vec![0u8; 36];
+    bytes[0..16].copy_from_slice(&[1u8; 16]);
+    bytes[20..24].copy_from_slice(&856u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&8u32.to_le_bytes());
+    bytes[32..36].copy_from_slice(&37u32.to_le_bytes());
+    bytes.extend_from_slice(b"ArmorTemplate:JapanHiveGeneratorArmorA");
+    bytes.extend_from_slice(&[0; 3]);
+    bytes.extend_from_slice(b"DATA:civilian/tokyo_harbor_th/buildings/th_japanhivegenerator.xml\0");
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "asset");
+    assert_eq!(facts["basis"], "extension");
+
+    let asset = kotama()
+        .args(["resource", "asset"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(asset.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&asset.stdout).unwrap();
+    assert_eq!(facts["data_size"], 856);
+    assert_eq!(facts["property_count"], 8);
+    assert_eq!(facts["type_name"], "ArmorTemplate:JapanHiveGeneratorArmorA");
+    assert_eq!(
+        facts["data_path"],
+        "civilian/tokyo_harbor_th/buildings/th_japanhivegenerator.xml"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

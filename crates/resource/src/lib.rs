@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod apt;
 pub mod apt_geometry;
+pub mod asset;
 pub mod asset_manifest;
 pub mod big;
 pub mod csf;
@@ -46,6 +47,8 @@ pub enum ResourceKind {
     Vp6,
     /// BinaryAssetBuilder manifest header.
     AssetManifest,
+    /// RA3 binary asset header.
+    Asset,
 }
 
 impl ResourceKind {
@@ -65,6 +68,7 @@ impl ResourceKind {
             Self::Tga => "tga",
             Self::Vp6 => "vp6",
             Self::AssetManifest => "asset-manifest",
+            Self::Asset => "asset",
         }
     }
 
@@ -84,6 +88,7 @@ impl ResourceKind {
             "tga" => Some(Self::Tga),
             "vp6" => Some(Self::Vp6),
             "asset-manifest" => Some(Self::AssetManifest),
+            "asset" => Some(Self::Asset),
             _ => None,
         }
     }
@@ -104,6 +109,7 @@ impl ResourceKind {
             Self::Tga => "tga",
             Self::Vp6 => "vp6",
             Self::AssetManifest => "asset-manifest",
+            Self::Asset => "asset",
         }
     }
 
@@ -123,6 +129,7 @@ impl ResourceKind {
             Self::Tga => cfg!(feature = "tga"),
             Self::Vp6 => cfg!(feature = "vp6"),
             Self::AssetManifest => cfg!(feature = "asset-manifest"),
+            Self::Asset => cfg!(feature = "asset"),
         }
     }
 }
@@ -174,6 +181,8 @@ pub enum Resource<'a> {
     Vp6(vp6::Vp6Info),
     /// BinaryAssetBuilder manifest header.
     AssetManifest(asset_manifest::AssetManifestInfo),
+    /// RA3 binary asset header.
+    Asset(asset::AssetInfo),
 }
 
 impl Resource<'_> {
@@ -193,6 +202,7 @@ impl Resource<'_> {
             Self::Tga(_) => ResourceKind::Tga,
             Self::Vp6(_) => ResourceKind::Vp6,
             Self::AssetManifest(_) => ResourceKind::AssetManifest,
+            Self::Asset(_) => ResourceKind::Asset,
         }
     }
 }
@@ -242,6 +252,9 @@ impl Resource<'_> {
             )),
             Self::AssetManifest(_) => Err(ResourceError::Unsupported(
                 "asset manifest is a header table; inspect fields".to_string(),
+            )),
+            Self::Asset(_) => Err(ResourceError::Unsupported(
+                "asset property values are opaque; inspect header".to_string(),
             )),
         }
     }
@@ -363,6 +376,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if extension_matches(extension, "asset") {
+        return Some(Identification {
+            kind: ResourceKind::Asset,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::Asset.enabled(),
+        });
+    }
     if extension_matches(extension, "manifest") {
         return Some(Identification {
             kind: ResourceKind::AssetManifest,
@@ -427,6 +447,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Tga => tga::parse(bytes).map(Resource::Tga),
         ResourceKind::Vp6 => vp6::parse(bytes).map(Resource::Vp6),
         ResourceKind::AssetManifest => asset_manifest::parse(bytes).map(Resource::AssetManifest),
+        ResourceKind::Asset => asset::parse(bytes).map(Resource::Asset),
     }
 }
 

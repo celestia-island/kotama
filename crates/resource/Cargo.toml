@@ -22,6 +22,7 @@ dds = []
 tga = []
 vp6 = []
 asset-manifest = []
+asset = []
 apt-geometry = []
 
 [dependencies]
