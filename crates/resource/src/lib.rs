@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 pub mod apt;
+pub mod apt_bin;
 pub mod apt_geometry;
 pub mod apt_image_map;
 pub mod apt_movie;
@@ -67,6 +68,8 @@ pub enum ResourceKind {
     Pak,
     /// RA3 .imp offset table.
     Imp,
+    /// RA3 .bin aggregate prefix.
+    AptBin,
 }
 
 impl ResourceKind {
@@ -93,6 +96,7 @@ impl ResourceKind {
             Self::PvzReanim => "pvz-reanim",
             Self::Pak => "pak",
             Self::Imp => "imp",
+            Self::AptBin => "apt-bin",
         }
     }
 
@@ -119,6 +123,7 @@ impl ResourceKind {
             "pvz-reanim" => Some(Self::PvzReanim),
             "pak" => Some(Self::Pak),
             "imp" => Some(Self::Imp),
+            "apt-bin" => Some(Self::AptBin),
             _ => None,
         }
     }
@@ -146,6 +151,7 @@ impl ResourceKind {
             Self::PvzReanim => "pvz-reanim",
             Self::Pak => "pak",
             Self::Imp => "imp",
+            Self::AptBin => "apt-bin",
         }
     }
 
@@ -172,6 +178,7 @@ impl ResourceKind {
             Self::PvzReanim => cfg!(feature = "pvz-reanim"),
             Self::Pak => cfg!(feature = "pak"),
             Self::Imp => cfg!(feature = "imp"),
+            Self::AptBin => cfg!(feature = "apt-bin"),
         }
     }
 }
@@ -237,6 +244,8 @@ pub enum Resource<'a> {
     Pak(pak::PopCapPak),
     /// RA3 .imp offset table.
     Imp(imp::ImpInfo),
+    /// RA3 .bin aggregate prefix.
+    AptBin(apt_bin::AptBinInfo),
 }
 
 impl Resource<'_> {
@@ -263,6 +272,7 @@ impl Resource<'_> {
             Self::PvzReanim(_) => ResourceKind::PvzReanim,
             Self::Pak(_) => ResourceKind::Pak,
             Self::Imp(_) => ResourceKind::Imp,
+            Self::AptBin(_) => ResourceKind::AptBin,
         }
     }
 }
@@ -333,6 +343,9 @@ impl Resource<'_> {
             )),
             Self::Imp(_) => Err(ResourceError::Unsupported(
                 "IMP offsets point to external data".to_string(),
+            )),
+            Self::AptBin(_) => Err(ResourceError::Unsupported(
+                "BIN aggregate payload is opaque".to_string(),
             )),
         }
     }
@@ -489,6 +502,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Imp.enabled(),
         });
     }
+    if extension_matches(extension, "bin") && apt_bin::has_marker(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::AptBin,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::AptBin.enabled(),
+        });
+    }
     if extension_matches(extension, "relo") {
         return Some(Identification {
             kind: ResourceKind::AssetRelocation,
@@ -576,6 +596,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::PvzReanim => pvz_reanim::parse(bytes).map(Resource::PvzReanim),
         ResourceKind::Pak => pak::parse(bytes).map(Resource::Pak),
         ResourceKind::Imp => imp::parse(bytes).map(Resource::Imp),
+        ResourceKind::AptBin => apt_bin::parse(bytes).map(Resource::AptBin),
     }
 }
 
