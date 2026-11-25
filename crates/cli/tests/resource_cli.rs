@@ -1097,6 +1097,30 @@ fn pak_filter_selects_entries() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+fn printable_strings_are_listed() {
+    let root = temp_dir("strings");
+    let source = root.join("sample.bin");
+    fs::write(&source, b"\x00REGION\x00Amsterdam_AM\x00x\x00").unwrap();
+    let output = kotama()
+        .args(["resource", "strings"])
+        .arg(&source)
+        .arg("--min-len")
+        .arg("4")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(facts["count"], 2);
+    assert_eq!(facts["strings"][0]["text"], "REGION");
+    assert_eq!(facts["strings"][1]["text"], "Amsterdam_AM");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
