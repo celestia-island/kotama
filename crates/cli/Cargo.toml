@@ -27,6 +27,7 @@ resource-tga = ["kotama-resource/tga"]
 resource-vp6 = ["kotama-resource/vp6"]
 resource-asset-manifest = ["kotama-resource/asset-manifest"]
 resource-asset = ["kotama-resource/asset"]
+resource-asset-relocation = ["kotama-resource/asset-relocation"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]
