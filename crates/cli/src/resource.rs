@@ -98,6 +98,22 @@ struct AptJson {
 }
 
 #[derive(Serialize)]
+struct CsfLabelJson {
+    name: String,
+    values: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CsfJson {
+    kind: &'static str,
+    version: u32,
+    label_count: u32,
+    string_count: u32,
+    language: u32,
+    labels: Vec<CsfLabelJson>,
+}
+
+#[derive(Serialize)]
 struct MeshJson {
     version: u32,
     attributes: u32,
@@ -134,7 +150,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -180,6 +196,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "chunks" => chunks_command(&args[1..]),
         "mesh" => mesh_command(&args[1..]),
         "apt" => apt_command(&args[1..]),
+        "csf" => csf_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -331,6 +348,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             chunks: None,
             apt_entry_offset: Some(file.apt_data_entry_offset),
             constants: Some(file.entries.len()),
+        },
+        Resource::Csf(file) => InfoJson {
+            kind: "csf",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: Some(file.labels.len()),
+            chunks: None,
+            apt_entry_offset: None,
+            constants: Some(file.string_count as usize),
         },
         Resource::AptGeometry(_) => InfoJson {
             kind: "apt-geometry",
@@ -624,6 +657,76 @@ fn apt_command(args: &[String]) -> ExitCode {
         apt_data_entry_offset: file.apt_data_entry_offset,
         count: file.entries.len(),
         entries,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn csf_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut limit = 200usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                limit = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Csf(file) = resource else {
+        return fail("csf requires a CSF string table");
+    };
+    let json = CsfJson {
+        kind: "csf",
+        version: file.version,
+        label_count: file.label_count,
+        string_count: file.string_count,
+        language: file.language,
+        labels: file
+            .labels
+            .iter()
+            .take(limit)
+            .map(|label| CsfLabelJson {
+                name: label.name.clone(),
+                values: label
+                    .strings
+                    .iter()
+                    .map(|value| value.value.clone())
+                    .collect(),
+            })
+            .collect(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
