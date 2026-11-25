@@ -1,0 +1,38 @@
+{
+  "config": {
+    "margin": 8,
+    "collapsed_width": 180,
+    "collapsed_height": 36,
+    "expanded_width": 280,
+    "title_height": 32,
+    "row_height": 32,
+    "padding": 8
+  },
+  "actions": [
+    {
+      "id": "demo.inspect",
+      "label": "Inspect target",
+      "shortcut": null,
+      "capability": "ReadOnly",
+      "enabled": true
+    },
+    {
+      "id": "demo.reset",
+      "label": "Example write action",
+      "shortcut": {
+        "modifiers": { "ctrl": true, "alt": false, "shift": false, "meta": false },
+        "key": { "Character": "R" }
+      },
+      "capability": "ReadWrite",
+      "enabled": true
+    },
+    {
+      "id": "demo.disabled",
+      "label": "Disabled example",
+      "shortcut": null,
+      "capability": "ReadOnly",
+      "enabled": false
+    }
+  ],
+  "capability": "ReadOnly"
+}

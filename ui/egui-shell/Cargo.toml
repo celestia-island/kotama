@@ -1,0 +1,20 @@
+[package]
+name = "kotama-overlay-egui"
+description = "Minimal egui hover toolbar consuming the shared kotama-overlay model."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+eframe = { version = "^0.37", default-features = false, features = ["default_fonts", "glow"] }
+egui = "^0.37"
+image = { version = "^0.25", default-features = false, features = ["png"] }
+kotama-overlay = { path = "../../crates/overlay" }
+serde_json = "^1"
+
+[[bin]]
+name = "kotama-overlay-egui"
+path = "src/main.rs"
