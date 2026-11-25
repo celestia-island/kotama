@@ -512,6 +512,43 @@ fn tga_header_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-vp6")]
+#[test]
+fn vp6_header_is_inspected() {
+    let root = temp_dir("vp6");
+    let source = root.join("movie.vp6");
+    let mut bytes = b"MVhd".to_vec();
+    bytes.extend_from_slice(&32u32.to_le_bytes());
+    bytes.extend_from_slice(b"vp60");
+    bytes.extend_from_slice(&1280u16.to_le_bytes());
+    bytes.extend_from_slice(&720u16.to_le_bytes());
+    bytes.extend_from_slice(&514u16.to_le_bytes());
+    bytes.extend_from_slice(&[0; 14]);
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "vp6");
+    assert_eq!(facts["basis"], "magic");
+
+    let vp6 = kotama()
+        .args(["resource", "vp6"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(vp6.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&vp6.stdout).unwrap();
+    assert_eq!(facts["width"], 1280);
+    assert_eq!(facts["height"], 720);
+    assert_eq!(facts["frame_count"], 514);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

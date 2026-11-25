@@ -20,6 +20,7 @@ apt-const = []
 csf = []
 dds = []
 tga = []
+vp6 = []
 apt-geometry = []
 
 [dependencies]
