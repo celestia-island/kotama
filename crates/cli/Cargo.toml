@@ -18,6 +18,7 @@ default = []
 resource-swf = ["kotama-resource/swf"]
 resource-vbs = ["kotama-resource/vbs"]
 resource-dos-com = ["kotama-resource/dos-com"]
+resource-big = ["kotama-resource/big"]
 
 [dependencies]
 kotama.workspace = true

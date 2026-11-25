@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
+pub mod big;
 pub mod dos_com;
 pub mod swf;
 pub mod vbs;
@@ -19,6 +20,8 @@ pub enum ResourceKind {
     Vbs,
     /// DOS COM image.
     DosCom,
+    /// EA BIG archive container (BIGF/BIG4).
+    Big,
 }
 
 impl ResourceKind {
@@ -29,6 +32,7 @@ impl ResourceKind {
             Self::Swf => "swf",
             Self::Vbs => "vbs",
             Self::DosCom => "dos-com",
+            Self::Big => "big",
         }
     }
 
@@ -39,6 +43,7 @@ impl ResourceKind {
             "swf" => Some(Self::Swf),
             "vbs" => Some(Self::Vbs),
             "dos-com" | "com" => Some(Self::DosCom),
+            "big" | "bigf" | "big4" => Some(Self::Big),
             _ => None,
         }
     }
@@ -50,6 +55,7 @@ impl ResourceKind {
             Self::Swf => "swf",
             Self::Vbs => "vbs",
             Self::DosCom => "dos-com",
+            Self::Big => "big",
         }
     }
 
@@ -60,6 +66,7 @@ impl ResourceKind {
             Self::Swf => cfg!(feature = "swf"),
             Self::Vbs => cfg!(feature = "vbs"),
             Self::DosCom => cfg!(feature = "dos-com"),
+            Self::Big => cfg!(feature = "big"),
         }
     }
 }
@@ -93,6 +100,8 @@ pub enum Resource<'a> {
     Vbs(vbs::VbsResource),
     /// DOS COM image.
     DosCom(dos_com::DosComResource<'a>),
+    /// EA BIG archive container.
+    Big(big::BigArchive<'a>),
 }
 
 impl Resource<'_> {
@@ -103,6 +112,7 @@ impl Resource<'_> {
             Self::Swf(_) => ResourceKind::Swf,
             Self::Vbs(_) => ResourceKind::Vbs,
             Self::DosCom(_) => ResourceKind::DosCom,
+            Self::Big(_) => ResourceKind::Big,
         }
     }
 }
@@ -126,6 +136,9 @@ impl Resource<'_> {
             Self::Swf(resource) => resource.extract(max_output_len),
             Self::Vbs(resource) => resource.extract(),
             Self::DosCom(resource) => resource.extract(),
+            Self::Big(_) => Err(ResourceError::Unsupported(
+                "BIG archive is a container; select an entry".to_string(),
+            )),
         }
     }
 }
@@ -188,6 +201,13 @@ fn extension_matches(extension: Option<&str>, wanted: &str) -> bool {
 /// Identify a resource from contents and an optional extension hint.
 #[must_use]
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification> {
+    if big::has_magic(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::Big,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::Big.enabled(),
+        });
+    }
     if swf::has_magic(bytes) {
         return Some(Identification {
             kind: ResourceKind::Swf,
@@ -236,6 +256,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Swf => swf::parse(bytes).map(Resource::Swf),
         ResourceKind::Vbs => vbs::parse(bytes).map(Resource::Vbs),
         ResourceKind::DosCom => dos_com::parse(bytes).map(Resource::DosCom),
+        ResourceKind::Big => big::parse(bytes).map(Resource::Big),
     }
 }
 
