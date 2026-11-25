@@ -1,0 +1,4 @@
+target/
+tauri-shell/node_modules/
+tauri-shell/dist/
+tauri-shell/src-tauri/gen/

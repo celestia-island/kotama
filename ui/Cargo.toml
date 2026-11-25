@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["egui-shell", "tauri-shell/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Celestia Island"]
+repository = "https://github.com/celestia-island/kotama"
+license-file = "../LICENSE"
+publish = false

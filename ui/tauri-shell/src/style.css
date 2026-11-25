@@ -1,0 +1,87 @@
+html,
+body,
+#app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+body {
+  user-select: none;
+}
+
+.toolbar {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid #2c3444;
+  border-radius: 8px;
+  background: rgb(24 28 36 / 96%);
+  color: #ecf0f8;
+}
+
+.title {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.brand {
+  flex: none;
+}
+
+.capability {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #2c3444;
+  color: #aeb8c8;
+  font-size: 10px;
+}
+
+.grant {
+  flex: none;
+  margin-left: auto;
+  color: #cfd6e4 !important;
+}
+
+.message {
+  overflow: hidden;
+  min-width: 0;
+  color: #8e9aac;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  left: 10px;
+  overflow: hidden;
+  margin: 0;
+  color: #ff8a8a;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rows {
+  position: absolute;
+  inset: 0;
+}
+
+.row {
+  position: absolute;
+  justify-content: flex-start;
+  padding: 0 8px;
+}

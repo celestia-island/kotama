@@ -8,10 +8,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Capability required to run an action.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 pub enum Capability {
     /// Observation only.
     ReadOnly,
@@ -31,7 +31,7 @@ impl Capability {
 }
 
 /// Keyboard key used by a shortcut.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Debug)]
 pub enum Key {
     /// A printable character, stored uppercase.
     Character(char),
@@ -78,7 +78,9 @@ impl Key {
 }
 
 /// Modifier state for a shortcut.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Debug)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize, Debug,
+)]
 pub struct Modifiers {
     /// Control.
     pub ctrl: bool,
@@ -91,7 +93,7 @@ pub struct Modifiers {
 }
 
 /// A normalized keyboard shortcut.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Debug)]
 pub struct Shortcut {
     /// Modifier state.
     pub modifiers: Modifiers,
@@ -170,7 +172,7 @@ impl Rect {
 }
 
 /// Toolbar geometry and row metrics.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct OverlayConfig {
     /// Distance from the top-left screen corner.
     pub margin: i32,
@@ -203,7 +205,7 @@ impl Default for OverlayConfig {
 }
 
 /// One action exposed by the host to the toolbar.
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ActionSpec {
     /// Stable opaque id interpreted by the host.
     pub id: String,
@@ -250,6 +252,17 @@ impl ActionSpec {
         self.enabled = false;
         self
     }
+}
+
+/// Complete shell input: config, action list and initial capability.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct OverlaySetup {
+    /// Geometry and row metrics.
+    pub config: OverlayConfig,
+    /// Actions in render order.
+    pub actions: Vec<ActionSpec>,
+    /// Initial capability; hosts normally start read-only.
+    pub capability: Capability,
 }
 
 /// A request to run one host action.
@@ -361,6 +374,14 @@ impl OverlayModel {
         })
     }
 
+    /// Build a model from a deserialized setup.
+    ///
+    /// # Errors
+    /// Returns [OverlayError] when ids or shortcuts collide.
+    pub fn from_setup(setup: OverlaySetup) -> Result<Self, OverlayError> {
+        Self::new(setup.config, setup.actions, setup.capability)
+    }
+
     /// Current action list.
     #[must_use]
     pub fn actions(&self) -> &[ActionSpec] {
@@ -419,6 +440,18 @@ impl OverlayModel {
         self.hovered = inside;
         self.expanded = inside;
         true
+    }
+
+    /// Expand programmatically (keyboard/accessibility or a capture harness).
+    pub fn expand(&mut self) {
+        self.expanded = true;
+        self.hovered = false;
+    }
+
+    /// Collapse programmatically.
+    pub fn collapse(&mut self) {
+        self.expanded = false;
+        self.hovered = false;
     }
 
     /// Feed a pointer leave. Returns true when the state changed.
@@ -629,6 +662,57 @@ mod tests {
             Capability::ReadOnly,
         );
         assert!(duplicate_shortcut.is_err());
+    }
+
+    #[test]
+    fn setup_json_round_trips_and_builds_a_model() {
+        let json = r#"{
+            "config": {
+                "margin": 8,
+                "collapsed_width": 180,
+                "collapsed_height": 36,
+                "expanded_width": 280,
+                "title_height": 32,
+                "row_height": 32,
+                "padding": 8
+            },
+            "actions": [
+                {
+                    "id": "demo.read",
+                    "label": "Inspect",
+                    "shortcut": null,
+                    "capability": "ReadOnly",
+                    "enabled": true
+                },
+                {
+                    "id": "demo.write",
+                    "label": "Write",
+                    "shortcut": { "modifiers": { "ctrl": true, "alt": false, "shift": false, "meta": false }, "key": { "Character": "W" } },
+                    "capability": "ReadWrite",
+                    "enabled": true
+                }
+            ],
+            "capability": "ReadOnly"
+        }"#;
+        let setup: OverlaySetup = serde_json::from_str(json).unwrap();
+        let model = OverlayModel::from_setup(setup).unwrap();
+        assert_eq!(model.actions().len(), 2);
+        assert_eq!(
+            model.authorize(&ActionRequest {
+                id: "demo.write".to_string()
+            }),
+            ActionOutcome::Denied {
+                required: Capability::ReadWrite,
+                granted: Capability::ReadOnly,
+            }
+        );
+        assert_eq!(
+            model
+                .shortcut(Shortcut::parse("Ctrl+W").unwrap())
+                .unwrap()
+                .id,
+            "demo.write"
+        );
     }
 
     #[test]
