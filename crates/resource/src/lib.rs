@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod apt;
 pub mod apt_geometry;
+pub mod apt_movie;
 pub mod asset;
 pub mod asset_manifest;
 pub mod asset_relocation;
@@ -52,6 +53,8 @@ pub enum ResourceKind {
     Asset,
     /// Compiled asset relocation table.
     AssetRelocation,
+    /// APT movie character.
+    AptMovie,
 }
 
 impl ResourceKind {
@@ -73,6 +76,7 @@ impl ResourceKind {
             Self::AssetManifest => "asset-manifest",
             Self::Asset => "asset",
             Self::AssetRelocation => "asset-relocation",
+            Self::AptMovie => "apt-movie",
         }
     }
 
@@ -94,6 +98,7 @@ impl ResourceKind {
             "asset-manifest" => Some(Self::AssetManifest),
             "asset" => Some(Self::Asset),
             "asset-relocation" => Some(Self::AssetRelocation),
+            "apt-movie" => Some(Self::AptMovie),
             _ => None,
         }
     }
@@ -116,6 +121,7 @@ impl ResourceKind {
             Self::AssetManifest => "asset-manifest",
             Self::Asset => "asset",
             Self::AssetRelocation => "asset-relocation",
+            Self::AptMovie => "apt-movie",
         }
     }
 
@@ -137,6 +143,7 @@ impl ResourceKind {
             Self::AssetManifest => cfg!(feature = "asset-manifest"),
             Self::Asset => cfg!(feature = "asset"),
             Self::AssetRelocation => cfg!(feature = "asset-relocation"),
+            Self::AptMovie => cfg!(feature = "apt-movie"),
         }
     }
 }
@@ -192,6 +199,8 @@ pub enum Resource<'a> {
     Asset(asset::AssetInfo),
     /// Compiled asset relocation table.
     AssetRelocation(asset_relocation::AssetRelocation),
+    /// APT movie character.
+    AptMovie(apt_movie::AptMovieInfo),
 }
 
 impl Resource<'_> {
@@ -213,6 +222,7 @@ impl Resource<'_> {
             Self::AssetManifest(_) => ResourceKind::AssetManifest,
             Self::Asset(_) => ResourceKind::Asset,
             Self::AssetRelocation(_) => ResourceKind::AssetRelocation,
+            Self::AptMovie(_) => ResourceKind::AptMovie,
         }
     }
 }
@@ -268,6 +278,9 @@ impl Resource<'_> {
             )),
             Self::AssetRelocation(_) => Err(ResourceError::Unsupported(
                 "relocation entries are opaque; inspect table".to_string(),
+            )),
+            Self::AptMovie(_) => Err(ResourceError::Unsupported(
+                "APT movie frames are opaque; inspect header".to_string(),
             )),
         }
     }
@@ -389,6 +402,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if extension_matches(extension, "apt") {
+        return Some(Identification {
+            kind: ResourceKind::AptMovie,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::AptMovie.enabled(),
+        });
+    }
     if extension_matches(extension, "relo") {
         return Some(Identification {
             kind: ResourceKind::AssetRelocation,
@@ -471,6 +491,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::AssetRelocation => {
             asset_relocation::parse(bytes).map(Resource::AssetRelocation)
         }
+        ResourceKind::AptMovie => apt_movie::parse(bytes, 16).map(Resource::AptMovie),
     }
 }
 

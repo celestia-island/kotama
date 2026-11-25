@@ -149,6 +149,27 @@ struct AssetJson {
 }
 
 #[derive(Serialize)]
+struct AptCharacterJson {
+    offset: u32,
+    type_id: u32,
+    type_name: &'static str,
+}
+
+#[derive(Serialize)]
+struct AptMovieJson {
+    kind: &'static str,
+    entry_offset: usize,
+    frame_count: u32,
+    character_count: u32,
+    screen_width: u32,
+    screen_height: u32,
+    milliseconds_per_frame: u32,
+    import_count: u32,
+    export_count: u32,
+    characters: Vec<AptCharacterJson>,
+}
+
+#[derive(Serialize)]
 struct RelocationEntryJson {
     kind: u32,
     offset: u32,
@@ -282,7 +303,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -335,6 +356,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "manifest" => manifest_command(&args[1..]),
         "asset" => asset_command(&args[1..]),
         "relocation" => relocation_command(&args[1..]),
+        "apt-movie" => apt_movie_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -601,6 +623,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::AssetRelocation(_) => InfoJson {
             kind: "asset-relocation",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptMovie(_) => InfoJson {
+            kind: "apt-movie",
             compression: None,
             version: None,
             declared_length: None,
@@ -1418,6 +1456,74 @@ fn relocation_command(args: &[String]) -> ExitCode {
             .map(|entry| RelocationEntryJson {
                 kind: entry.kind,
                 offset: entry.offset,
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn apt_movie_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut entry_offset = 16usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--entry-offset" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                entry_offset = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return usage(),
+                };
+                index += 1;
+            }
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "apt-movie" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let info = match kotama_resource::apt_movie::parse(&bytes, entry_offset) {
+        Ok(info) => info,
+        Err(error) => return fail_kind(&error),
+    };
+    let json = AptMovieJson {
+        kind: "apt-movie",
+        entry_offset: info.entry_offset,
+        frame_count: info.frame_count,
+        character_count: info.character_count,
+        screen_width: info.screen_width,
+        screen_height: info.screen_height,
+        milliseconds_per_frame: info.milliseconds_per_frame,
+        import_count: info.import_count,
+        export_count: info.export_count,
+        characters: info
+            .characters
+            .iter()
+            .map(|character| AptCharacterJson {
+                offset: character.offset,
+                type_id: character.type_id,
+                type_name: character.type_name,
             })
             .collect(),
     };
