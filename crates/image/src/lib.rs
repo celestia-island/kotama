@@ -210,6 +210,27 @@ pub struct DataDirectory {
     pub size: u64,
 }
 
+/// 一条 PE 资源记录（类型 → 名称/ID → language 的叶子）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PeResource {
+    /// 资源类型 ID；命名类型时为 0。
+    pub type_id: u32,
+    /// 命名资源类型（UTF-16 名称已解码）。
+    pub type_name: Option<String>,
+    /// 资源 ID；命名资源时为 0。
+    pub id: u32,
+    /// 命名资源（UTF-16 名称已解码）。
+    pub name: Option<String>,
+    /// 语言 ID。
+    pub language: u32,
+    /// 数据项 CodePage。
+    pub code_page: u32,
+    /// 资源数据 RVA。
+    pub rva: u64,
+    /// 资源数据字节数。
+    pub size: u64,
+}
+
 /// PE CodeView/RSDS 与 PDB 共有的身份。
 ///
 /// `guid` 使用 UUID canonical 字节序（RSDS 的前三个小端字段已归一），
@@ -286,6 +307,8 @@ pub struct LoadedModule {
     pub debug_functions: Vec<SymbolInfo>,
     /// PE exception directory（DataDirectory 索引 3）；不依赖节名。
     pub exception_directory: Option<DataDirectory>,
+    /// PE 资源目录中的叶子资源（DataDirectory 索引 2）。
+    pub resources: Vec<PeResource>,
     /// PE CodeView/RSDS 中的伴生 PDB 身份。
     pub pdb_identity: Option<PdbIdentity>,
     /// 归一基址（ELF = 最小 LOAD 段 vaddr；PE = ImageBase）。解码文件里的原始指针时
@@ -422,6 +445,211 @@ fn pe_data_directory(data: &[u8], container: Container, index: u32) -> Option<Da
     let rva = u64::from(read_u32(entry)?);
     let size = u64::from(read_u32(entry.checked_add(4)?)?);
     (rva != 0 && size != 0).then_some(DataDirectory { rva, size })
+}
+
+fn resource_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    bytes
+        .get(offset..offset.checked_add(2)?)
+        .map(|raw| u16::from_le_bytes([raw[0], raw[1]]))
+}
+
+fn resource_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .map(|raw| u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn resource_name(
+    data: &[u8],
+    backing: &[BackingRange],
+    base: u64,
+    offset: u32,
+    limit: u64,
+) -> Option<String> {
+    let relative = u64::from(offset & 0x7fff_ffff);
+    if relative.checked_add(2)? > limit {
+        return None;
+    }
+    let header = read_backed(data, backing, base.checked_add(relative)?, 2)?;
+    let length = resource_u16(header, 0)? as usize;
+    let total = 2usize.checked_add(length.checked_mul(2)?)?;
+    if relative.checked_add(total as u64)? > limit {
+        return None;
+    }
+    let bytes = read_backed(data, backing, base.checked_add(relative)?, total)?;
+    let mut units = Vec::with_capacity(length);
+    for index in 0..length {
+        let offset = 2 + index * 2;
+        units.push(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]));
+    }
+    String::from_utf16(&units).ok()
+}
+
+fn resource_directory(
+    data: &[u8],
+    backing: &[BackingRange],
+    base: u64,
+    offset: u64,
+    limit: u64,
+) -> Option<(u16, u16)> {
+    if offset.checked_add(16)? > limit {
+        return None;
+    }
+    let bytes = read_backed(data, backing, base.checked_add(offset)?, 16)?;
+    Some((resource_u16(bytes, 12)?, resource_u16(bytes, 14)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_resource_directory(
+    data: &[u8],
+    backing: &[BackingRange],
+    base: u64,
+    offset: u64,
+    limit: u64,
+    depth: u8,
+    type_id: u32,
+    type_name: Option<&str>,
+    resource_id: u32,
+    resource_name_value: Option<&str>,
+    output: &mut Vec<PeResource>,
+    visited: &mut Vec<u64>,
+) {
+    if depth > 2 || visited.contains(&offset) {
+        return;
+    }
+    visited.push(offset);
+    let Some((named, identified)) = resource_directory(data, backing, base, offset, limit) else {
+        return;
+    };
+    let count = named.saturating_add(identified);
+    for index in 0..count {
+        let entry_offset = offset
+            .checked_add(16)
+            .and_then(|value| value.checked_add(u64::from(index) * 8));
+        let Some(entry_offset) = entry_offset else {
+            continue;
+        };
+        if entry_offset.checked_add(8).is_none_or(|end| end > limit) {
+            continue;
+        }
+        let Some(entry) = read_backed(data, backing, base.saturating_add(entry_offset), 8) else {
+            continue;
+        };
+        let name_or_id = resource_u32(entry, 0).unwrap_or(0);
+        let child = resource_u32(entry, 4).unwrap_or(0) & 0x7fff_ffff;
+        let is_directory = resource_u32(entry, 4).unwrap_or(0) & 0x8000_0000 != 0;
+        let has_name = name_or_id & 0x8000_0000 != 0;
+        let entry_name = has_name
+            .then(|| resource_name(data, backing, base, name_or_id, limit))
+            .flatten();
+        let entry_id = if has_name { 0 } else { name_or_id };
+        if is_directory {
+            let child_offset = u64::from(child);
+            if child_offset >= limit {
+                continue;
+            }
+            let next_type_id = if depth == 0 { entry_id } else { type_id };
+            let next_resource_id = if depth == 1 { entry_id } else { resource_id };
+            let next_type_name = if depth == 0 {
+                entry_name.clone()
+            } else {
+                type_name.map(ToOwned::to_owned)
+            };
+            let next_resource_name = if depth == 1 {
+                entry_name.clone()
+            } else {
+                resource_name_value.map(ToOwned::to_owned)
+            };
+            walk_resource_directory(
+                data,
+                backing,
+                base,
+                child_offset,
+                limit,
+                depth + 1,
+                next_type_id,
+                next_type_name.as_deref(),
+                next_resource_id,
+                next_resource_name.as_deref(),
+                output,
+                visited,
+            );
+        } else if depth == 2 {
+            let data_offset = u64::from(child);
+            if data_offset.checked_add(16).is_none_or(|end| end > limit) {
+                continue;
+            }
+            let Some(record) = read_backed(data, backing, base.saturating_add(data_offset), 16)
+            else {
+                continue;
+            };
+            let rva = resource_u32(record, 0).unwrap_or(0);
+            let size = resource_u32(record, 4).unwrap_or(0);
+            if rva == 0 || size == 0 {
+                continue;
+            }
+            output.push(PeResource {
+                type_id,
+                type_name: type_name.map(ToOwned::to_owned),
+                id: resource_id,
+                name: resource_name_value.map(ToOwned::to_owned),
+                language: if has_name { 0 } else { name_or_id },
+                code_page: resource_u32(record, 8).unwrap_or(0),
+                rva: u64::from(rva),
+                size: u64::from(size),
+            });
+        }
+    }
+}
+
+fn parse_resource_tree(
+    data: &[u8],
+    backing: &[BackingRange],
+    directory: DataDirectory,
+) -> Vec<PeResource> {
+    let limit = directory.size;
+    let mut resources = Vec::new();
+    let mut visited = Vec::new();
+    walk_resource_directory(
+        data,
+        backing,
+        directory.rva,
+        0,
+        limit,
+        0,
+        0,
+        None,
+        0,
+        None,
+        &mut resources,
+        &mut visited,
+    );
+    resources.sort_by(|a, b| {
+        (
+            a.type_name.as_deref().unwrap_or_default(),
+            a.type_id,
+            a.name.as_deref().unwrap_or_default(),
+            a.id,
+            a.language,
+            a.rva,
+        )
+            .cmp(&(
+                b.type_name.as_deref().unwrap_or_default(),
+                b.type_id,
+                b.name.as_deref().unwrap_or_default(),
+                b.id,
+                b.language,
+                b.rva,
+            ))
+    });
+    resources.dedup_by(|a, b| a == b);
+    resources
+}
+
+fn pe_resources(data: &[u8], backing: &[BackingRange], container: Container) -> Vec<PeResource> {
+    pe_data_directory(data, container, 2)
+        .map(|directory| parse_resource_tree(data, backing, directory))
+        .unwrap_or_default()
 }
 
 /// 从文件背书范围读取 RVA；与 FileAddressSpace 一样不跨范围。
@@ -877,6 +1105,7 @@ impl LoadedModule {
         let debug_functions = dwarf_functions(file, base);
         let exception_directory = pe_data_directory(data, container, 3);
         let pdb_identity = pe_pdb_identity(data, &backing, container);
+        let resources = pe_resources(data, &backing, container);
 
         Ok(Self {
             container,
@@ -889,6 +1118,7 @@ impl LoadedModule {
             imports,
             debug_functions,
             exception_directory,
+            resources,
             pdb_identity,
             image_base: base,
             relative_relocations,
@@ -932,6 +1162,43 @@ mod tests {
         assert!(module.entry_rva.is_some());
         assert!(module.symbols.iter().any(|s| s.name == "main"));
         assert!(!module.segments.is_empty());
+    }
+
+    #[test]
+    fn pe_resource_tree_is_flattened_and_sorted() {
+        let mut data = vec![0u8; 96];
+        data[12..14].copy_from_slice(&0u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16..20].copy_from_slice(&3u32.to_le_bytes());
+        data[20..24].copy_from_slice(&(0x8000_0000u32 | 24).to_le_bytes());
+        data[24 + 12..24 + 14].copy_from_slice(&0u16.to_le_bytes());
+        data[24 + 14..24 + 16].copy_from_slice(&1u16.to_le_bytes());
+        data[40..44].copy_from_slice(&1u32.to_le_bytes());
+        data[44..48].copy_from_slice(&(0x8000_0000u32 | 48).to_le_bytes());
+        data[48 + 12..48 + 14].copy_from_slice(&0u16.to_le_bytes());
+        data[48 + 14..48 + 16].copy_from_slice(&1u16.to_le_bytes());
+        data[64..68].copy_from_slice(&1033u32.to_le_bytes());
+        data[68..72].copy_from_slice(&80u32.to_le_bytes());
+        data[80..84].copy_from_slice(&0x2000u32.to_le_bytes());
+        data[84..88].copy_from_slice(&4u32.to_le_bytes());
+        data[88..92].copy_from_slice(&1252u32.to_le_bytes());
+        let backing = [BackingRange {
+            rva: 0x1000,
+            size: 96,
+            offset: 0,
+        }];
+        let directory = DataDirectory {
+            rva: 0x1000,
+            size: 96,
+        };
+        let resources = parse_resource_tree(&data, &backing, directory);
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].type_id, 3);
+        assert_eq!(resources[0].id, 1);
+        assert_eq!(resources[0].language, 1033);
+        assert_eq!(resources[0].code_page, 1252);
+        assert_eq!(resources[0].rva, 0x2000);
+        assert_eq!(resources[0].size, 4);
     }
 
     #[test]
