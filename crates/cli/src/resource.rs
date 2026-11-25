@@ -51,6 +51,7 @@ struct EntriesJson<'a> {
 #[derive(Serialize)]
 struct ChunkJson {
     type_id: u32,
+    name: Option<&'static str>,
     depth: u8,
     offset: u64,
     size: u32,
@@ -395,6 +396,7 @@ fn chunks_command(args: &[String]) -> ExitCode {
         .take(limit)
         .map(|chunk| ChunkJson {
             type_id: chunk.type_id,
+            name: kotama_resource::w3d::chunk_name(chunk.type_id),
             depth: chunk.depth,
             offset: chunk.offset,
             size: chunk.size,
