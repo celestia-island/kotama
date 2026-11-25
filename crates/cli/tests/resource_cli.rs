@@ -1059,6 +1059,44 @@ fn pak_is_repacked_from_directory() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-pak")]
+#[test]
+fn pak_filter_selects_entries() {
+    let root = temp_dir("pak-filter");
+    let source = root.join("sample.pak");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0xBAC0_4AC0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    for (name, body) in [(&b"alpha"[..], &b"aaa"[..]), (&b"beta"[..], &b"bbb"[..])] {
+        data.push(0);
+        data.push(name.len() as u8);
+        data.extend_from_slice(name);
+        data.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+    }
+    data.push(0xFF);
+    data.extend_from_slice(b"aaabbb");
+    let encrypted: Vec<u8> = data.iter().map(|byte| byte ^ 0xF7).collect();
+    fs::write(&source, &encrypted).unwrap();
+
+    let filtered = kotama()
+        .args(["resource", "pak"])
+        .arg(&source)
+        .arg("--filter")
+        .arg("BET")
+        .output()
+        .unwrap();
+    assert!(
+        filtered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    assert_eq!(facts["files"], 1);
+    assert_eq!(facts["entries"][0]["name"], "beta");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

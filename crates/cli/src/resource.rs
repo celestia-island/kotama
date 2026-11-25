@@ -397,7 +397,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -1826,6 +1826,7 @@ fn pak_command(args: &[String]) -> ExitCode {
         return usage();
     };
     let mut limit = 20usize;
+    let mut filter: Option<String> = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -1837,6 +1838,13 @@ fn pak_command(args: &[String]) -> ExitCode {
                     Ok(value) => value,
                     Err(_) => return usage(),
                 };
+                index += 1;
+            }
+            "--filter" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                filter = Some(value.to_ascii_lowercase());
                 index += 1;
             }
             "--kind" => {
@@ -1860,13 +1868,21 @@ fn pak_command(args: &[String]) -> ExitCode {
         Ok(pak) => pak,
         Err(error) => return fail_kind(&error),
     };
+    let filtered: Vec<_> = pak
+        .entries
+        .iter()
+        .filter(|entry| {
+            filter
+                .as_ref()
+                .is_none_or(|filter| entry.name.to_ascii_lowercase().contains(filter))
+        })
+        .collect();
     let json = PakJson {
         kind: "pak",
-        files: pak.entries.len(),
-        bytes: pak.entries.iter().map(|entry| u64::from(entry.size)).sum(),
-        entries: pak
-            .entries
-            .iter()
+        files: filtered.len(),
+        bytes: filtered.iter().map(|entry| u64::from(entry.size)).sum(),
+        entries: filtered
+            .into_iter()
             .take(limit)
             .map(|entry| PakEntryJson {
                 name: entry.name.clone(),
@@ -1983,6 +1999,7 @@ fn pak_extract_all_command(args: &[String]) -> ExitCode {
     };
     let mut output_dir: Option<PathBuf> = None;
     let mut limit = usize::MAX;
+    let mut filter: Option<String> = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -2001,6 +2018,13 @@ fn pak_extract_all_command(args: &[String]) -> ExitCode {
                     Ok(value) => value,
                     Err(_) => return usage(),
                 };
+                index += 1;
+            }
+            "--filter" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                filter = Some(value.to_ascii_lowercase());
                 index += 1;
             }
             _ => return usage(),
@@ -2031,6 +2055,11 @@ fn pak_extract_all_command(args: &[String]) -> ExitCode {
     let mut written = 0usize;
     let mut bytes_written = 0u64;
     for entry in pak.entries.iter().take(limit) {
+        if let Some(filter) = &filter {
+            if !entry.name.to_ascii_lowercase().contains(filter) {
+                continue;
+            }
+        }
         let Some(destination) = safe_pak_path(&root, &entry.name) else {
             return fail("refusing unsafe PAK entry path");
         };
