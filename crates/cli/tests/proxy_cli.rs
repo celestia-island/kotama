@@ -283,5 +283,86 @@ int main(void) {
             .count(),
         2
     );
+
+    let out_mixed = root.join("mixed");
+    let mixed_output = Command::new(env!("CARGO_BIN_EXE_kotama"))
+        .args(["proxy", "generate"])
+        .arg(&original)
+        .arg("--output")
+        .arg(&out_mixed)
+        .arg("--backing")
+        .arg("original_real.dll")
+        .args(["--override", "Alpha", "--log-ordinal", "6", "--hooks"])
+        .arg(&hooks)
+        .arg("--build")
+        .env("KOTAMA_ZIG", &zig)
+        .output()
+        .expect("generate mixed mirror");
+    assert!(
+        mixed_output.status.success(),
+        "mixed generation failed:\n{}\n{}",
+        String::from_utf8_lossy(&mixed_output.stdout),
+        String::from_utf8_lossy(&mixed_output.stderr)
+    );
+    fs::copy(&original, out_mixed.join("original_real.dll")).unwrap();
+    write(
+        &out_mixed.join("client_mixed.c"),
+        r#"#include <windows.h>
+int main(void) {
+    HMODULE module = LoadLibraryW(L"mirror.dll");
+    if (!module) return 40;
+    int (__cdecl *alpha)(void) = (int (__cdecl *)(void))GetProcAddress(module, "Alpha");
+    int (__cdecl *alias)(void) = (int (__cdecl *)(void))GetProcAddress(module, "Alias");
+    int (__cdecl *plain)(void) = (int (__cdecl *)(void))GetProcAddress(module, (LPCSTR)7);
+    if (!alpha || !alias || !plain) return 41;
+    if (alpha() != 99 || alias() != 42 || plain() != 7) return 42;
+    Sleep(300);
+    return 0;
+}
+"#,
+    );
+    run(cc(&zig, target)
+        .arg("-o")
+        .arg(out_mixed.join("client.exe"))
+        .arg(out_mixed.join("client_mixed.c")));
+    let mixed_log = out_mixed.join("calls.txt");
+    run(Command::new(out_mixed.join("client.exe"))
+        .current_dir(&out_mixed)
+        .env("KOTAMA_PROXY_LOG", &mixed_log));
+    let mut text = String::new();
+    for _ in 0..40 {
+        text = fs::read_to_string(&mixed_log).unwrap_or_default();
+        if text.contains("ord=6") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(text.contains("ord=6"), "log missing ordinal 6: {text:?}");
+    assert!(
+        !text.contains("ord=5"),
+        "override was also logged: {text:?}"
+    );
+    let mixed_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(out_mixed.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(mixed_manifest["override_count"], 1);
+    assert_eq!(mixed_manifest["log_count"], 1);
+    assert_eq!(
+        mixed_manifest["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|export| export["action"] == "override")
+            .count(),
+        1
+    );
+    assert_eq!(
+        mixed_manifest["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|export| export["action"] == "log")
+            .count(),
+        1
+    );
     fs::remove_dir_all(&root).unwrap();
 }

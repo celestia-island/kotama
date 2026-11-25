@@ -420,12 +420,6 @@ fn generate(args: &[String]) -> ExitCode {
         library: "mirror.dll".to_string(),
         backing,
     };
-    if !selection.is_empty() && !logs.is_empty() {
-        return fail("overrides and logs cannot be combined in one mirror yet");
-    }
-    if !logs.is_empty() && hooks.is_some() {
-        return fail("--hooks only applies to overrides");
-    }
     if selection.is_empty() && hooks.is_some() {
         return fail("--hooks requires at least one --override or --override-ordinal");
     }
@@ -451,6 +445,17 @@ fn generate(args: &[String]) -> ExitCode {
         } else {
             Some(plan_logs(&table, &logs).map_err(|error| error.to_string())?)
         };
+        if let (Some(overrides), Some(entry_logs)) = (plan.as_ref(), log_plan.as_ref()) {
+            if let Some(ordinal) = overrides
+                .symbols()
+                .keys()
+                .find(|ordinal| entry_logs.symbols().contains_key(ordinal))
+            {
+                return Err(format!(
+                    "ordinal {ordinal} cannot be both overridden and logged"
+                ));
+            }
+        }
         if let Some(plan) = log_plan.as_ref() {
             for warning in plan.warnings() {
                 eprintln!("kotama: proxy: warning: {warning}");
