@@ -18,6 +18,8 @@ pub struct AssetManifestInfo {
     pub stream_checksum: u32,
     /// Hash over all types.
     pub all_types_hash: u32,
+    /// Asset count.
+    pub asset_count: u32,
     /// Total instance data size.
     pub total_instance_data_size: u32,
     /// Maximum instance chunk size.
@@ -34,8 +36,6 @@ pub struct AssetManifestInfo {
     pub asset_name_buffer_size: u32,
     /// Source-file-name buffer size.
     pub source_file_name_buffer_size: u32,
-    /// Trailing u32 after the known fields.
-    pub tail: u32,
     /// NUL-separated printable names found after the header.
     pub names: Vec<String>,
 }
@@ -109,32 +109,33 @@ pub fn parse(bytes: &[u8]) -> Result<AssetManifestInfo, ResourceError> {
         all_types_hash: u32_at(bytes, 8).ok_or_else(|| {
             ResourceError::Invalid("manifest type hash is unreadable".to_string())
         })?,
-        total_instance_data_size: u32_at(bytes, 12).ok_or_else(|| {
+        asset_count: u32_at(bytes, 12).ok_or_else(|| {
+            ResourceError::Invalid("manifest asset count is unreadable".to_string())
+        })?,
+        total_instance_data_size: u32_at(bytes, 16).ok_or_else(|| {
             ResourceError::Invalid("manifest instance size is unreadable".to_string())
         })?,
-        max_instance_chunk_size: u32_at(bytes, 16).ok_or_else(|| {
+        max_instance_chunk_size: u32_at(bytes, 20).ok_or_else(|| {
             ResourceError::Invalid("manifest instance chunk size is unreadable".to_string())
         })?,
-        max_relocation_chunk_size: u32_at(bytes, 20).ok_or_else(|| {
+        max_relocation_chunk_size: u32_at(bytes, 24).ok_or_else(|| {
             ResourceError::Invalid("manifest relocation chunk size is unreadable".to_string())
         })?,
-        max_imports_chunk_size: u32_at(bytes, 24).ok_or_else(|| {
+        max_imports_chunk_size: u32_at(bytes, 28).ok_or_else(|| {
             ResourceError::Invalid("manifest imports chunk size is unreadable".to_string())
         })?,
-        asset_reference_buffer_size: u32_at(bytes, 28).ok_or_else(|| {
+        asset_reference_buffer_size: u32_at(bytes, 32).ok_or_else(|| {
             ResourceError::Invalid("manifest reference buffer size is unreadable".to_string())
         })?,
-        referenced_manifest_name_buffer_size: u32_at(bytes, 32).ok_or_else(|| {
+        referenced_manifest_name_buffer_size: u32_at(bytes, 36).ok_or_else(|| {
             ResourceError::Invalid("manifest name buffer size is unreadable".to_string())
         })?,
-        asset_name_buffer_size: u32_at(bytes, 36).ok_or_else(|| {
+        asset_name_buffer_size: u32_at(bytes, 40).ok_or_else(|| {
             ResourceError::Invalid("manifest asset-name buffer size is unreadable".to_string())
         })?,
-        source_file_name_buffer_size: u32_at(bytes, 40).ok_or_else(|| {
+        source_file_name_buffer_size: u32_at(bytes, 44).ok_or_else(|| {
             ResourceError::Invalid("manifest source-name buffer size is unreadable".to_string())
         })?,
-        tail: u32_at(bytes, 44)
-            .ok_or_else(|| ResourceError::Invalid("manifest tail is unreadable".to_string()))?,
         names,
     })
 }
@@ -149,13 +150,15 @@ mod tests {
         bytes[1] = 1;
         bytes[2..4].copy_from_slice(&6u16.to_le_bytes());
         bytes[12..16].copy_from_slice(&13u32.to_le_bytes());
-        bytes[40..44].copy_from_slice(&487u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&3_303_040u32.to_le_bytes());
+        bytes[44..48].copy_from_slice(&487u32.to_le_bytes());
         bytes.extend_from_slice(b"AptAptData:Foo\0source.xml\0");
         let info = parse(&bytes).unwrap();
         assert!(!info.big_endian);
         assert!(info.linked);
         assert_eq!(info.version, 6);
-        assert_eq!(info.total_instance_data_size, 13);
+        assert_eq!(info.asset_count, 13);
+        assert_eq!(info.total_instance_data_size, 3_303_040);
         assert_eq!(info.source_file_name_buffer_size, 487);
         assert_eq!(info.names, vec!["AptAptData:Foo", "source.xml"]);
     }
