@@ -611,16 +611,31 @@ fn asset_header_is_inspected() {
     let mut bytes = vec![0u8; 36];
     bytes[0..16].copy_from_slice(&[1u8; 16]);
     bytes[20..24].copy_from_slice(&856u32.to_le_bytes());
-    bytes[24..28].copy_from_slice(&2u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&4u32.to_le_bytes());
     bytes[32..36].copy_from_slice(&37u32.to_le_bytes());
     bytes.extend_from_slice(b"ArmorTemplate:JapanHiveGeneratorArmorA");
     bytes.extend_from_slice(&[0; 3]);
     bytes.extend_from_slice(b"DATA:civilian/tokyo_harbor_th/buildings/th_japanhivegenerator.xml");
-    for value in [0xffe88740u32, 0x645864f3, 24, 0x6c827073, 0x5d448fd8, 28] {
+    for value in [
+        0xffe88740u32,
+        0x645864f3,
+        48,
+        0x6c827073,
+        0x5d448fd8,
+        52,
+        0x11111111,
+        0x22222222,
+        56,
+        0x33333333,
+        0x44444444,
+        60,
+    ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     bytes.extend_from_slice(&1.0f32.to_le_bytes());
     bytes.extend_from_slice(&24u32.to_le_bytes());
+    bytes.extend_from_slice(&[1, 0, 0, 0]);
+    bytes.extend_from_slice(&7u32.to_le_bytes());
     fs::write(&source, &bytes).unwrap();
 
     let identify = kotama()
@@ -641,7 +656,7 @@ fn asset_header_is_inspected() {
     assert!(asset.status.success());
     let facts: serde_json::Value = serde_json::from_slice(&asset.stdout).unwrap();
     assert_eq!(facts["data_size"], 856);
-    assert_eq!(facts["property_count"], 2);
+    assert_eq!(facts["property_count"], 4);
     assert_eq!(facts["type_name"], "ArmorTemplate:JapanHiveGeneratorArmorA");
     assert_eq!(
         facts["data_path"],
@@ -649,12 +664,12 @@ fn asset_header_is_inspected() {
     );
     assert_eq!(facts["properties"][0]["name_hash"], 0xffe88740u64);
     assert_eq!(facts["properties"][0]["type_hash"], 0x645864f3u64);
-    assert_eq!(facts["properties"][0]["value_or_offset"], 24u64);
+    assert_eq!(facts["properties"][0]["value_or_offset"], 48u64);
 
     let map = root.join("hash-map.tsv");
     fs::write(
         &map,
-        b"4293429056\tDefault\n1683514611\tfloat_t\n1820487795\tCount\n1564774360\tsize_t\n",
+        b"4293429056\tDefault\n1683514611\tfloat_t\n1820487795\tCount\n1564774360\tsize_t\n286331153\tIsTrainable\n572662306\tbool\n858993459\tFlags\n1145324612\tuint32_t\n",
     )
     .unwrap();
     let resolved = kotama()
@@ -672,6 +687,12 @@ fn asset_header_is_inspected() {
     assert_eq!(facts["properties"][1]["name"], "Count");
     assert_eq!(facts["properties"][1]["property_type"], "size_t");
     assert_eq!(facts["properties"][1]["value"], 24);
+    assert_eq!(facts["properties"][2]["name"], "IsTrainable");
+    assert_eq!(facts["properties"][2]["property_type"], "bool");
+    assert_eq!(facts["properties"][2]["value"], true);
+    assert_eq!(facts["properties"][3]["name"], "Flags");
+    assert_eq!(facts["properties"][3]["property_type"], "uint32_t");
+    assert_eq!(facts["properties"][3]["value"], 7);
     fs::remove_dir_all(&root).unwrap();
 }
 

@@ -1210,18 +1210,33 @@ fn asset_property_value(
     property_type: Option<&str>,
     raw: u32,
 ) -> Option<serde_json::Value> {
+    let value_at = |size: usize| -> Option<&[u8]> {
+        let start = table_offset.checked_add(raw as usize)?;
+        bytes.get(start..start.checked_add(size)?)
+    };
     match property_type {
         Some("float_t") => {
-            let start = table_offset.checked_add(raw as usize)?;
-            let value =
-                f32::from_le_bytes(bytes.get(start..start.checked_add(4)?)?.try_into().ok()?);
+            let value = f32::from_le_bytes(value_at(4)?.try_into().ok()?);
             (value.is_finite()).then(|| serde_json::json!(value))
         }
-        Some("size_t") => {
-            let start = table_offset.checked_add(raw as usize)?;
-            let value =
-                u32::from_le_bytes(bytes.get(start..start.checked_add(4)?)?.try_into().ok()?);
+        Some(
+            "size_t" | "uint32_t" | "KindOfBitFlags" | "RadarPriorityType" | "EditorSortingType",
+        ) => {
+            let value = u32::from_le_bytes(value_at(4)?.try_into().ok()?);
             Some(serde_json::json!(value))
+        }
+        Some("bool") => Some(serde_json::json!(value_at(1)?[0] != 0)),
+        Some(kind)
+            if kind.ends_with("WeakRef") || kind.ends_with("Ref") || kind.ends_with("Nugget") =>
+        {
+            let raw = value_at(8)?;
+            let type_id = u32::from_le_bytes(raw[0..4].try_into().ok()?);
+            let instance_id = u32::from_le_bytes(raw[4..8].try_into().ok()?);
+            if type_id == 0 && instance_id == 0 {
+                Some(serde_json::Value::Null)
+            } else {
+                Some(serde_json::json!({ "type_id": type_id, "instance_id": instance_id }))
+            }
         }
         _ => Some(serde_json::json!(raw)),
     }
