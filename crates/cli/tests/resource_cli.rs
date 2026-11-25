@@ -1009,6 +1009,56 @@ fn pak_extract_all_rejects_parent_traversal() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-pak")]
+#[test]
+fn pak_is_repacked_from_directory() {
+    let root = temp_dir("pak-repack");
+    let source = root.join("sample.pak");
+    let input = root.join("input");
+    let output = root.join("repacked.pak");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0xBAC0_4AC0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.push(0);
+    data.push(5);
+    data.extend_from_slice(b"hello");
+    data.extend_from_slice(&3u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.push(0xFF);
+    data.extend_from_slice(b"abc");
+    let encrypted: Vec<u8> = data.iter().map(|byte| byte ^ 0xF7).collect();
+    fs::write(&source, &encrypted).unwrap();
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("hello"), b"abcd").unwrap();
+
+    let repacked = kotama()
+        .args(["resource", "pak-repack"])
+        .arg(&source)
+        .arg("--input-dir")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        repacked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repacked.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(
+        &kotama()
+            .args(["resource", "pak"])
+            .arg(&output)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(facts["files"], 1);
+    assert_eq!(facts["entries"][0]["size"], 4);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

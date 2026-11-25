@@ -29,6 +29,8 @@ pub struct PakEntry {
 pub struct PopCapPak {
     /// Catalog entries.
     pub entries: Vec<PakEntry>,
+    /// Catalog terminator byte.
+    pub catalog_terminator: u8,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -104,6 +106,9 @@ pub fn parse(bytes: &[u8]) -> Result<PopCapPak, ResourceError> {
             offset: 0,
         });
     }
+    let catalog_terminator = *data.get(cursor).ok_or_else(|| {
+        ResourceError::Invalid("PAK catalog terminator is unreadable".to_string())
+    })?;
     cursor += 1;
     let catalog_end = cursor;
     let mut body_offset = catalog_end;
@@ -120,7 +125,10 @@ pub fn parse(bytes: &[u8]) -> Result<PopCapPak, ResourceError> {
             data.len()
         )));
     }
-    Ok(PopCapPak { entries })
+    Ok(PopCapPak {
+        entries,
+        catalog_terminator,
+    })
 }
 
 #[cfg(test)]
