@@ -102,6 +102,7 @@ cargo run -p kotama-cli -- proxy generate <dll> --output out --log-regex '^Messa
 cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource identify <file>   # SWF / VBS / DOS COM identification
 cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource info <file>       # format metadata as JSON
 cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource extract <file> --output out.bin
+cargo test -p kotama-overlay                # platform-neutral hover-toolbar model
 just bench-windows                          # native Windows bench (add --oracle for Ghidra)
 KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
 python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
@@ -124,6 +125,11 @@ original body is tail-jumped. The ring is drained by a worker thread to `KOTAMA_
 `kotama-proxy.log`); the callback itself allocates, locks and performs no I/O. Logging is
 best-effort and may drop records under a full ring; it records entry ordinals only, never guessed
 argument values. Overrides and logs cannot share one generator invocation yet.
+
+`kotama-overlay` is the shared, I/O-free model behind the planned Tauri 2 and egui shells:
+hover expand/collapse, row hit testing, shortcut normalization, deterministic frame snapshots,
+and a capability gate that denies write actions until the host explicitly grants them. It holds no
+platform handles and executes no actions; game-specific ids and effects stay in the host.
 
 Resource parsers are opt-in: SWF (`resource-swf`, pure-Rust zlib; ZWS/LZMA is recognized but not extracted),
 VBScript text (`resource-vbs`; strict UTF-8/UTF-16 decoding, no execution), and DOS COM

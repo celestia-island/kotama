@@ -1,0 +1,19 @@
+[package]
+name = "kotama-overlay"
+description = "Platform-neutral hover-toolbar state, hit testing and capability gating."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
