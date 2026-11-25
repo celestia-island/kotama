@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -100,7 +101,168 @@ impl OverridePlan {
 fn name_text(bytes: &[u8]) -> Result<String, ProxyError> {
     std::str::from_utf8(bytes)
         .map(str::to_string)
-        .map_err(|_| ProxyError("override selection requires a UTF-8 export name".to_string()))
+        .map_err(|_| ProxyError("export selection requires a UTF-8 export name".to_string()))
+}
+
+/// Explicit entry-log selection. Exact names/ordinals plus regular expressions;
+/// every include can be narrowed by a deny list that always wins.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct LogSelection {
+    /// Log every export before filtering.
+    pub all: bool,
+    /// Exact public names to log.
+    pub names: Vec<String>,
+    /// Exact public ordinals to log.
+    pub ordinals: Vec<u16>,
+    /// Regular expressions matched against public names.
+    pub patterns: Vec<String>,
+    /// Names excluded from logging.
+    pub exclude_names: Vec<String>,
+    /// Ordinals excluded from logging.
+    pub exclude_ordinals: Vec<u16>,
+    /// Regular expressions excluded from logging.
+    pub exclude_patterns: Vec<String>,
+}
+
+impl LogSelection {
+    /// True when nothing selects exports (an empty deny list is not a selection).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.all && self.names.is_empty() && self.ordinals.is_empty() && self.patterns.is_empty()
+    }
+}
+
+/// Resolved entry-log plan.
+#[derive(Clone, Default)]
+pub struct LogPlan {
+    symbols: BTreeMap<u16, String>,
+    records: Vec<OverrideRecord>,
+    warnings: Vec<String>,
+}
+
+impl LogPlan {
+    /// Logged ordinals mapped to their generated stub symbol.
+    #[must_use]
+    pub fn symbols(&self) -> &BTreeMap<u16, String> {
+        &self.symbols
+    }
+
+    /// Audit records in ordinal order.
+    #[must_use]
+    pub fn records(&self) -> &[OverrideRecord] {
+        &self.records
+    }
+
+    /// Selector warnings (for example an unmatched regex).
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Number of logged export groups.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.symbols.len()
+    }
+
+    /// True when no export is logged.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+    }
+}
+
+fn entry_names(entry: &kotama_image::pe_export::PeExport) -> Vec<String> {
+    entry
+        .names
+        .iter()
+        .filter_map(|name| std::str::from_utf8(name).ok().map(str::to_string))
+        .collect()
+}
+
+/// Resolve exact/ordinal/regular-expression entry logging against an export table.
+///
+/// # Errors
+/// Returns an error for invalid regexes or unknown exact selectors.
+pub fn plan_logs(table: &PeExportTable, selection: &LogSelection) -> Result<LogPlan, ProxyError> {
+    let patterns: Vec<Regex> = selection
+        .patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern)
+                .map_err(|error| ProxyError(format!("invalid log regex {pattern:?}: {error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    let excludes: Vec<Regex> = selection
+        .exclude_patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|error| {
+                ProxyError(format!("invalid log exclude regex {pattern:?}: {error}"))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    for name in &selection.names {
+        if !table.entries.iter().any(|entry| {
+            entry
+                .names
+                .iter()
+                .any(|candidate| std::str::from_utf8(candidate).is_ok_and(|text| text == name))
+        }) {
+            return Err(ProxyError(format!("log name not found: {name}")));
+        }
+    }
+    for ordinal in &selection.ordinals {
+        if !table.entries.iter().any(|entry| entry.ordinal == *ordinal) {
+            return Err(ProxyError(format!("log ordinal not found: {ordinal}")));
+        }
+    }
+    let mut warnings = Vec::new();
+    for (pattern, regex) in selection.patterns.iter().zip(&patterns) {
+        if !table
+            .entries
+            .iter()
+            .any(|entry| entry_names(entry).iter().any(|name| regex.is_match(name)))
+        {
+            warnings.push(format!("log regex matched no exports: {pattern}"));
+        }
+    }
+    let mut symbols = BTreeMap::new();
+    let mut records = Vec::new();
+    for entry in &table.entries {
+        let names = entry_names(entry);
+        let included = selection.all
+            || selection.ordinals.contains(&entry.ordinal)
+            || names.iter().any(|name| selection.names.contains(name))
+            || names
+                .iter()
+                .any(|name| patterns.iter().any(|regex| regex.is_match(name)));
+        if !included {
+            continue;
+        }
+        let excluded = selection.exclude_ordinals.contains(&entry.ordinal)
+            || names
+                .iter()
+                .any(|name| selection.exclude_names.contains(name))
+            || names
+                .iter()
+                .any(|name| excludes.iter().any(|regex| regex.is_match(name)));
+        if excluded {
+            continue;
+        }
+        let symbol = format!("KOTAMA_LOG_STUB_{}", entry.ordinal);
+        symbols.insert(entry.ordinal, symbol.clone());
+        records.push(OverrideRecord {
+            ordinal: entry.ordinal,
+            names,
+            symbol,
+        });
+    }
+    Ok(LogPlan {
+        symbols,
+        records,
+        warnings,
+    })
 }
 
 /// Resolve exact-name/ordinal overrides against a strict export table.
@@ -175,6 +337,15 @@ pub fn plan_overrides(
     Ok(OverridePlan { symbols, records })
 }
 
+/// Override and log plans bundled for manifest generation.
+#[derive(Clone, Copy, Default)]
+pub struct ExportActions<'a> {
+    /// Explicit local overrides.
+    pub overrides: Option<&'a OverridePlan>,
+    /// Entry-log stubs.
+    pub logs: Option<&'a LogPlan>,
+}
+
 /// One auditable export decision.
 #[derive(Serialize)]
 pub struct MirrorExport {
@@ -214,6 +385,10 @@ pub struct MirrorManifest {
     pub backing: String,
     /// Complete export decisions; no entry is dropped.
     pub exports: Vec<MirrorExport>,
+    /// Number of overridden export groups.
+    pub override_count: usize,
+    /// Number of logged export groups.
+    pub log_count: usize,
     /// User hook source when overrides were selected.
     pub hooks: Option<HookSource>,
     /// Present only after a successful direct build.
@@ -281,40 +456,48 @@ fn target_text(target: &PeExportTarget, ordinal: u16, backing: &str) -> Result<S
 /// # Errors
 /// Returns an error for unsafe module names or unrepresentable export names.
 pub fn mirror_def(table: &PeExportTable, options: &MirrorOptions) -> Result<String, ProxyError> {
-    mirror_def_with(table, options, None)
+    mirror_def_with(table, options, None, None)
 }
 
-/// Render a mirror with an optional set of overridden export groups.
+/// Render a mirror with optional overridden or logged export groups.
 ///
-/// Overridden groups must be implemented by the user-supplied hooks source under
-/// the generated KOTAMA_OVERRIDE_<ordinal> symbols; every other export forwards.
+/// Overridden groups use the user-supplied hooks source under KOTAMA_OVERRIDE_<ordinal>;
+/// logged groups use generated KOTAMA_LOG_STUB_<ordinal> assembly. An ordinal cannot be
+/// both; every other export forwards.
 ///
 /// # Errors
-/// Returns an error for unsafe module names or unrepresentable export names.
+/// Returns an error for unsafe names, unrepresentable exports or conflicting actions.
 pub fn mirror_def_with(
     table: &PeExportTable,
     options: &MirrorOptions,
     overrides: Option<&OverridePlan>,
+    logs: Option<&LogPlan>,
 ) -> Result<String, ProxyError> {
     let library = module(&options.library)?;
     let backing = module(&options.backing)?;
     let mut out = format!("LIBRARY \"{library}\"\nEXPORTS\n");
     for entry in &table.entries {
-        if let Some(plan) = overrides {
-            if let Some(symbol) = plan.symbols().get(&entry.ordinal) {
-                if entry.names.is_empty() {
-                    out.push_str(&format!("    {symbol} @{} NONAME\n", entry.ordinal));
-                } else {
-                    for name in &entry.names {
-                        out.push_str(&format!(
-                            "    {}={symbol} @{}\n",
-                            atom(name)?,
-                            entry.ordinal
-                        ));
-                    }
+        let override_symbol = overrides.and_then(|plan| plan.symbols().get(&entry.ordinal));
+        let log_symbol = logs.and_then(|plan| plan.symbols().get(&entry.ordinal));
+        if override_symbol.is_some() && log_symbol.is_some() {
+            return Err(ProxyError(format!(
+                "ordinal {} cannot be both overridden and logged",
+                entry.ordinal
+            )));
+        }
+        if let Some(symbol) = override_symbol.or(log_symbol) {
+            if entry.names.is_empty() {
+                out.push_str(&format!("    {symbol} @{} NONAME\n", entry.ordinal));
+            } else {
+                for name in &entry.names {
+                    out.push_str(&format!(
+                        "    {}={symbol} @{}\n",
+                        atom(name)?,
+                        entry.ordinal
+                    ));
                 }
-                continue;
             }
+            continue;
         }
         let target = target_text(&entry.target, entry.ordinal, &backing)?;
         if entry.names.is_empty() {
@@ -344,10 +527,18 @@ pub fn manifest(
     options: &MirrorOptions,
     built_dll: Option<&[u8]>,
 ) -> MirrorManifest {
-    manifest_with(input_name, input, table, options, built_dll, None, None)
+    manifest_with(
+        input_name,
+        input,
+        table,
+        options,
+        built_dll,
+        ExportActions::default(),
+        None,
+    )
 }
 
-/// Build a manifest that also records override decisions and the hooks source.
+/// Build a manifest that also records override/log decisions and the hooks source.
 #[must_use]
 pub fn manifest_with(
     input_name: &str,
@@ -355,18 +546,25 @@ pub fn manifest_with(
     table: &PeExportTable,
     options: &MirrorOptions,
     built_dll: Option<&[u8]>,
-    overrides: Option<&OverridePlan>,
+    actions: ExportActions<'_>,
     hooks: Option<(&str, &[u8])>,
 ) -> MirrorManifest {
-    let exports = table
+    let exports: Vec<MirrorExport> = table
         .entries
         .iter()
         .map(|entry| {
-            let symbol = overrides.and_then(|plan| plan.symbols().get(&entry.ordinal).cloned());
-            let action = if symbol.is_some() {
-                "override"
+            let override_symbol = actions
+                .overrides
+                .and_then(|plan| plan.symbols().get(&entry.ordinal).cloned());
+            let log_symbol = actions
+                .logs
+                .and_then(|plan| plan.symbols().get(&entry.ordinal).cloned());
+            let (action, symbol) = if let Some(symbol) = override_symbol {
+                ("override", Some(symbol))
+            } else if let Some(symbol) = log_symbol {
+                ("log", Some(symbol))
             } else {
-                "forward"
+                ("forward", None)
             };
             let forwarded_to = if symbol.is_some() {
                 String::new()
@@ -401,6 +599,14 @@ pub fn manifest_with(
         input_sha256: hex_digest(input),
         library: options.library.clone(),
         backing: options.backing.clone(),
+        override_count: exports
+            .iter()
+            .filter(|export| export.action == "override")
+            .count(),
+        log_count: exports
+            .iter()
+            .filter(|export| export.action == "log")
+            .count(),
         exports,
         hooks: hooks.map(|(source, bytes)| HookSource {
             source: source.to_string(),
@@ -475,7 +681,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![5, 6]
         );
-        let definition = mirror_def_with(&table(), &options, Some(&plan)).unwrap();
+        let definition = mirror_def_with(&table(), &options, Some(&plan), None).unwrap();
         assert!(definition.contains("Alpha=KOTAMA_OVERRIDE_5 @5"));
         assert!(definition.contains("Alias=KOTAMA_OVERRIDE_5 @5"));
         assert!(definition.contains("KOTAMA_OVERRIDE_6 @6 NONAME"));
@@ -486,7 +692,10 @@ mod tests {
             &table(),
             &options,
             None,
-            Some(&plan),
+            ExportActions {
+                overrides: Some(&plan),
+                logs: None,
+            },
             Some(("hooks.c", b"int KOTAMA_OVERRIDE_5(void){return 0;}")),
         );
         assert_eq!(facts.exports[0].action, "override");
@@ -496,6 +705,86 @@ mod tests {
         );
         assert_eq!(facts.hooks.as_ref().unwrap().source, "hooks.c");
         assert!(facts.exports[2].forwarded_to.contains("OTHER.Run"));
+    }
+
+    #[test]
+    fn log_plan_supports_regex_deny_and_all() {
+        let options = MirrorOptions {
+            library: "mirror.dll".to_string(),
+            backing: "original_real.dll".to_string(),
+        };
+        let plan = plan_logs(
+            &table(),
+            &LogSelection {
+                patterns: vec!["^(Alpha|Alias)$".to_string()],
+                ..LogSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.records()[0].ordinal, 5);
+        let definition = mirror_def_with(&table(), &options, None, Some(&plan)).unwrap();
+        assert!(definition.contains("Alpha=KOTAMA_LOG_STUB_5 @5"));
+        assert!(definition.contains("Alias=KOTAMA_LOG_STUB_5 @5"));
+        assert!(definition.contains("KOTAMA_ORDINAL_6=original_real.dll.#6 @6 NONAME"));
+        assert!(definition.contains("Forwarded=OTHER.Run @7"));
+
+        let all_but_forwarded = plan_logs(
+            &table(),
+            &LogSelection {
+                all: true,
+                exclude_patterns: vec!["^Forward".to_string()],
+                ..LogSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            all_but_forwarded
+                .records()
+                .iter()
+                .map(|record| record.ordinal)
+                .collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        let facts = manifest_with(
+            "original.dll",
+            b"input",
+            &table(),
+            &options,
+            None,
+            ExportActions {
+                overrides: None,
+                logs: Some(&all_but_forwarded),
+            },
+            None,
+        );
+        assert_eq!(facts.exports[0].action, "log");
+        assert_eq!(
+            facts.exports[0].symbol.as_deref(),
+            Some("KOTAMA_LOG_STUB_5")
+        );
+    }
+
+    #[test]
+    fn invalid_or_unmatched_log_selectors_are_reported() {
+        assert!(plan_logs(
+            &table(),
+            &LogSelection {
+                patterns: vec!["(".to_string()],
+                ..LogSelection::default()
+            }
+        )
+        .is_err());
+        let plan = plan_logs(
+            &table(),
+            &LogSelection {
+                patterns: vec!["^zzz$".to_string()],
+                ..LogSelection::default()
+            },
+        )
+        .unwrap();
+        assert!(plan.is_empty());
+        assert_eq!(plan.warnings().len(), 1);
     }
 
     #[test]
