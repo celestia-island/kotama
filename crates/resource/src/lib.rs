@@ -15,6 +15,7 @@ pub mod dos_com;
 pub mod swf;
 pub mod tga;
 pub mod vbs;
+pub mod vp6;
 pub mod w3d;
 
 /// A recognized resource format.
@@ -40,6 +41,8 @@ pub enum ResourceKind {
     Dds,
     /// TGA image header.
     Tga,
+    /// VP6 movie header.
+    Vp6,
 }
 
 impl ResourceKind {
@@ -57,6 +60,7 @@ impl ResourceKind {
             Self::AptGeometry => "apt-geometry",
             Self::Dds => "dds",
             Self::Tga => "tga",
+            Self::Vp6 => "vp6",
         }
     }
 
@@ -74,6 +78,7 @@ impl ResourceKind {
             "apt-geometry" => Some(Self::AptGeometry),
             "dds" => Some(Self::Dds),
             "tga" => Some(Self::Tga),
+            "vp6" => Some(Self::Vp6),
             _ => None,
         }
     }
@@ -92,6 +97,7 @@ impl ResourceKind {
             Self::AptGeometry => "apt-geometry",
             Self::Dds => "dds",
             Self::Tga => "tga",
+            Self::Vp6 => "vp6",
         }
     }
 
@@ -109,6 +115,7 @@ impl ResourceKind {
             Self::AptGeometry => cfg!(feature = "apt-geometry"),
             Self::Dds => cfg!(feature = "dds"),
             Self::Tga => cfg!(feature = "tga"),
+            Self::Vp6 => cfg!(feature = "vp6"),
         }
     }
 }
@@ -156,6 +163,8 @@ pub enum Resource<'a> {
     Dds(dds::DdsInfo),
     /// TGA image header.
     Tga(tga::TgaInfo),
+    /// VP6 movie header.
+    Vp6(vp6::Vp6Info),
 }
 
 impl Resource<'_> {
@@ -173,6 +182,7 @@ impl Resource<'_> {
             Self::AptGeometry(_) => ResourceKind::AptGeometry,
             Self::Dds(_) => ResourceKind::Dds,
             Self::Tga(_) => ResourceKind::Tga,
+            Self::Vp6(_) => ResourceKind::Vp6,
         }
     }
 }
@@ -216,6 +226,9 @@ impl Resource<'_> {
             )),
             Self::Tga(_) => Err(ResourceError::Unsupported(
                 "TGA is an image container; inspect header".to_string(),
+            )),
+            Self::Vp6(_) => Err(ResourceError::Unsupported(
+                "VP6 is a movie container; inspect header".to_string(),
             )),
         }
     }
@@ -284,6 +297,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             kind: ResourceKind::Dds,
             basis: DetectionBasis::Magic,
             enabled: ResourceKind::Dds.enabled(),
+        });
+    }
+    if vp6::has_magic(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::Vp6,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::Vp6.enabled(),
         });
     }
     if csf::has_magic(bytes) {
@@ -385,6 +405,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::AptGeometry => apt_geometry::parse(bytes).map(Resource::AptGeometry),
         ResourceKind::Dds => dds::parse(bytes).map(Resource::Dds),
         ResourceKind::Tga => tga::parse(bytes).map(Resource::Tga),
+        ResourceKind::Vp6 => vp6::parse(bytes).map(Resource::Vp6),
     }
 }
 
