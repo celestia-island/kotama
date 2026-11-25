@@ -343,6 +343,60 @@ fn apt_constants_are_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-csf")]
+#[test]
+fn csf_labels_are_inspected() {
+    let root = temp_dir("csf");
+    let source = root.join("strings.csf");
+    let mut bytes = b" FSC".to_vec();
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(b" LBL");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&5u32.to_le_bytes());
+    bytes.extend_from_slice(b"NAME\0");
+    bytes.extend_from_slice(b"STR ");
+    let value = "HELLO".encode_utf16().map(|unit| !unit).collect::<Vec<_>>();
+    bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    for unit in value {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "csf");
+    assert_eq!(facts["basis"], "magic");
+
+    let info = kotama()
+        .args(["resource", "info"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(info.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(facts["entries"], 1);
+
+    let csf = kotama()
+        .args(["resource", "csf"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(csf.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&csf.stdout).unwrap();
+    assert_eq!(facts["labels"][0]["name"], "NAME");
+    assert_eq!(facts["labels"][0]["values"][0], "HELLO");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod apt;
 pub mod big;
+pub mod csf;
 pub mod dos_com;
 pub mod swf;
 pub mod vbs;
@@ -28,6 +29,8 @@ pub enum ResourceKind {
     W3d,
     /// APT constant file.
     AptConst,
+    /// CSF string table.
+    Csf,
 }
 
 impl ResourceKind {
@@ -41,6 +44,7 @@ impl ResourceKind {
             Self::Big => "big",
             Self::W3d => "w3d",
             Self::AptConst => "apt-const",
+            Self::Csf => "csf",
         }
     }
 
@@ -54,6 +58,7 @@ impl ResourceKind {
             "big" | "bigf" | "big4" => Some(Self::Big),
             "w3d" => Some(Self::W3d),
             "apt-const" => Some(Self::AptConst),
+            "csf" => Some(Self::Csf),
             _ => None,
         }
     }
@@ -68,6 +73,7 @@ impl ResourceKind {
             Self::Big => "big",
             Self::W3d => "w3d",
             Self::AptConst => "apt-const",
+            Self::Csf => "csf",
         }
     }
 
@@ -81,6 +87,7 @@ impl ResourceKind {
             Self::Big => cfg!(feature = "big"),
             Self::W3d => cfg!(feature = "w3d"),
             Self::AptConst => cfg!(feature = "apt-const"),
+            Self::Csf => cfg!(feature = "csf"),
         }
     }
 }
@@ -120,6 +127,8 @@ pub enum Resource<'a> {
     W3d(w3d::W3dFile<'a>),
     /// APT constant file.
     AptConst(apt::AptConstFile),
+    /// CSF string table.
+    Csf(csf::CsfFile),
 }
 
 impl Resource<'_> {
@@ -133,6 +142,7 @@ impl Resource<'_> {
             Self::Big(_) => ResourceKind::Big,
             Self::W3d(_) => ResourceKind::W3d,
             Self::AptConst(_) => ResourceKind::AptConst,
+            Self::Csf(_) => ResourceKind::Csf,
         }
     }
 }
@@ -164,6 +174,9 @@ impl Resource<'_> {
             )),
             Self::AptConst(_) => Err(ResourceError::Unsupported(
                 "APT constants are a table; inspect entries".to_string(),
+            )),
+            Self::Csf(_) => Err(ResourceError::Unsupported(
+                "CSF is a string table; inspect labels".to_string(),
             )),
         }
     }
@@ -227,6 +240,13 @@ fn extension_matches(extension: Option<&str>, wanted: &str) -> bool {
 /// Identify a resource from contents and an optional extension hint.
 #[must_use]
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification> {
+    if csf::has_magic(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::Csf,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::Csf.enabled(),
+        });
+    }
     if bytes.get(..17) == Some(b"Apt constant file".as_slice())
         || bytes.get(16..33) == Some(b"Apt constant file".as_slice())
     {
@@ -301,6 +321,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Big => big::parse(bytes).map(Resource::Big),
         ResourceKind::W3d => w3d::parse(bytes).map(Resource::W3d),
         ResourceKind::AptConst => apt::parse(bytes).map(Resource::AptConst),
+        ResourceKind::Csf => csf::parse(bytes).map(Resource::Csf),
     }
 }
 
