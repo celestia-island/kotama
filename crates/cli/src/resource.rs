@@ -397,6 +397,16 @@ struct AptBinJson {
 }
 
 #[derive(Serialize)]
+struct ImpExtractJson {
+    kind: &'static str,
+    group: usize,
+    entry: usize,
+    offset: usize,
+    length: usize,
+    output: String,
+}
+
+#[derive(Serialize)]
 struct ImpJson {
     kind: &'static str,
     hash: u32,
@@ -425,7 +435,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource strings <path> [--min-len <count>] [--limit <count>]\n  kotama resource imp <path> [--kind imp]\n  kotama resource apt-bin <path> [--kind apt-bin]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource strings <path> [--min-len <count>] [--limit <count>]\n  kotama resource imp <path> [--kind imp]\n  kotama resource imp-extract <path> --bin <payload> --group <n> --entry <n> --output <path>\n  kotama resource apt-bin <path> [--kind apt-bin]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -468,6 +478,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "identify" => identify_command(&args[1..]),
         "strings" => strings_command(&args[1..]),
         "imp" => imp_command(&args[1..]),
+        "imp-extract" => imp_extract_command(&args[1..]),
         "apt-bin" => apt_bin_command(&args[1..]),
         "info" => info_command(&args[1..]),
         "entries" => entries_command(&args[1..]),
@@ -2444,6 +2455,105 @@ fn imp_command(args: &[String]) -> ExitCode {
         kind: "imp",
         hash: info.hash,
         groups: info.groups,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn imp_extract_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut bin: Option<PathBuf> = None;
+    let mut group: Option<usize> = None;
+    let mut entry: Option<usize> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bin" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                bin = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--group" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                group = value.parse::<usize>().ok();
+                index += 1;
+            }
+            "--entry" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                entry = value.parse::<usize>().ok();
+                index += 1;
+            }
+            "--output" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                output = Some(PathBuf::from(value));
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let (Some(bin), Some(group), Some(entry), Some(output)) = (bin, group, entry, output) else {
+        return usage();
+    };
+    if output.exists() {
+        return fail("refusing to overwrite existing output");
+    }
+    let imp_bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let imp = match kotama_resource::imp::parse(&imp_bytes) {
+        Ok(imp) => imp,
+        Err(error) => return fail_kind(&error),
+    };
+    let Some(offsets) = imp.groups.get(group) else {
+        return fail("IMP group not found");
+    };
+    let Some(start) = offsets.get(entry).copied() else {
+        return fail("IMP entry not found");
+    };
+    let end = offsets.get(entry + 1).copied().map(|value| value as usize);
+    let payload = match read_file(&bin) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let start = start as usize;
+    let end = end.unwrap_or(payload.len());
+    if start >= end || end > payload.len() {
+        return fail("IMP payload range is invalid");
+    }
+    let body = &payload[start..end];
+    if let Some(parent) = output.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            return fail(error);
+        }
+    }
+    if let Err(error) = fs::write(&output, body) {
+        return fail(error);
+    }
+    let json = ImpExtractJson {
+        kind: "imp-extract",
+        group,
+        entry,
+        offset: start,
+        length: body.len(),
+        output: output.display().to_string(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
