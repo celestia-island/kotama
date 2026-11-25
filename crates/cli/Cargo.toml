@@ -13,6 +13,12 @@ publish.workspace = true
 name = "kotama"
 path = "src/main.rs"
 
+[features]
+default = []
+resource-swf = ["kotama-resource/swf"]
+resource-vbs = ["kotama-resource/vbs"]
+resource-dos-com = ["kotama-resource/dos-com"]
+
 [dependencies]
 kotama.workspace = true
 kotama-image.workspace = true
@@ -22,6 +28,7 @@ kotama-backend-ghidra.workspace = true
 kotama-host.workspace = true
 kotama-pack.workspace = true
 kotama-proxy.workspace = true
+kotama-resource.workspace = true
 kotama-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true

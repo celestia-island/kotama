@@ -98,6 +98,9 @@ cargo run -p kotama-cli -- live inject --payload my_hook.dll --pid <pid> --load-
 cargo run -p kotama-cli -- proxy inspect <dll>                                                      # complete PE export facts (aliases, ordinals, forwarders)
 cargo run -p kotama-cli -- proxy generate <dll> --output out --build                                # buildable forwarding mirror + manifest
 cargo run -p kotama-cli -- proxy generate <dll> --output out --override <name> --hooks hooks.c --build  # selected local overrides; every other export still forwards
+cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource identify <file>   # SWF / VBS / DOS COM identification
+cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource info <file>       # format metadata as JSON
+cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource extract <file> --output out.bin
 just bench-windows                          # native Windows bench (add --oracle for Ghidra)
 KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
 python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
@@ -112,6 +115,11 @@ Selected overrides need `--hooks <file.c>`; the generated manifest lists the exa
 `KOTAMA_OVERRIDE_<ordinal>` symbol for every overridden export group (aliases share one symbol),
 records `action: override|forward` per export, and hashes the hooks source. No function ABI is
 guessed: the hooks file must declare the correct signature.
+
+Resource parsers are opt-in: SWF (`resource-swf`, pure-Rust zlib; ZWS/LZMA is recognized but not extracted),
+VBScript text (`resource-vbs`; strict UTF-8/UTF-16 decoding, no execution), and DOS COM
+(`resource-dos-com`; verbatim bytes, load/entry `0x100`). The library is I/O-free and deterministic;
+the CLI owns file access, refuses to overwrite outputs, and caps extraction at 256 MiB by default.
 
 Fixture matrix: `x86_64-linux-gnu / x86-linux-gnu / x86_64-windows-gnu / x86-windows-gnu`
 × `-O2/-O0`, plus native `x86_64-windows-msvc / x86-windows-msvc` with `/Zi` PDBs.

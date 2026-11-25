@@ -23,7 +23,11 @@ jobs:
         run: python3 tools/build_fixtures.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p kotama-resource --all-targets --all-features -- -D warnings
+      - run: cargo clippy -p kotama-cli --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test -p kotama-resource --all-features
+      - run: cargo test -p kotama-cli --all-features
 
   licenses:
     runs-on: [self-hosted, linux, x64, local]

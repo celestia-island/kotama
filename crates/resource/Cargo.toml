@@ -1,0 +1,22 @@
+[package]
+name = "kotama-resource"
+description = "Deterministic identification, parsing and extraction for non-image resources."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+swf = ["dep:flate2"]
+vbs = []
+dos-com = []
+
+[dependencies]
+flate2 = { version = "^1", optional = true, default-features = false, features = ["rust_backend"] }
+
+[lints]
+workspace = true

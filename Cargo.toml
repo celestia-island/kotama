@@ -14,7 +14,7 @@ workspace = true
 
 [workspace]
 resolver = "2"
-members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy"]
+members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,6 +36,7 @@ kotama-proto = { path = "crates/proto", version = "^0.1" }
 kotama-host = { path = "crates/host", version = "^0.1" }
 kotama-pack = { path = "crates/pack", version = "^0.1" }
 kotama-proxy = { path = "crates/proxy", version = "^0.1" }
+kotama-resource = { path = "crates/resource", version = "^0.1" }
 
 # 静态管线（P0）
 object = "^0.41"
