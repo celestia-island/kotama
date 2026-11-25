@@ -373,6 +373,14 @@ struct PakJson {
 }
 
 #[derive(Serialize)]
+struct PakExtractAllJson {
+    kind: &'static str,
+    output_dir: String,
+    files: usize,
+    bytes: u64,
+}
+
+#[derive(Serialize)]
 struct ExtractJson {
     kind: &'static str,
     output: String,
@@ -381,7 +389,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -439,6 +447,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "pvz-reanim" => pvz_reanim_command(&args[1..]),
         "pak" => pak_command(&args[1..]),
         "pak-extract" => pak_extract_command(&args[1..]),
+        "pak-extract-all" => pak_extract_all_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -1867,6 +1876,20 @@ fn pak_command(args: &[String]) -> ExitCode {
     }
 }
 
+fn safe_pak_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for part in name.split(['\\', '/']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." || part.contains(':') {
+            return None;
+        }
+        path.push(part);
+    }
+    Some(path)
+}
+
 fn pak_extract_command(args: &[String]) -> ExitCode {
     let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
         return usage();
@@ -1935,6 +1958,100 @@ fn pak_extract_command(args: &[String]) -> ExitCode {
         kind: "pak-extract",
         output: output.display().to_string(),
         bytes_written: body.len(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn pak_extract_all_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut output_dir: Option<PathBuf> = None;
+    let mut limit = usize::MAX;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--output-dir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                output_dir = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                limit = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return usage(),
+                };
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let Some(output_dir) = output_dir else {
+        return usage();
+    };
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let pak = match kotama_resource::pak::parse(&bytes) {
+        Ok(pak) => pak,
+        Err(error) => return fail_kind(&error),
+    };
+    if let Err(error) = fs::create_dir_all(&output_dir) {
+        return fail(error);
+    }
+    let Ok(root) = output_dir.canonicalize() else {
+        return fail("cannot canonicalize output directory");
+    };
+    let decoded: Vec<u8> = bytes
+        .iter()
+        .map(|byte| byte ^ kotama_resource::pak::XOR_MASK)
+        .collect();
+    let mut written = 0usize;
+    let mut bytes_written = 0u64;
+    for entry in pak.entries.iter().take(limit) {
+        let Some(destination) = safe_pak_path(&root, &entry.name) else {
+            return fail("refusing unsafe PAK entry path");
+        };
+        let Some(body) = decoded.get(entry.offset..entry.offset + entry.size as usize) else {
+            return fail("PAK entry body is outside the file");
+        };
+        if let Some(parent) = destination.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                return fail(error);
+            }
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(file) => file,
+            Err(error) => return fail(error),
+        };
+        if let Err(error) = std::io::Write::write_all(&mut file, body) {
+            return fail(error);
+        }
+        written += 1;
+        bytes_written += body.len() as u64;
+    }
+    let json = PakExtractAllJson {
+        kind: "pak-extract-all",
+        output_dir: output_dir.display().to_string(),
+        files: written,
+        bytes: bytes_written,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
