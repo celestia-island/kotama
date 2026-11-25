@@ -219,6 +219,7 @@ dependencies = [
 name = "kotama-cli"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "kotama",
  "kotama-backend-ghidra",
  "kotama-decomp",
