@@ -1172,6 +1172,42 @@ fn apt_bin_prefix_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-imp")]
+#[test]
+fn imp_payload_is_extracted() {
+    let root = temp_dir("imp-extract");
+    let imp = root.join("sample.imp");
+    let bin = root.join("payload.bin");
+    let output = root.join("out.bin");
+    let mut table = 0xA49E_1BA9u32.to_le_bytes().to_vec();
+    for value in [10u32, 20, 30, u32::MAX] {
+        table.extend_from_slice(&value.to_le_bytes());
+    }
+    fs::write(&imp, &table).unwrap();
+    fs::write(&bin, (0u8..40).collect::<Vec<u8>>()).unwrap();
+
+    let extracted = kotama()
+        .args(["resource", "imp-extract"])
+        .arg(&imp)
+        .arg("--bin")
+        .arg(&bin)
+        .arg("--group")
+        .arg("0")
+        .arg("--entry")
+        .arg("0")
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    assert_eq!(fs::read(&output).unwrap(), (10u8..20).collect::<Vec<u8>>());
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
