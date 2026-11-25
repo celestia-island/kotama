@@ -1931,6 +1931,8 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
     let mut instructions = 0usize;
     // 距上一条 call 的指令数；开头即视为「很久没调用」。
     let mut since_call = 1usize;
+    // call 之后到目前为止是否全是尾聲形態指令（不可达的收尾）。
+    let mut epilogue_tail = true;
     while decoder.can_decode() {
         let instruction = decoder.decode();
         if instruction.is_invalid() {
@@ -1942,6 +1944,12 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
             // call（直接或间接）紧跟填充：被调方不返回（exit / abort 一类），函数到此为止。
             // 放宽到「call 后两三条指令内」会在真实样本上接进几十个无人认可的数据块，不放宽。
             if since_call == 0 {
+                return true;
+            }
+            // call 之后最多两条尾聲形態指令（pop / leave / add esp,imm / mov esp,ebp）再跟填充：
+            // 同样是 noreturn 结尾，多出来的是编译器留下的不可达收尾指令。
+            // 只放行尾聲形態——单纯按条数放宽会在真实样本上接进几十个无人认可的数据块。
+            if since_call <= 2 && epilogue_tail {
                 return true;
             }
             // 两字节的 int imm8（如 fastfail 的 int 29h）本身就是终结符；只有单字节
@@ -1959,7 +1967,15 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
             FlowControl::Call | FlowControl::IndirectCall
         ) {
             since_call = 0;
+            epilogue_tail = true;
         } else {
+            let start = usize::try_from(instruction.ip().saturating_sub(ip)).unwrap_or(0);
+            let raw = body
+                .get(start..start.saturating_add(instruction.len()))
+                .unwrap_or_default();
+            if since_call <= 2 && !is_epilogue_tail(raw) {
+                epilogue_tail = false;
+            }
             since_call = since_call.saturating_add(1);
         }
         if is_terminator(&instruction) {
@@ -1968,6 +1984,18 @@ fn decodes_to_terminator(bitness: u32, body: &[u8], ip: u64) -> bool {
     }
     false
 }
+/// call 之后不可达的收尾指令形态：`pop r32`、`leave`、`add esp, imm`、`mov esp, ebp`。
+fn is_epilogue_tail(raw: &[u8]) -> bool {
+    matches!(
+        raw,
+        [0x58..=0x5F, ..]
+            | [0xC9, ..]
+            | [0x8B, 0xE5, ..]
+            | [0x83, 0xC4, _]
+            | [0x81, 0xC4, _, _, _, _]
+    )
+}
+
 /// 直接（rel）call 的位置 → 目标，按目标归组（用于判断候选是否被外部函数调用）。
 fn direct_call_sites(
     module: &ViewAdapter<'_>,
