@@ -1121,6 +1121,33 @@ fn printable_strings_are_listed() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-imp")]
+#[test]
+fn imp_groups_are_inspected() {
+    let root = temp_dir("imp");
+    let source = root.join("sample.imp");
+    let mut data = 0xA49E_1BA9u32.to_le_bytes().to_vec();
+    for value in [116u32, 164, 312, u32::MAX, 88, 92, u32::MAX] {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    fs::write(&source, &data).unwrap();
+    let output = kotama()
+        .args(["resource", "imp"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(facts["hash"], 0xA49E_1BA9u64);
+    assert_eq!(facts["groups"][0], serde_json::json!([116, 164, 312]));
+    assert_eq!(facts["groups"][1], serde_json::json!([88, 92]));
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

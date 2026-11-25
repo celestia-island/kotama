@@ -17,6 +17,7 @@ pub mod big;
 pub mod csf;
 pub mod dds;
 pub mod dos_com;
+pub mod imp;
 pub mod pak;
 pub mod pvz_reanim;
 pub mod swf;
@@ -64,6 +65,8 @@ pub enum ResourceKind {
     PvzReanim,
     /// PopCap PAK container.
     Pak,
+    /// RA3 .imp offset table.
+    Imp,
 }
 
 impl ResourceKind {
@@ -89,6 +92,7 @@ impl ResourceKind {
             Self::AptImageMap => "apt-image-map",
             Self::PvzReanim => "pvz-reanim",
             Self::Pak => "pak",
+            Self::Imp => "imp",
         }
     }
 
@@ -114,6 +118,7 @@ impl ResourceKind {
             "apt-image-map" => Some(Self::AptImageMap),
             "pvz-reanim" => Some(Self::PvzReanim),
             "pak" => Some(Self::Pak),
+            "imp" => Some(Self::Imp),
             _ => None,
         }
     }
@@ -140,6 +145,7 @@ impl ResourceKind {
             Self::AptImageMap => "apt-image-map",
             Self::PvzReanim => "pvz-reanim",
             Self::Pak => "pak",
+            Self::Imp => "imp",
         }
     }
 
@@ -165,6 +171,7 @@ impl ResourceKind {
             Self::AptImageMap => cfg!(feature = "apt-image-map"),
             Self::PvzReanim => cfg!(feature = "pvz-reanim"),
             Self::Pak => cfg!(feature = "pak"),
+            Self::Imp => cfg!(feature = "imp"),
         }
     }
 }
@@ -228,6 +235,8 @@ pub enum Resource<'a> {
     PvzReanim(pvz_reanim::PvzReanimInfo),
     /// PopCap PAK container.
     Pak(pak::PopCapPak),
+    /// RA3 .imp offset table.
+    Imp(imp::ImpInfo),
 }
 
 impl Resource<'_> {
@@ -253,6 +262,7 @@ impl Resource<'_> {
             Self::AptImageMap(_) => ResourceKind::AptImageMap,
             Self::PvzReanim(_) => ResourceKind::PvzReanim,
             Self::Pak(_) => ResourceKind::Pak,
+            Self::Imp(_) => ResourceKind::Imp,
         }
     }
 }
@@ -320,6 +330,9 @@ impl Resource<'_> {
             )),
             Self::Pak(_) => Err(ResourceError::Unsupported(
                 "PAK bodies are opaque; inspect entries".to_string(),
+            )),
+            Self::Imp(_) => Err(ResourceError::Unsupported(
+                "IMP offsets point to external data".to_string(),
             )),
         }
     }
@@ -469,6 +482,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptMovie.enabled(),
         });
     }
+    if extension_matches(extension, "imp") {
+        return Some(Identification {
+            kind: ResourceKind::Imp,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::Imp.enabled(),
+        });
+    }
     if extension_matches(extension, "relo") {
         return Some(Identification {
             kind: ResourceKind::AssetRelocation,
@@ -555,6 +575,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::AptImageMap => apt_image_map::parse(bytes).map(Resource::AptImageMap),
         ResourceKind::PvzReanim => pvz_reanim::parse(bytes).map(Resource::PvzReanim),
         ResourceKind::Pak => pak::parse(bytes).map(Resource::Pak),
+        ResourceKind::Imp => imp::parse(bytes).map(Resource::Imp),
     }
 }
 
