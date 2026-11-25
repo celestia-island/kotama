@@ -129,6 +129,7 @@ struct AssetPropertyJson {
     value_or_offset: u32,
     name: Option<String>,
     property_type: Option<String>,
+    value: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -1203,6 +1204,29 @@ fn read_hash_map(path: &Path) -> Result<HashMap<u32, String>, ExitCode> {
     Ok(map)
 }
 
+fn asset_property_value(
+    bytes: &[u8],
+    table_offset: usize,
+    property_type: Option<&str>,
+    raw: u32,
+) -> Option<serde_json::Value> {
+    match property_type {
+        Some("float_t") => {
+            let start = table_offset.checked_add(raw as usize)?;
+            let value =
+                f32::from_le_bytes(bytes.get(start..start.checked_add(4)?)?.try_into().ok()?);
+            (value.is_finite()).then(|| serde_json::json!(value))
+        }
+        Some("size_t") => {
+            let start = table_offset.checked_add(raw as usize)?;
+            let value =
+                u32::from_le_bytes(bytes.get(start..start.checked_add(4)?)?.try_into().ok()?);
+            Some(serde_json::json!(value))
+        }
+        _ => Some(serde_json::json!(raw)),
+    }
+}
+
 fn asset_command(args: &[String]) -> ExitCode {
     let (path, kind, hash_map_path) = match parse_asset_options(args) {
         Ok(values) => values,
@@ -1244,16 +1268,26 @@ fn asset_command(args: &[String]) -> ExitCode {
         properties: info
             .properties
             .iter()
-            .map(|property| AssetPropertyJson {
-                name_hash: property.name_hash,
-                type_hash: property.type_hash,
-                value_or_offset: property.value_or_offset,
-                name: hash_map
+            .map(|property| {
+                let property_type = hash_map
                     .as_ref()
-                    .and_then(|map| map.get(&property.name_hash).cloned()),
-                property_type: hash_map
-                    .as_ref()
-                    .and_then(|map| map.get(&property.type_hash).cloned()),
+                    .and_then(|map| map.get(&property.type_hash).cloned());
+                let value = asset_property_value(
+                    &bytes,
+                    info.property_table_offset,
+                    property_type.as_deref(),
+                    property.value_or_offset,
+                );
+                AssetPropertyJson {
+                    name_hash: property.name_hash,
+                    type_hash: property.type_hash,
+                    value_or_offset: property.value_or_offset,
+                    name: hash_map
+                        .as_ref()
+                        .and_then(|map| map.get(&property.name_hash).cloned()),
+                    property_type,
+                    value,
+                }
             })
             .collect(),
     };
