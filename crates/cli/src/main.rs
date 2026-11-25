@@ -238,6 +238,8 @@ struct Report {
     exceptions: Vec<ExceptionJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rtti: Option<RttiJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    resources: Vec<ResourceJson>,
 }
 
 /// MSVC RTTI facts exposed by the CLI; deterministic order comes from the scanner.
@@ -274,6 +276,19 @@ struct RttiTypeJson {
     rva: String,
     mangled: String,
     class_name: String,
+}
+
+/// 一条 PE 资源目录叶子；地址是模块 RVA。
+#[derive(Serialize)]
+struct ResourceJson {
+    type_id: u32,
+    type_name: Option<String>,
+    id: u32,
+    name: Option<String>,
+    language: u32,
+    code_page: u32,
+    rva: String,
+    size: u64,
 }
 
 /// 一条 PE64 exception/unwind 事实；地址全部是模块 RVA。
@@ -1690,6 +1705,20 @@ fn analyze(args: &[String]) -> ExitCode {
                 })
                 .collect()
         }),
+        resources: module
+            .resources
+            .iter()
+            .map(|resource| ResourceJson {
+                type_id: resource.type_id,
+                type_name: resource.type_name.clone(),
+                id: resource.id,
+                name: resource.name.clone(),
+                language: resource.language,
+                code_page: resource.code_page,
+                rva: format!("0x{:x}", resource.rva),
+                size: resource.size,
+            })
+            .collect(),
     };
     match serde_json::to_string_pretty(&report) {
         Ok(json) => println!("{json}"),
