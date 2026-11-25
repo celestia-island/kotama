@@ -156,6 +156,20 @@ struct AptCharacterJson {
 }
 
 #[derive(Serialize)]
+struct AptImportJson {
+    movie: String,
+    name: String,
+    character: u32,
+    pointer: u32,
+}
+
+#[derive(Serialize)]
+struct AptExportJson {
+    name: String,
+    character: u32,
+}
+
+#[derive(Serialize)]
 struct AptMovieJson {
     kind: &'static str,
     entry_offset: usize,
@@ -167,6 +181,8 @@ struct AptMovieJson {
     import_count: u32,
     export_count: u32,
     characters: Vec<AptCharacterJson>,
+    imports: Vec<AptImportJson>,
+    exports: Vec<AptExportJson>,
 }
 
 #[derive(Serialize)]
@@ -1524,6 +1540,24 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                 offset: character.offset,
                 type_id: character.type_id,
                 type_name: character.type_name,
+            })
+            .collect(),
+        imports: info
+            .imports
+            .iter()
+            .map(|import| AptImportJson {
+                movie: import.movie.clone(),
+                name: import.name.clone(),
+                character: import.character,
+                pointer: import.pointer,
+            })
+            .collect(),
+        exports: info
+            .exports
+            .iter()
+            .map(|export| AptExportJson {
+                name: export.name.clone(),
+                character: export.character,
             })
             .collect(),
     };
