@@ -4,12 +4,20 @@
 Runs the owned MSVC fixture through both tools and requires the function RVA
 sets to agree closely, with exact agreement on a few named anchor functions.
 This is a Windows bench test: the production parser never links dbghelp.
+
+The PDB procedure table never lists linker-generated jump thunks (import
+trampolines `jmp [slot]` and `jmp rel` stubs), yet they are real executable
+entries and kotama reports them. Entries that only kotama reports are therefore
+excused when their first bytes have exactly that shape and the byte after the
+stub is padding (or the next entry is the following thunk of an array);
+everything else still has to clear the 0.99 Jaccard bar.
 """
 
 from __future__ import annotations
 import argparse
 import json
 import pathlib
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,6 +25,8 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = REPO / "fixtures/generated/x86_64-windows-msvc/-O0/loops.exe"
 ANCHORS = ("sum_squares", "count_down", "main", "mainCRTStartup")
+PADDING = (b"\xcc", b"\x90", b"\x00")
+THUNK_SHAPES = ((b"\xff\x25", 6), (b"\xe9", 5), (b"\xeb", 2))
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess:
@@ -44,6 +54,57 @@ def parse_dbghelp(path: pathlib.Path) -> dict[int, tuple[str, int]]:
     return out
 
 
+def image_sections(image: pathlib.Path) -> tuple[bytes, list[tuple[int, int, int, int]]]:
+    """Return the file bytes plus (virtual address, extent, raw pointer, raw size) per section."""
+    data = image.read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    count = struct.unpack_from("<H", data, pe + 6)[0]
+    optional = struct.unpack_from("<H", data, pe + 20)[0]
+    table = pe + 24 + optional
+    sections = []
+    for index in range(count):
+        offset = table + index * 40
+        virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, offset + 8)
+        sections.append((virtual_address, max(virtual_size, raw_size), raw_pointer, raw_size))
+    return data, sections
+
+
+def read_at(data: bytes, sections: list[tuple[int, int, int, int]], rva: int, length: int) -> bytes:
+    """Read `length` bytes at `rva`; empty when the range is not backed by file data."""
+    for virtual_address, extent, raw_pointer, raw_size in sections:
+        if virtual_address <= rva < virtual_address + extent:
+            offset = rva - virtual_address
+            if offset + length > raw_size:
+                return b""
+            start = raw_pointer + offset
+            return data[start : start + length]
+    return b""
+
+
+def classify_extras(
+    extras: list[int],
+    ours: dict[int, tuple[str, int]],
+    data: bytes,
+    sections: list[tuple[int, int, int, int]],
+) -> tuple[list[int], list[int]]:
+    """Split kotama-only entries into linker thunks and unexplained ones."""
+    thunks, unexplained = [], []
+    for rva in extras:
+        prefix = read_at(data, sections, rva, 6)
+        shape = next(((pattern, length) for pattern, length in THUNK_SHAPES if prefix.startswith(pattern)), None)
+        if shape is None:
+            unexplained.append(rva)
+            continue
+        length = shape[1]
+        following = read_at(data, sections, rva + length, 1)
+        # A thunk is followed by padding, or by the next thunk of a contiguous array.
+        if following in PADDING or (rva + length) in ours:
+            thunks.append(rva)
+        else:
+            unexplained.append(rva)
+    return thunks, unexplained
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog = "pdb_crosscheck")
     parser.add_argument("--image", type = pathlib.Path, default = DEFAULT_IMAGE)
@@ -67,15 +128,24 @@ def main() -> int:
         ours = parse_kotama(analyzed.stdout)
         theirs = parse_dbghelp(listing)
 
-    matched = len(set(ours) & set(theirs))
-    union = len(set(ours) | set(theirs))
+    data, sections = image_sections(image)
+    thunks, unexplained = classify_extras(sorted(set(ours) - set(theirs)), ours, data, sections)
+    filtered = set(ours) - set(thunks)
+    matched = len(filtered & set(theirs))
+    union = len(filtered | set(theirs))
     jaccard = matched / union if union else 1.0
-    print(f"dbghelp={len(theirs)} kotama={len(ours)} matched={matched} jaccard={jaccard:.6f}")
+    print(
+        f"dbghelp={len(theirs)} kotama={len(ours)} linker_thunks={len(thunks)} "
+        f"matched={matched} jaccard={jaccard:.6f}"
+    )
 
     failures = 0
+    if unexplained:
+        failures += 1
+        print(f"FAIL: {len(unexplained)} kotama-only entries are not linker thunks: {unexplained[:20]}")
     if jaccard < 0.99:
         failures += 1
-        print(f"FAIL: RVA agreement below 0.99; only_dbghelp={sorted(set(theirs) - set(ours))[:20]} only_kotama={sorted(set(ours) - set(theirs))[:20]}")
+        print(f"FAIL: RVA agreement below 0.99; only_dbghelp={sorted(set(theirs) - set(ours))[:20]}")
     for name in ANCHORS:
         mine = [(rva, size) for rva, (symbol, size) in ours.items() if symbol == name]
         reference = [(rva, size) for rva, (symbol, size) in theirs.items() if symbol == name]
