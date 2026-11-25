@@ -162,6 +162,58 @@ def cli_attach_case(label, command, payload, extra_env, env, settle = 0.5):
             child.wait()
 
 
+def cli_load_only_case(label, command, payload, env):
+    child_env = env.copy()
+    child_env.pop("KOTAMA_PAYLOAD_PIPE", None)
+    child_env.pop("KOTAMA_PAYLOAD_TCP", None)
+    child = subprocess.Popen(
+        command, cwd = REPO, env = child_env,
+        stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(0.5)
+        cli = [
+            "cargo", "run", "--quiet", "-p", "kotama-cli", "--", "live", "inject",
+            "--payload", str(payload), "--pid", str(child.pid), "--load-only",
+        ]
+        print("+ " + label + ": " + " ".join(cli), flush = True)
+        completed = subprocess.run(
+            cli, cwd = REPO, env = env, capture_output = True,
+            text = True, encoding = "utf-8", timeout = 180,
+        )
+        if completed.returncode != 0:
+            print(completed.stdout + completed.stderr)
+            raise SystemExit("windows-bench: load-only " + label + " failed with " + str(completed.returncode))
+        report = json.loads(completed.stdout)
+        if report.get("mode") != "load-only":
+            raise SystemExit("windows-bench: load-only " + label + " wrong mode: " + str(report))
+        if "proto_version" in report or "payload_main_base" in report:
+            raise SystemExit("windows-bench: load-only " + label + " ran the agent protocol: " + str(report))
+        if not report.get("thread_id"):
+            raise SystemExit("windows-bench: load-only " + label + " missing remote thread: " + str(report))
+        print("# load-only " + label + ": pid=" + str(report.get("pid")) + " module=" + str(report.get("module_base")), flush = True)
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout = 5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+
+
+def cli_load_only_matrix(env):
+    agent = REPO / "dist" / "x86_64-pc-windows-gnu" / "kotama_agent.dll"
+    agent_x86 = REPO / "dist" / "i686-pc-windows-gnu" / "kotama_agent.dll"
+    spin = REPO / "fixtures" / "generated" / "x86_64-windows-gnu" / "-O2" / "spin.exe"
+    spin_x86 = REPO / "fixtures" / "generated" / "x86-windows-gnu" / "-O2" / "spin.exe"
+    for path in (agent, agent_x86, spin, spin_x86):
+        if not path.is_file():
+            raise SystemExit("windows-bench: load-only input missing: " + str(path))
+    print("\n=== windows-bench: CLI load-only injection matrix ===", flush = True)
+    cli_load_only_case("x64", [str(spin), "30"], agent, env)
+    cli_load_only_case("wow64", [str(spin_x86), "30"], agent_x86, env)
+
+
 def cli_attach_matrix(env):
     agent = REPO / "dist" / "x86_64-pc-windows-gnu" / "kotama_agent.dll"
     rust_payload = REPO / "dist" / "x86_64-pc-windows-msvc" / "kotama_payload.dll"
@@ -246,6 +298,7 @@ def main() -> int:
         cli_injection_smoke(env)
         cli_attach_smoke(env)
         cli_attach_matrix(env)
+        cli_load_only_matrix(env)
 
     run_step("just gate with required fixtures", ["just", "gate"], env)
     if args.oracle:

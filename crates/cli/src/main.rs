@@ -41,8 +41,8 @@ Commands:
   live trace <pid> <addr-hex> [--seconds N]  INT3 breakpoint hit counting (Linux)
   live launch --preload <so> -- <cmd...>    Own-launch with the payload agent (Linux)
   live freeze <pid> <addr> u32:N --seconds N --write   Pin a value
-  live inject --payload <dll> [--transport pipe|tcp] [--pid <pid> | -- <cmd...>]
-                             Launch or attach, inject, handshake (Windows)
+  live inject --payload <dll> [--transport pipe|tcp] [--pid <pid> | -- <cmd...>] [--load-only]
+                             Launch or attach, inject, handshake (Windows); --load-only skips the agent protocol
   export <path>            Emit annotation scripts for other RE tools
                              --format idc|idapython|rizin   (required)
   serve                    Start the service surface (web UI + MCP)       (not wired yet)
@@ -642,6 +642,7 @@ fn live_inject(args: &[String]) -> ExitCode {
     }
 
     let mut payload: Option<String> = None;
+    let mut load_only = false;
     let mut transport = String::from("pipe");
     let mut attach_pid: Option<i32> = None;
     let mut command: Vec<String> = Vec::new();
@@ -649,6 +650,7 @@ fn live_inject(args: &[String]) -> ExitCode {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--payload" => payload = iter.next().cloned(),
+            "--load-only" => load_only = true,
             "--transport" => {
                 transport = iter.next().cloned().unwrap_or_default();
             }
@@ -832,6 +834,38 @@ fn live_inject(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if load_only {
+        #[derive(Serialize)]
+        struct LoadOnlyJson {
+            mode: &'static str,
+            pid: i32,
+            payload: String,
+            module_base: String,
+            remote_load_library: String,
+            thread_id: u32,
+            target_main_base: String,
+        }
+        let json = LoadOnlyJson {
+            mode: "load-only",
+            pid,
+            payload: payload.display().to_string(),
+            module_base: format!("0x{:x}", report.module_base),
+            remote_load_library: format!("0x{:x}", report.remote_load_library),
+            thread_id: report.thread_id,
+            target_main_base: format!("0x{main_base:x}"),
+        };
+        return match serde_json::to_string_pretty(&json) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("kotama: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let mut stream = match lane {
         Lane::Pipe(server) => match server.accept(Duration::from_secs(20)) {
