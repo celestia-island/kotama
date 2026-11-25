@@ -66,6 +66,31 @@ struct ChunksJson {
 }
 
 #[derive(Serialize)]
+struct MeshJson {
+    version: u32,
+    attributes: u32,
+    mesh_name: String,
+    container_name: String,
+    num_tris: u32,
+    num_vertices: u32,
+    num_materials: u32,
+    num_damage_stages: u32,
+    sort_level: u32,
+    prelit_version: u32,
+    future_counts: u32,
+    vertex_channels: u32,
+    face_channels: u32,
+    min: Vec<f32>,
+    max: Vec<f32>,
+    sphere_center: Vec<f32>,
+    sphere_radius: f32,
+    vertex_count: usize,
+    normal_count: usize,
+    triangle_count: usize,
+    material_info: Option<Vec<u32>>,
+}
+
+#[derive(Serialize)]
 struct ExtractJson {
     kind: &'static str,
     output: String,
@@ -74,7 +99,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -118,6 +143,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "info" => info_command(&args[1..]),
         "entries" => entries_command(&args[1..]),
         "chunks" => chunks_command(&args[1..]),
+        "mesh" => mesh_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
     }
@@ -407,6 +433,64 @@ fn chunks_command(args: &[String]) -> ExitCode {
         kind: "w3d",
         count: file.chunks.len(),
         chunks,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn mesh_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::W3d(file) = resource else {
+        return fail("mesh requires a W3D container");
+    };
+    let Some(header) = file.mesh_header() else {
+        return fail("W3D mesh_header3 not found or malformed");
+    };
+    let vertices = file.vertices();
+    let normals = file.normals();
+    let triangles = file.triangles();
+    let json = MeshJson {
+        version: header.version,
+        attributes: header.attributes,
+        mesh_name: header.mesh_name,
+        container_name: header.container_name,
+        num_tris: header.num_tris,
+        num_vertices: header.num_vertices,
+        num_materials: header.num_materials,
+        num_damage_stages: header.num_damage_stages,
+        sort_level: header.sort_level,
+        prelit_version: header.prelit_version,
+        future_counts: header.future_counts,
+        vertex_channels: header.vertex_channels,
+        face_channels: header.face_channels,
+        min: vec![header.min.x, header.min.y, header.min.z],
+        max: vec![header.max.x, header.max.y, header.max.z],
+        sphere_center: vec![
+            header.sphere_center.x,
+            header.sphere_center.y,
+            header.sphere_center.z,
+        ],
+        sphere_radius: header.sphere_radius,
+        vertex_count: vertices.len(),
+        normal_count: normals.len(),
+        triangle_count: triangles.len(),
+        material_info: file.material_info().map(|values| values.to_vec()),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
