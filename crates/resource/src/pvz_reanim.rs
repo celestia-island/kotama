@@ -1,17 +1,50 @@
 //! PvZ Reanim compiled container parser.
 //!
 //! Container: u32 `0xDEADFED4`, u32 uncompressed size, zlib stream.
-//! Body header: magic `0xB393B4C0`, unknown, track count, fps, unknown, track count.
+//! Body: magic `0xB393B4C0`, track count, fps, `0x0C` marker, frame counts,
+//! then length-prefixed track names and 44-byte transforms + 3-string elements.
 
 use crate::ResourceError;
 
-/// One Reanim track.
+/// Optional float sentinel used by Reanim transforms.
+pub const OPTIONAL_SENTINEL: u32 = 0xC61C_4000;
+
+/// One Reanim transform.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PvzReanimTransform {
+    /// x, y, kx, ky, sx, sy, f, a.
+    pub values: [Option<f32>; 8],
+}
+
+/// One Reanim frame's elements.
 #[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PvzReanimElements {
+    /// Image name.
+    pub image: Option<String>,
+    /// Font name.
+    pub font: Option<String>,
+    /// Text.
+    pub text: Option<String>,
+}
+
+/// One Reanim frame.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PvzReanimFrame {
+    /// Transform.
+    pub transform: PvzReanimTransform,
+    /// Elements.
+    pub elements: PvzReanimElements,
+}
+
+/// One Reanim track.
+#[derive(Clone, PartialEq, Debug)]
 pub struct PvzReanimTrack {
     /// Track name.
     pub name: String,
     /// Frame count.
     pub frame_count: u32,
+    /// First frame, when present.
+    pub first_frame: Option<PvzReanimFrame>,
 }
 
 /// Parsed PvZ Reanim container/header facts.
@@ -29,13 +62,13 @@ pub struct PvzReanimInfo {
     pub fps: f32,
     /// Unknown u32 at body + 16.
     pub unknown_16: u32,
-    /// Track count at body + 20.
+    /// Marker at body + 20 (expected 0x0C).
     pub track_count_2: u32,
     /// Printable strings found after the body header.
     pub strings: Vec<String>,
     /// Frame counts in track order.
     pub frame_counts: Vec<u32>,
-    /// Tracks discovered by scanning length-prefixed names.
+    /// Parsed tracks.
     pub tracks: Vec<PvzReanimTrack>,
 }
 
@@ -51,14 +84,52 @@ pub fn has_magic(bytes: &[u8]) -> bool {
     u32_at(bytes, 0) == Some(0xDEAD_FED4)
 }
 
-/// Parse and validate a Reanim compiled container.
-///
-/// # Errors
-/// Returns ResourceError::Invalid for a short container, a size mismatch, a
-/// zlib error or a bad body magic.
 #[cfg(feature = "pvz-reanim")]
-fn scan_track_names(bytes: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
+fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<Option<String>, ResourceError> {
+    let length = u32_at(bytes, *cursor)
+        .ok_or_else(|| ResourceError::Invalid("Reanim string length is unreadable".to_string()))?
+        as usize;
+    *cursor += 4;
+    let text = bytes
+        .get(
+            *cursor..cursor.checked_add(length).ok_or_else(|| {
+                ResourceError::Invalid("Reanim string length overflows".to_string())
+            })?,
+        )
+        .ok_or_else(|| ResourceError::Invalid("Reanim string is outside the body".to_string()))?;
+    let text = String::from_utf8_lossy(text).to_string();
+    *cursor += length;
+    Ok((!text.is_empty()).then_some(text))
+}
+
+#[cfg(feature = "pvz-reanim")]
+fn parse_frame_at(
+    bytes: &[u8],
+    transform_offset: usize,
+    elements_offset: usize,
+) -> Result<PvzReanimFrame, ResourceError> {
+    let mut cursor = transform_offset;
+    let mut values = [None; 8];
+    for (index, slot) in values.iter_mut().enumerate() {
+        let raw = u32_at(bytes, cursor + index * 4).ok_or_else(|| {
+            ResourceError::Invalid("Reanim transform value is unreadable".to_string())
+        })?;
+        *slot = (raw != OPTIONAL_SENTINEL).then(|| f32::from_bits(raw));
+    }
+    cursor = elements_offset;
+    let image = read_string(bytes, &mut cursor)?;
+    let font = read_string(bytes, &mut cursor)?;
+    let text = read_string(bytes, &mut cursor)?;
+    Ok(PvzReanimFrame {
+        transform: PvzReanimTransform { values },
+        elements: PvzReanimElements { image, font, text },
+    })
+}
+
+#[cfg(feature = "pvz-reanim")]
+fn scan_tracks(bytes: &[u8], frame_counts: &[u32]) -> Vec<PvzReanimTrack> {
+    let mut tracks = Vec::new();
+    let mut count_index = 0;
     for offset in 24..bytes.len().saturating_sub(5) {
         let Some(length) = u32_at(bytes, offset) else {
             continue;
@@ -79,18 +150,37 @@ fn scan_track_names(bytes: &[u8]) -> Vec<String> {
         {
             continue;
         }
-        if let Ok(text) = std::str::from_utf8(text) {
-            names.push(text.to_string());
+        let Ok(name) = std::str::from_utf8(text) else {
+            continue;
+        };
+        let Some(frame_count) = frame_counts.get(count_index).copied() else {
+            break;
+        };
+        count_index += 1;
+        let transform_offset = offset + 4 + length + 1 + 3;
+        let elements_offset = transform_offset + frame_count as usize * 44;
+        let first_frame = (frame_count > 0)
+            .then(|| parse_frame_at(bytes, transform_offset, elements_offset))
+            .transpose()
+            .ok()
+            .flatten();
+        tracks.push(PvzReanimTrack {
+            name: name.to_string(),
+            frame_count,
+            first_frame,
+        });
+        if count_index == frame_counts.len() {
+            break;
         }
     }
-    names
+    tracks
 }
 
 /// Parse and validate a Reanim compiled container.
 ///
 /// # Errors
 /// Returns ResourceError::Invalid for a short container, a size mismatch, a
-/// zlib error or a bad body magic.
+/// zlib error or malformed track data.
 #[cfg(feature = "pvz-reanim")]
 pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
     use std::io::Read;
@@ -128,25 +218,24 @@ pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
             "Reanim body magic {body_magic:#x} is invalid"
         )));
     }
+    let track_count = u32_at(&body, 8)
+        .ok_or_else(|| ResourceError::Invalid("Reanim track count is unreadable".to_string()))?;
     let fps = f32::from_le_bytes(
         body[12..16]
             .try_into()
             .map_err(|_| ResourceError::Invalid("Reanim fps is unreadable".to_string()))?,
     );
-    let track_count = u32_at(&body, 8)
-        .ok_or_else(|| ResourceError::Invalid("Reanim track count is unreadable".to_string()))?;
+    let marker = u32_at(&body, 20)
+        .ok_or_else(|| ResourceError::Invalid("Reanim marker is unreadable".to_string()))?;
+    if marker != 0x0C {
+        return Err(ResourceError::Invalid(format!(
+            "Reanim marker {marker:#x} is invalid"
+        )));
+    }
     let frame_counts = (0..track_count as usize)
         .filter_map(|index| u32_at(&body, 24 + index * 12 + 8))
         .collect::<Vec<_>>();
-    let track_names = scan_track_names(&body);
-    let tracks = frame_counts
-        .iter()
-        .zip(track_names)
-        .map(|(frame_count, name)| PvzReanimTrack {
-            name,
-            frame_count: *frame_count,
-        })
-        .collect();
+    let tracks = scan_tracks(&body, &frame_counts);
     let mut strings = Vec::new();
     let mut start: Option<usize> = None;
     for (offset, byte) in body.iter().enumerate().skip(24) {
@@ -179,9 +268,7 @@ pub fn parse(bytes: &[u8]) -> Result<PvzReanimInfo, ResourceError> {
         fps,
         unknown_16: u32_at(&body, 16)
             .ok_or_else(|| ResourceError::Invalid("Reanim field 16 is unreadable".to_string()))?,
-        track_count_2: u32_at(&body, 20).ok_or_else(|| {
-            ResourceError::Invalid("Reanim track count 2 is unreadable".to_string())
-        })?,
+        track_count_2: marker,
         strings,
         frame_counts,
         tracks,
@@ -206,19 +293,27 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn parses_container() {
+    fn parses_container_and_first_frame() {
         let mut body = Vec::new();
         body.extend_from_slice(&0xB393_B4C0u32.to_le_bytes());
         body.extend_from_slice(&1u32.to_le_bytes());
-        body.extend_from_slice(&11u32.to_le_bytes());
+        body.extend_from_slice(&1u32.to_le_bytes());
         body.extend_from_slice(&12.0f32.to_le_bytes());
         body.extend_from_slice(&0u32.to_le_bytes());
-        body.extend_from_slice(&12u32.to_le_bytes());
+        body.extend_from_slice(&0x0Cu32.to_le_bytes());
         body.extend_from_slice(&[0; 8]);
         body.extend_from_slice(&1u32.to_le_bytes());
         body.extend_from_slice(&9u32.to_le_bytes());
         body.extend_from_slice(b"anim_idle");
         body.push(0x2C);
+        body.extend_from_slice(&[0; 3]);
+        for _ in 0..8 {
+            body.extend_from_slice(&OPTIONAL_SENTINEL.to_le_bytes());
+        }
+        body.extend_from_slice(&[0; 12]);
+        for _ in 0..3 {
+            body.extend_from_slice(&0u32.to_le_bytes());
+        }
         let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         zlib.write_all(&body).unwrap();
         let compressed = zlib.finish().unwrap();
@@ -226,13 +321,13 @@ mod tests {
         bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&compressed);
         let info = parse(&bytes).unwrap();
-        assert_eq!(info.track_count, 11);
+        assert_eq!(info.track_count, 1);
         assert_eq!(info.fps, 12.0);
-        assert_eq!(info.track_count_2, 12);
-        assert_eq!(info.strings, vec!["anim_idle,"], "{:?}", info.strings);
         assert_eq!(info.tracks.len(), 1);
         assert_eq!(info.tracks[0].name, "anim_idle");
-        assert_eq!(info.tracks[0].frame_count, 1);
+        let frame = info.tracks[0].first_frame.as_ref().unwrap();
+        assert_eq!(frame.transform.values, [None; 8]);
+        assert_eq!(frame.elements.image, None);
     }
 
     #[test]
