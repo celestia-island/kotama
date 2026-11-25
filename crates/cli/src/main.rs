@@ -50,6 +50,8 @@ Commands:
   proxy inspect <dll>      Show the complete PE export table
   proxy generate <dll> --output <dir> [--backing <name>] [--build]
                            Generate a complete forwarding mirror and manifest; optionally build it with Zig
+                             --override <name> / --override-ordinal <n>   local symbols from --hooks <file.c>
+                             --exclude <name> / --exclude-ordinal <n>     deny wins over include
   serve                    Start the service surface (web UI + MCP)       (not wired yet)
 
 Options:

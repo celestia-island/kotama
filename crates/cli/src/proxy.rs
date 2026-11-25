@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use kotama_image::pe_export::{parse_pe_exports, PeExportTable};
-use kotama_proxy::{manifest, mirror_def, MirrorExport, MirrorOptions};
+use kotama_proxy::{
+    manifest, manifest_with, mirror_def_with, plan_overrides, MirrorExport, MirrorOptions,
+    OverrideSelection,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -22,11 +25,13 @@ struct GenerateJson {
     library: String,
     backing: String,
     export_count: usize,
+    override_count: usize,
+    hooks: Option<String>,
     built: bool,
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage:\n  kotama proxy inspect <dll>\n  kotama proxy generate <dll> --output <dir> [--backing <name>] [--build]");
+    eprintln!("usage:\n  kotama proxy inspect <dll>\n  kotama proxy generate <dll> --output <dir> [--backing <name>] [--build]\n      [--override <name>]... [--override-ordinal <n>]... [--exclude <name>]... [--exclude-ordinal <n>]... [--hooks <file.c>]");
     ExitCode::from(2)
 }
 
@@ -117,6 +122,8 @@ fn generate(args: &[String]) -> ExitCode {
     let mut output: Option<PathBuf> = None;
     let mut backing: Option<String> = None;
     let mut build = false;
+    let mut selection = OverrideSelection::default();
+    let mut hooks: Option<PathBuf> = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -129,6 +136,44 @@ fn generate(args: &[String]) -> ExitCode {
                 backing = args.get(index).cloned();
             }
             "--build" => build = true,
+            "--override" => {
+                index += 1;
+                let Some(name) = args.get(index) else {
+                    return usage();
+                };
+                selection.names.push(name.clone());
+            }
+            "--override-ordinal" => {
+                index += 1;
+                let Some(raw) = args.get(index) else {
+                    return usage();
+                };
+                let Ok(ordinal) = raw.parse::<u16>() else {
+                    return usage();
+                };
+                selection.ordinals.push(ordinal);
+            }
+            "--exclude" => {
+                index += 1;
+                let Some(name) = args.get(index) else {
+                    return usage();
+                };
+                selection.exclude_names.push(name.clone());
+            }
+            "--exclude-ordinal" => {
+                index += 1;
+                let Some(raw) = args.get(index) else {
+                    return usage();
+                };
+                let Ok(ordinal) = raw.parse::<u16>() else {
+                    return usage();
+                };
+                selection.exclude_ordinals.push(ordinal);
+            }
+            "--hooks" => {
+                index += 1;
+                hooks = args.get(index).map(PathBuf::from);
+            }
             other if input.is_none() && !other.starts_with('-') => {
                 input = Some(PathBuf::from(other));
             }
@@ -154,9 +199,28 @@ fn generate(args: &[String]) -> ExitCode {
         library: "mirror.dll".to_string(),
         backing,
     };
+    if selection.is_empty() && hooks.is_some() {
+        return fail("--hooks requires at least one --override or --override-ordinal");
+    }
+    if !selection.is_empty() && hooks.is_none() {
+        return fail("overrides require --hooks <file.c> defining the generated symbols");
+    }
+    let hooks_bytes = match hooks.as_ref() {
+        Some(path) => match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => return fail(format!("read {}: {error}", path.display())),
+        },
+        None => None,
+    };
     let result = (|| -> Result<GenerateJson, String> {
         let (data, table) = load(&input)?;
-        let definition = mirror_def(&table, &options).map_err(|error| error.to_string())?;
+        let plan = if selection.is_empty() {
+            None
+        } else {
+            Some(plan_overrides(&table, &selection).map_err(|error| error.to_string())?)
+        };
+        let definition =
+            mirror_def_with(&table, &options, plan.as_ref()).map_err(|error| error.to_string())?;
         fs::create_dir_all(&output)
             .map_err(|error| format!("create output directory {}: {error}", output.display()))?;
         let def_path = output.join("proxy.def");
@@ -184,14 +248,19 @@ fn generate(args: &[String]) -> ExitCode {
                 }
             };
             let zig = std::env::var_os("KOTAMA_ZIG").unwrap_or_else(|| "zig".into());
-            let status = Command::new(&zig)
+            let mut command = Command::new(&zig);
+            command
                 .arg("cc")
                 .arg("-target")
                 .arg(target)
                 .arg("-shared")
                 .arg("-o")
                 .arg(&dll_path)
-                .arg(&c_path)
+                .arg(&c_path);
+            if let Some(hooks) = hooks.as_ref() {
+                command.arg(hooks);
+            }
+            let status = command
                 .arg(&def_path)
                 .status()
                 .map_err(|error| format!("run zig cc: {error}"))?;
@@ -208,7 +277,24 @@ fn generate(args: &[String]) -> ExitCode {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| input.display().to_string());
-        let facts = manifest(&input_name, &data, &table, &options, built.as_deref());
+        let hooks_source = hooks.as_ref().map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        });
+        let hooks_pair = match (hooks_source.as_deref(), hooks_bytes.as_deref()) {
+            (Some(name), Some(bytes)) => Some((name, bytes)),
+            _ => None,
+        };
+        let facts = manifest_with(
+            &input_name,
+            &data,
+            &table,
+            &options,
+            built.as_deref(),
+            plan.as_ref(),
+            hooks_pair,
+        );
         let text = serde_json::to_vec_pretty(&facts).map_err(|error| error.to_string())?;
         write_new(&manifest_path, &text)?;
         Ok(GenerateJson {
@@ -216,6 +302,8 @@ fn generate(args: &[String]) -> ExitCode {
             library: options.library,
             backing: options.backing,
             export_count: table.entries.len(),
+            override_count: plan.as_ref().map_or(0, |plan| plan.len()),
+            hooks: hooks_source,
             built: build,
         })
     })();

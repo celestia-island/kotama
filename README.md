@@ -97,15 +97,21 @@ cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kota
 cargo run -p kotama-cli -- live inject --payload my_hook.dll --pid <pid> --load-only                # Windows: load a self-initializing DLL without the agent protocol
 cargo run -p kotama-cli -- proxy inspect <dll>                                                      # complete PE export facts (aliases, ordinals, forwarders)
 cargo run -p kotama-cli -- proxy generate <dll> --output out --build                                # buildable forwarding mirror + manifest
+cargo run -p kotama-cli -- proxy generate <dll> --output out --override <name> --hooks hooks.c --build  # selected local overrides; every other export still forwards
+just bench-windows                          # native Windows bench (add --oracle for Ghidra)
+KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
+python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
+```
 
 Mirror backing modes: the default `--backing <stem>_original.dll` expects the caller to rename or
 copy the original to that name (drop-in replacement). For a DLL that cannot load under a new name
 (KnownDLLs such as `user32.dll`), pass `--backing user32.dll` instead and load the generated
 `mirror.dll` explicitly under its own name — the mirror then forwards to the real system module.
-just bench-windows                          # native Windows bench (add --oracle for Ghidra)
-KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
-python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
-```
+
+Selected overrides need `--hooks <file.c>`; the generated manifest lists the exact
+`KOTAMA_OVERRIDE_<ordinal>` symbol for every overridden export group (aliases share one symbol),
+records `action: override|forward` per export, and hashes the hooks source. No function ABI is
+guessed: the hooks file must declare the correct signature.
 
 Fixture matrix: `x86_64-linux-gnu / x86-linux-gnu / x86_64-windows-gnu / x86-windows-gnu`
 × `-O2/-O0`, plus native `x86_64-windows-msvc / x86-windows-msvc` with `/Zi` PDBs.
