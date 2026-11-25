@@ -24,6 +24,7 @@ resource-apt-const = ["kotama-resource/apt-const"]
 resource-csf = ["kotama-resource/csf"]
 resource-dds = ["kotama-resource/dds"]
 resource-tga = ["kotama-resource/tga"]
+resource-vp6 = ["kotama-resource/vp6"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]
