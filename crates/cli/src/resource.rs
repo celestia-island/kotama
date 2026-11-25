@@ -129,6 +129,7 @@ struct AssetManifestJson {
     version: u16,
     stream_checksum: u32,
     all_types_hash: u32,
+    asset_count: u32,
     total_instance_data_size: u32,
     max_instance_chunk_size: u32,
     max_relocation_chunk_size: u32,
@@ -137,7 +138,6 @@ struct AssetManifestJson {
     referenced_manifest_name_buffer_size: u32,
     asset_name_buffer_size: u32,
     source_file_name_buffer_size: u32,
-    tail: u32,
     names: Vec<String>,
 }
 
@@ -1058,6 +1058,7 @@ fn manifest_command(args: &[String]) -> ExitCode {
         version: info.version,
         stream_checksum: info.stream_checksum,
         all_types_hash: info.all_types_hash,
+        asset_count: info.asset_count,
         total_instance_data_size: info.total_instance_data_size,
         max_instance_chunk_size: info.max_instance_chunk_size,
         max_relocation_chunk_size: info.max_relocation_chunk_size,
@@ -1066,7 +1067,6 @@ fn manifest_command(args: &[String]) -> ExitCode {
         referenced_manifest_name_buffer_size: info.referenced_manifest_name_buffer_size,
         asset_name_buffer_size: info.asset_name_buffer_size,
         source_file_name_buffer_size: info.source_file_name_buffer_size,
-        tail: info.tail,
         names: info.names,
     };
     match serde_json::to_string_pretty(&json) {
