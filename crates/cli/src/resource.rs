@@ -31,6 +31,7 @@ struct InfoJson {
     entry: Option<u32>,
     archive_version: Option<&'static str>,
     entries: Option<usize>,
+    chunks: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -48,6 +49,22 @@ struct EntriesJson<'a> {
 }
 
 #[derive(Serialize)]
+struct ChunkJson {
+    type_id: u32,
+    depth: u8,
+    offset: u64,
+    size: u32,
+    has_subchunks: bool,
+}
+
+#[derive(Serialize)]
+struct ChunksJson {
+    kind: &'static str,
+    count: usize,
+    chunks: Vec<ChunkJson>,
+}
+
+#[derive(Serialize)]
 struct ExtractJson {
     kind: &'static str,
     output: String,
@@ -56,7 +73,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -99,6 +116,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "identify" => identify_command(&args[1..]),
         "info" => info_command(&args[1..]),
         "entries" => entries_command(&args[1..]),
+        "chunks" => chunks_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
     }
@@ -166,6 +184,7 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             entry: None,
             archive_version: None,
             entries: None,
+            chunks: None,
         },
         Resource::Vbs(vbs) => InfoJson {
             kind: "vbs",
@@ -179,6 +198,7 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             entry: None,
             archive_version: None,
             entries: None,
+            chunks: None,
         },
         Resource::DosCom(com) => InfoJson {
             kind: "dos-com",
@@ -192,6 +212,7 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             entry: Some(kotama_resource::dos_com::ENTRY_ADDRESS),
             archive_version: None,
             entries: None,
+            chunks: None,
         },
         Resource::Big(archive) => InfoJson {
             kind: "big",
@@ -205,6 +226,21 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             entry: None,
             archive_version: Some(archive.version.short()),
             entries: Some(archive.entries.len()),
+            chunks: None,
+        },
+        Resource::W3d(file) => InfoJson {
+            kind: "w3d",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: Some(file.data.len()),
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: Some(file.chunks.len()),
         },
     }
 }
@@ -302,6 +338,73 @@ fn entries_command(args: &[String]) -> ExitCode {
         kind: "big",
         count: archive.entries.len(),
         entries,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn chunks_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut limit = 200usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                limit = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::W3d(file) = resource else {
+        return fail("chunks requires a W3D container");
+    };
+    let chunks = file
+        .chunks
+        .iter()
+        .take(limit)
+        .map(|chunk| ChunkJson {
+            type_id: chunk.type_id,
+            depth: chunk.depth,
+            offset: chunk.offset,
+            size: chunk.size,
+            has_subchunks: chunk.has_subchunks,
+        })
+        .collect();
+    let json = ChunksJson {
+        kind: "w3d",
+        count: file.chunks.len(),
+        chunks,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
