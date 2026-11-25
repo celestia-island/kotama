@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 pub mod apt;
+pub mod apt_geometry;
 pub mod big;
 pub mod dos_com;
 pub mod swf;
@@ -28,6 +29,8 @@ pub enum ResourceKind {
     W3d,
     /// APT constant file.
     AptConst,
+    /// APT geometry text.
+    AptGeometry,
 }
 
 impl ResourceKind {
@@ -41,6 +44,7 @@ impl ResourceKind {
             Self::Big => "big",
             Self::W3d => "w3d",
             Self::AptConst => "apt-const",
+            Self::AptGeometry => "apt-geometry",
         }
     }
 
@@ -54,6 +58,7 @@ impl ResourceKind {
             "big" | "bigf" | "big4" => Some(Self::Big),
             "w3d" => Some(Self::W3d),
             "apt-const" => Some(Self::AptConst),
+            "apt-geometry" => Some(Self::AptGeometry),
             _ => None,
         }
     }
@@ -68,6 +73,7 @@ impl ResourceKind {
             Self::Big => "big",
             Self::W3d => "w3d",
             Self::AptConst => "apt-const",
+            Self::AptGeometry => "apt-geometry",
         }
     }
 
@@ -81,6 +87,7 @@ impl ResourceKind {
             Self::Big => cfg!(feature = "big"),
             Self::W3d => cfg!(feature = "w3d"),
             Self::AptConst => cfg!(feature = "apt-const"),
+            Self::AptGeometry => cfg!(feature = "apt-geometry"),
         }
     }
 }
@@ -120,6 +127,8 @@ pub enum Resource<'a> {
     W3d(w3d::W3dFile<'a>),
     /// APT constant file.
     AptConst(apt::AptConstFile),
+    /// APT geometry text.
+    AptGeometry(apt_geometry::AptGeometry),
 }
 
 impl Resource<'_> {
@@ -133,6 +142,7 @@ impl Resource<'_> {
             Self::Big(_) => ResourceKind::Big,
             Self::W3d(_) => ResourceKind::W3d,
             Self::AptConst(_) => ResourceKind::AptConst,
+            Self::AptGeometry(_) => ResourceKind::AptGeometry,
         }
     }
 }
@@ -164,6 +174,9 @@ impl Resource<'_> {
             )),
             Self::AptConst(_) => Err(ResourceError::Unsupported(
                 "APT constants are a table; inspect entries".to_string(),
+            )),
+            Self::AptGeometry(_) => Err(ResourceError::Unsupported(
+                "APT geometry is a text scene; inspect records".to_string(),
             )),
         }
     }
@@ -257,6 +270,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Vbs.enabled(),
         });
     }
+    if extension_matches(extension, "ru") {
+        return Some(Identification {
+            kind: ResourceKind::AptGeometry,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::AptGeometry.enabled(),
+        });
+    }
     if extension_matches(extension, "w3d") {
         return Some(Identification {
             kind: ResourceKind::W3d,
@@ -301,6 +321,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Big => big::parse(bytes).map(Resource::Big),
         ResourceKind::W3d => w3d::parse(bytes).map(Resource::W3d),
         ResourceKind::AptConst => apt::parse(bytes).map(Resource::AptConst),
+        ResourceKind::AptGeometry => apt_geometry::parse(bytes).map(Resource::AptGeometry),
     }
 }
 

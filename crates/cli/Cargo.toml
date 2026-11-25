@@ -21,6 +21,7 @@ resource-dos-com = ["kotama-resource/dos-com"]
 resource-big = ["kotama-resource/big"]
 resource-w3d = ["kotama-resource/w3d"]
 resource-apt-const = ["kotama-resource/apt-const"]
+resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]
 kotama.workspace = true

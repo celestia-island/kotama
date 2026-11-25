@@ -17,6 +17,7 @@ dos-com = []
 big = []
 w3d = []
 apt-const = []
+apt-geometry = []
 
 [dependencies]
 flate2 = { version = "^1", optional = true, default-features = false, features = ["rust_backend"] }
