@@ -19,6 +19,7 @@ w3d = []
 apt-const = []
 csf = []
 dds = []
+tga = []
 apt-geometry = []
 
 [dependencies]
