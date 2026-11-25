@@ -3,6 +3,7 @@
 //! 已实现：`analyze <path> [--decompile] [--limit N]`（静态管线 P0）。
 //! 分期接线中：`live` / `pack` / `serve`（设计案 `_reports/reveng-toolkit-20261123/PLAN.md`）。
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -240,6 +241,8 @@ struct Report {
     rtti: Option<RttiJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     resources: Vec<ResourceJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version_info: Option<VersionJson>,
 }
 
 /// MSVC RTTI facts exposed by the CLI; deterministic order comes from the scanner.
@@ -276,6 +279,18 @@ struct RttiTypeJson {
     rva: String,
     mangled: String,
     class_name: String,
+}
+
+fn format_version(ms: u32, ls: u32) -> String {
+    format!("{}.{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff)
+}
+
+/// PE RT_VERSION 的版本事实。
+#[derive(Serialize)]
+struct VersionJson {
+    file_version: Option<String>,
+    product_version: Option<String>,
+    strings: BTreeMap<String, String>,
 }
 
 /// 一条 PE 资源目录叶子；地址是模块 RVA。
@@ -1719,6 +1734,11 @@ fn analyze(args: &[String]) -> ExitCode {
                 size: resource.size,
             })
             .collect(),
+        version_info: module.version_info.as_ref().map(|info| VersionJson {
+            file_version: info.file_version.map(|(ms, ls)| format_version(ms, ls)),
+            product_version: info.product_version.map(|(ms, ls)| format_version(ms, ls)),
+            strings: info.strings.clone(),
+        }),
     };
     match serde_json::to_string_pretty(&report) {
         Ok(json) => println!("{json}"),
