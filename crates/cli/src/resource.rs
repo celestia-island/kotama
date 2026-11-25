@@ -189,6 +189,19 @@ struct AptMovieJson {
 }
 
 #[derive(Serialize)]
+struct PvzReanimJson {
+    kind: &'static str,
+    uncompressed_size: u32,
+    body_magic: u32,
+    unknown_4: u32,
+    track_count: u32,
+    fps: f32,
+    unknown_16: u32,
+    track_count_2: u32,
+    strings: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct AptImageAssignmentJson {
     image_id: i32,
     texture_id: Option<i32>,
@@ -335,7 +348,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -390,6 +403,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "relocation" => relocation_command(&args[1..]),
         "apt-movie" => apt_movie_command(&args[1..]),
         "apt-image-map" => apt_image_map_command(&args[1..]),
+        "pvz-reanim" => pvz_reanim_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -688,6 +702,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::AptImageMap(_) => InfoJson {
             kind: "apt-image-map",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::PvzReanim(_) => InfoJson {
+            kind: "pvz-reanim",
             compression: None,
             version: None,
             declared_length: None,
@@ -1633,6 +1663,42 @@ fn apt_image_map_command(args: &[String]) -> ExitCode {
                 rectangle: assignment.rectangle.map(|values| values.to_vec()),
             })
             .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn pvz_reanim_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::PvzReanim(info) = resource else {
+        return fail("pvz-reanim requires a Reanim container");
+    };
+    let json = PvzReanimJson {
+        kind: "pvz-reanim",
+        uncompressed_size: info.uncompressed_size,
+        body_magic: info.body_magic,
+        unknown_4: info.unknown_4,
+        track_count: info.track_count,
+        fps: info.fps,
+        unknown_16: info.unknown_16,
+        track_count_2: info.track_count_2,
+        strings: info.strings,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
