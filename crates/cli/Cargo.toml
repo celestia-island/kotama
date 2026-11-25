@@ -29,6 +29,7 @@ resource-asset-manifest = ["kotama-resource/asset-manifest"]
 resource-asset = ["kotama-resource/asset"]
 resource-asset-relocation = ["kotama-resource/asset-relocation"]
 resource-apt-movie = ["kotama-resource/apt-movie"]
+resource-apt-image-map = ["kotama-resource/apt-image-map"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]

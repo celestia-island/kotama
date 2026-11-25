@@ -801,6 +801,33 @@ fn apt_movie_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-apt-image-map")]
+#[test]
+fn apt_image_map_is_inspected() {
+    let root = temp_dir("apt-image-map");
+    let source = root.join("sample.dat");
+    fs::write(&source, b"; comment\n19->1\n26 = 1\n23->1 (2 3 4 5)\n9->\n").unwrap();
+    let map = kotama()
+        .args(["resource", "apt-image-map"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(map.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&map.stdout).unwrap();
+    assert_eq!(facts["assignments"].as_array().unwrap().len(), 4);
+    assert_eq!(facts["assignments"][0]["image_id"], 19);
+    assert_eq!(facts["assignments"][0]["texture_id"], 1);
+    assert_eq!(
+        facts["assignments"][2]["rectangle"],
+        serde_json::json!([2, 3, 4, 5])
+    );
+    assert_eq!(
+        facts["assignments"][3]["texture_id"],
+        serde_json::Value::Null
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
