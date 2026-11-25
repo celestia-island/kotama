@@ -200,7 +200,7 @@ struct PvzReanimFrameJson {
 struct PvzReanimTrackJson {
     name: String,
     frame_count: u32,
-    first_frame: Option<PvzReanimFrameJson>,
+    frames: Vec<PvzReanimFrameJson>,
 }
 
 #[derive(Serialize)]
@@ -1723,12 +1723,16 @@ fn pvz_reanim_command(args: &[String]) -> ExitCode {
             .map(|track| PvzReanimTrackJson {
                 name: track.name.clone(),
                 frame_count: track.frame_count,
-                first_frame: track.first_frame.as_ref().map(|frame| PvzReanimFrameJson {
-                    values: frame.transform.values.to_vec(),
-                    image: frame.elements.image.clone(),
-                    font: frame.elements.font.clone(),
-                    text: frame.elements.text.clone(),
-                }),
+                frames: track
+                    .frames
+                    .iter()
+                    .map(|frame| PvzReanimFrameJson {
+                        values: frame.transform.values.to_vec(),
+                        image: frame.elements.image.clone(),
+                        font: frame.elements.font.clone(),
+                        text: frame.elements.text.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
     };
