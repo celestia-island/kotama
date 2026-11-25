@@ -30,6 +30,7 @@ resource-asset = ["kotama-resource/asset"]
 resource-asset-relocation = ["kotama-resource/asset-relocation"]
 resource-apt-movie = ["kotama-resource/apt-movie"]
 resource-apt-image-map = ["kotama-resource/apt-image-map"]
+resource-pvz-reanim = ["kotama-resource/pvz-reanim"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]
@@ -46,6 +47,9 @@ kotama-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+flate2 = { version = "^1", default-features = false, features = ["rust_backend"] }
 
 [lints]
 workspace = true

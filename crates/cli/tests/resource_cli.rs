@@ -828,6 +828,45 @@ fn apt_image_map_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-pvz-reanim")]
+#[test]
+fn pvz_reanim_is_inspected() {
+    use std::io::Write;
+    let root = temp_dir("pvz-reanim");
+    let source = root.join("sample.reanim.compiled");
+    let mut body = Vec::new();
+    body.extend_from_slice(&0xB393_B4C0u32.to_le_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes());
+    body.extend_from_slice(&11u32.to_le_bytes());
+    body.extend_from_slice(&12.0f32.to_le_bytes());
+    body.extend_from_slice(&0u32.to_le_bytes());
+    body.extend_from_slice(&12u32.to_le_bytes());
+    body.extend_from_slice(b"anim_idle\0");
+    let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    zlib.write_all(&body).unwrap();
+    let compressed = zlib.finish().unwrap();
+    let mut bytes = 0xDEAD_FED4u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&compressed);
+    fs::write(&source, &bytes).unwrap();
+
+    let reanim = kotama()
+        .args(["resource", "pvz-reanim"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        reanim.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reanim.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&reanim.stdout).unwrap();
+    assert_eq!(facts["track_count"], 11);
+    assert_eq!(facts["fps"], 12.0);
+    assert_eq!(facts["strings"][0], "anim_idle");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

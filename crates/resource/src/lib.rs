@@ -17,6 +17,7 @@ pub mod big;
 pub mod csf;
 pub mod dds;
 pub mod dos_com;
+pub mod pvz_reanim;
 pub mod swf;
 pub mod tga;
 pub mod vbs;
@@ -58,6 +59,8 @@ pub enum ResourceKind {
     AptMovie,
     /// APT image map.
     AptImageMap,
+    /// PvZ Reanim compiled container.
+    PvzReanim,
 }
 
 impl ResourceKind {
@@ -81,6 +84,7 @@ impl ResourceKind {
             Self::AssetRelocation => "asset-relocation",
             Self::AptMovie => "apt-movie",
             Self::AptImageMap => "apt-image-map",
+            Self::PvzReanim => "pvz-reanim",
         }
     }
 
@@ -104,6 +108,7 @@ impl ResourceKind {
             "asset-relocation" => Some(Self::AssetRelocation),
             "apt-movie" => Some(Self::AptMovie),
             "apt-image-map" => Some(Self::AptImageMap),
+            "pvz-reanim" => Some(Self::PvzReanim),
             _ => None,
         }
     }
@@ -128,6 +133,7 @@ impl ResourceKind {
             Self::AssetRelocation => "asset-relocation",
             Self::AptMovie => "apt-movie",
             Self::AptImageMap => "apt-image-map",
+            Self::PvzReanim => "pvz-reanim",
         }
     }
 
@@ -151,6 +157,7 @@ impl ResourceKind {
             Self::AssetRelocation => cfg!(feature = "asset-relocation"),
             Self::AptMovie => cfg!(feature = "apt-movie"),
             Self::AptImageMap => cfg!(feature = "apt-image-map"),
+            Self::PvzReanim => cfg!(feature = "pvz-reanim"),
         }
     }
 }
@@ -210,6 +217,8 @@ pub enum Resource<'a> {
     AptMovie(apt_movie::AptMovieInfo),
     /// APT image map.
     AptImageMap(apt_image_map::AptImageMap),
+    /// PvZ Reanim compiled container.
+    PvzReanim(pvz_reanim::PvzReanimInfo),
 }
 
 impl Resource<'_> {
@@ -233,6 +242,7 @@ impl Resource<'_> {
             Self::AssetRelocation(_) => ResourceKind::AssetRelocation,
             Self::AptMovie(_) => ResourceKind::AptMovie,
             Self::AptImageMap(_) => ResourceKind::AptImageMap,
+            Self::PvzReanim(_) => ResourceKind::PvzReanim,
         }
     }
 }
@@ -294,6 +304,9 @@ impl Resource<'_> {
             )),
             Self::AptImageMap(_) => Err(ResourceError::Unsupported(
                 "APT image map is a text table; inspect assignments".to_string(),
+            )),
+            Self::PvzReanim(_) => Err(ResourceError::Unsupported(
+                "Reanim tracks are opaque; inspect header".to_string(),
             )),
         }
     }
@@ -415,6 +428,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if pvz_reanim::has_magic(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::PvzReanim,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::PvzReanim.enabled(),
+        });
+    }
     if extension_matches(extension, "dat") {
         return Some(Identification {
             kind: ResourceKind::AptImageMap,
@@ -513,6 +533,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         }
         ResourceKind::AptMovie => apt_movie::parse(bytes, 16).map(Resource::AptMovie),
         ResourceKind::AptImageMap => apt_image_map::parse(bytes).map(Resource::AptImageMap),
+        ResourceKind::PvzReanim => pvz_reanim::parse(bytes).map(Resource::PvzReanim),
     }
 }
 
