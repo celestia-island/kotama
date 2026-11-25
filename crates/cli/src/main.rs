@@ -4,9 +4,11 @@
 //! 分期接线中：`live` / `pack` / `serve`（设计案 `_reports/reveng-toolkit-20261123/PLAN.md`）。
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
+use kotama::AddressSpace;
 use kotama::ABI_VERSION;
 use kotama_backend_ghidra::GhidraOracle;
 use kotama_decomp::decompile_function_bounded_with_exceptions;
@@ -33,6 +35,8 @@ Commands:
                              --xref             also emit the function-level call graph
                              --strings          also emit string cross-references
                              --vtables          also emit vtables (generic pointer tables plus RTTI-anchored ones)
+                             --extract-resource <index>  write the raw PE resource payload at this resources[] index
+                             --resource-output <path>   destination for --extract-resource (must not exist)
                              --rtti             also emit MSVC RTTI/vtable facts (PE/MSVC)
   oracle <path> [--dump <ghidra-list>]
                            Run Ghidra headless and diff its function list against ours;
@@ -1549,6 +1553,8 @@ fn analyze(args: &[String]) -> ExitCode {
     let mut strings = false;
     let mut vtables_flag = false;
     let mut rtti_flag = false;
+    let mut extract_resource: Option<usize> = None;
+    let mut resource_output: Option<String> = None;
     let mut limit: usize = 8;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -1558,6 +1564,20 @@ fn analyze(args: &[String]) -> ExitCode {
             "--strings" => strings = true,
             "--vtables" => vtables_flag = true,
             "--rtti" => rtti_flag = true,
+            "--extract-resource" => match iter.next().and_then(|value| value.parse().ok()) {
+                Some(value) => extract_resource = Some(value),
+                None => {
+                    eprintln!("kotama: --extract-resource wants a resources[] index");
+                    return ExitCode::from(2);
+                }
+            },
+            "--resource-output" => match iter.next() {
+                Some(value) => resource_output = Some(value.clone()),
+                None => {
+                    eprintln!("kotama: --resource-output wants a path");
+                    return ExitCode::from(2);
+                }
+            },
             "--limit" => match iter.next().and_then(|v| v.parse().ok()) {
                 Some(value) => limit = value,
                 None => {
@@ -1584,6 +1604,52 @@ fn analyze(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Some(index) = extract_resource {
+        let Some(output) = resource_output.as_deref() else {
+            eprintln!("kotama: --extract-resource also wants --resource-output <path>");
+            return ExitCode::from(2);
+        };
+        let Some(resource) = module.resources.get(index) else {
+            eprintln!(
+                "kotama: resources[{index}] does not exist ({} resources)",
+                module.resources.len()
+            );
+            return ExitCode::from(2);
+        };
+        let Ok(size) = usize::try_from(resource.size) else {
+            eprintln!("kotama: resource size does not fit this platform");
+            return ExitCode::FAILURE;
+        };
+        let space = module.address_space();
+        let Some(bytes) = space.read(resource.rva, size) else {
+            eprintln!("kotama: resource {index} is not backed by the image");
+            return ExitCode::FAILURE;
+        };
+        if Path::new(output).exists() {
+            eprintln!("kotama: refusing to overwrite {output}");
+            return ExitCode::FAILURE;
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("kotama: create {output}: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Err(error) = file.write_all(bytes) {
+            eprintln!("kotama: write {output}: {error}");
+            return ExitCode::FAILURE;
+        }
+        eprintln!(
+            "# extracted resource {index} ({} bytes) to {output}",
+            bytes.len()
+        );
+    }
+
     let functions = discover(&module);
     let exceptions = kotama_scan::exception_functions(&module);
 
