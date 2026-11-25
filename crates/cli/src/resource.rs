@@ -1234,6 +1234,38 @@ fn read_hash_map(path: &Path) -> Result<HashMap<u32, String>, ExitCode> {
     Ok(map)
 }
 
+fn parse_string_list(bytes: &[u8], table_offset: usize, raw: u32) -> Option<serde_json::Value> {
+    let mut cursor = table_offset.checked_add(raw as usize)?;
+    let mut strings = Vec::new();
+    for _ in 0..64 {
+        let Some(record) = bytes.get(cursor..cursor.checked_add(12)?) else {
+            break;
+        };
+        let name = u32::from_le_bytes(record[0..4].try_into().ok()?);
+        let kind = u32::from_le_bytes(record[4..8].try_into().ok()?);
+        let value = u32::from_le_bytes(record[8..12].try_into().ok()?);
+        if name == 0x6c82_7073 && kind == 0x5d44_8fd8 {
+            cursor += 12;
+            continue;
+        }
+        if kind != 0 {
+            break;
+        }
+        let pointer = value as usize;
+        let Some(pointer_bytes) = bytes.get(pointer..pointer.checked_add(4)?) else {
+            break;
+        };
+        let string_offset = u32::from_le_bytes(pointer_bytes.try_into().ok()?) as usize;
+        let Some(end) = bytes[string_offset..].iter().position(|byte| *byte == 0) else {
+            break;
+        };
+        let end = end + string_offset;
+        strings.push(String::from_utf8_lossy(&bytes[string_offset..end]).to_string());
+        cursor += 12;
+    }
+    Some(serde_json::json!(strings))
+}
+
 fn asset_property_value(
     bytes: &[u8],
     table_offset: usize,
@@ -1256,6 +1288,7 @@ fn asset_property_value(
             Some(serde_json::json!(value))
         }
         Some("bool") => Some(serde_json::json!(value_at(1)?[0] != 0)),
+        Some("StringList") => parse_string_list(bytes, table_offset, raw),
         Some(kind)
             if kind.ends_with("WeakRef") || kind.ends_with("Ref") || kind.ends_with("Nugget") =>
         {
