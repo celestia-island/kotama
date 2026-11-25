@@ -133,6 +133,16 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
 ///
 /// 活体视图尚未携带数据目录时，保留 `.pdata` 节回退；静态 [`discover`] 优先使用
 /// PE exception directory。
+///
+/// 已量測并否決的起点规则（不要再试；数据来自带 PDB 的 MSVC 样本 sqlite3 / zstd / FLTK，
+/// 以及真实 PE32 样本 game / lua / PvZ）：
+///
+/// - 「紧跟在 `ret` 之后、且没有任何直接引用」：1,485 个候选里只有 8 个是真过程
+///   （三份真值合计），真实样本上会新增数千个函数体内块。
+/// - 「直接 `jmp` 的目标（尾部调用）」：按字节扫描 6,803 个候选只有 129 个真过程；
+///   在已发现函数体里解码则一个候选都出不来——回归吸收早把可达目标纳进函数体了。
+///
+/// 结论：剩余漏召回是「无引用、无填充的叶子函数」，只有符号信息能分辨，静态侧不再猜。
 pub fn discover_with(view: ScanView<'_>, space: &dyn AddressSpace) -> Vec<FunctionEntry> {
     discover_impl(view, space, None)
 }
