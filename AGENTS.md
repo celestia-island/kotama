@@ -95,6 +95,10 @@
     解析 `LoadLibraryW`；x86 载荷 = `dist/i686-pc-windows-gnu/kotama_agent.dll`（pack 车道
     经 `tools/build_windows_agent.py --target x86-windows-gnu` 产出），attach 矩阵与 host live
     e2e 各含一条 x86 目标车道（夹具 `x86-windows-gnu/-O2/spin.exe`）。
+  - 符号无关对比（2026-11-25 实测）：把 PE 的 `IMAGE_DIRECTORY_ENTRY_DEBUG` 数据目录清零，
+    IDA 就找不到伴生 PDB。同一份 `x86_64-windows-msvc/-O2/loops.exe` 上，无 PDB 的 kotama 覆盖
+    PDB 真值 0.845、无 PDB 的 IDA 9.1 只有 0.751（x86 上 0.820 对 0.796）。所以「无 PDB 夹具
+    recall 0.845」是符号信息上限，不是欠采样；不要再为它加无引用的 `ret` 之后起点规则。
   - ⚠️ 各 worktree 的 `fixtures/generated` 是指向 `_worktree/kotama/windows-phase/fixtures/generated` 的 junction（2026-11-25 实踩）：
     `git worktree remove` 会**穿过 junction** 把共享夹具删空。移除 worktree 前先 `cmd /c rmdir <wt>\fixtures\generated`
     （只删链接），再 remove；被删空后用 `tools/build_fixtures.py --run` 与 `--targets x86_64-windows-msvc x86-windows-msvc --run` 重建。
