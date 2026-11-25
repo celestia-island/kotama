@@ -611,14 +611,16 @@ fn asset_header_is_inspected() {
     let mut bytes = vec![0u8; 36];
     bytes[0..16].copy_from_slice(&[1u8; 16]);
     bytes[20..24].copy_from_slice(&856u32.to_le_bytes());
-    bytes[24..28].copy_from_slice(&1u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&2u32.to_le_bytes());
     bytes[32..36].copy_from_slice(&37u32.to_le_bytes());
     bytes.extend_from_slice(b"ArmorTemplate:JapanHiveGeneratorArmorA");
     bytes.extend_from_slice(&[0; 3]);
     bytes.extend_from_slice(b"DATA:civilian/tokyo_harbor_th/buildings/th_japanhivegenerator.xml");
-    for value in [0xffe88740u32, 0x645864f3, 0x2d4] {
+    for value in [0xffe88740u32, 0x645864f3, 24, 0x6c827073, 0x5d448fd8, 28] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
+    bytes.extend_from_slice(&1.0f32.to_le_bytes());
+    bytes.extend_from_slice(&24u32.to_le_bytes());
     fs::write(&source, &bytes).unwrap();
 
     let identify = kotama()
@@ -639,7 +641,7 @@ fn asset_header_is_inspected() {
     assert!(asset.status.success());
     let facts: serde_json::Value = serde_json::from_slice(&asset.stdout).unwrap();
     assert_eq!(facts["data_size"], 856);
-    assert_eq!(facts["property_count"], 1);
+    assert_eq!(facts["property_count"], 2);
     assert_eq!(facts["type_name"], "ArmorTemplate:JapanHiveGeneratorArmorA");
     assert_eq!(
         facts["data_path"],
@@ -647,10 +649,14 @@ fn asset_header_is_inspected() {
     );
     assert_eq!(facts["properties"][0]["name_hash"], 0xffe88740u64);
     assert_eq!(facts["properties"][0]["type_hash"], 0x645864f3u64);
-    assert_eq!(facts["properties"][0]["value_or_offset"], 0x2d4u64);
+    assert_eq!(facts["properties"][0]["value_or_offset"], 24u64);
 
     let map = root.join("hash-map.tsv");
-    fs::write(&map, b"4293429056\tDefault\n1683514611\tfloat_t\n").unwrap();
+    fs::write(
+        &map,
+        b"4293429056\tDefault\n1683514611\tfloat_t\n1820487795\tCount\n1564774360\tsize_t\n",
+    )
+    .unwrap();
     let resolved = kotama()
         .args(["resource", "asset"])
         .arg(&source)
@@ -662,6 +668,10 @@ fn asset_header_is_inspected() {
     let facts: serde_json::Value = serde_json::from_slice(&resolved.stdout).unwrap();
     assert_eq!(facts["properties"][0]["name"], "Default");
     assert_eq!(facts["properties"][0]["property_type"], "float_t");
+    assert_eq!(facts["properties"][0]["value"], 1.0);
+    assert_eq!(facts["properties"][1]["name"], "Count");
+    assert_eq!(facts["properties"][1]["property_type"], "size_t");
+    assert_eq!(facts["properties"][1]["value"], 24);
     fs::remove_dir_all(&root).unwrap();
 }
 
