@@ -6,7 +6,7 @@
 use crate::ResourceError;
 
 /// Parsed manifest header facts.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AssetManifestInfo {
     /// True when the stream is big-endian.
     pub big_endian: bool,
@@ -36,6 +36,8 @@ pub struct AssetManifestInfo {
     pub source_file_name_buffer_size: u32,
     /// Trailing u32 after the known fields.
     pub tail: u32,
+    /// NUL-separated printable names found after the header.
+    pub names: Vec<String>,
 }
 
 fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -67,6 +69,32 @@ pub fn parse(bytes: &[u8]) -> Result<AssetManifestInfo, ResourceError> {
         return Err(ResourceError::Invalid(
             "asset manifest header is shorter than 48 bytes".to_string(),
         ));
+    }
+    let mut names = Vec::new();
+    let mut start: Option<usize> = None;
+    for (offset, byte) in bytes.iter().enumerate().skip(48) {
+        if *byte == 0 {
+            if let Some(begin) = start {
+                if offset - begin >= 3 {
+                    if let Ok(text) = std::str::from_utf8(&bytes[begin..offset]) {
+                        if text.contains(':')
+                            || text.contains('\\')
+                            || text.contains('/')
+                            || text.contains('.')
+                        {
+                            names.push(text.to_string());
+                        }
+                    }
+                }
+            }
+            start = None;
+        } else if byte.is_ascii_graphic() || *byte == b' ' {
+            if start.is_none() {
+                start = Some(offset);
+            }
+        } else {
+            start = None;
+        }
     }
     Ok(AssetManifestInfo {
         big_endian: bool_at(bytes, 0).ok_or_else(|| {
@@ -107,6 +135,7 @@ pub fn parse(bytes: &[u8]) -> Result<AssetManifestInfo, ResourceError> {
         })?,
         tail: u32_at(bytes, 44)
             .ok_or_else(|| ResourceError::Invalid("manifest tail is unreadable".to_string()))?,
+        names,
     })
 }
 
@@ -121,12 +150,14 @@ mod tests {
         bytes[2..4].copy_from_slice(&6u16.to_le_bytes());
         bytes[12..16].copy_from_slice(&13u32.to_le_bytes());
         bytes[40..44].copy_from_slice(&487u32.to_le_bytes());
+        bytes.extend_from_slice(b"AptAptData:Foo\0source.xml\0");
         let info = parse(&bytes).unwrap();
         assert!(!info.big_endian);
         assert!(info.linked);
         assert_eq!(info.version, 6);
         assert_eq!(info.total_instance_data_size, 13);
         assert_eq!(info.source_file_name_buffer_size, 487);
+        assert_eq!(info.names, vec!["AptAptData:Foo", "source.xml"]);
     }
 
     #[test]

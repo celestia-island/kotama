@@ -138,6 +138,7 @@ struct AssetManifestJson {
     asset_name_buffer_size: u32,
     source_file_name_buffer_size: u32,
     tail: u32,
+    names: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1066,6 +1067,7 @@ fn manifest_command(args: &[String]) -> ExitCode {
         asset_name_buffer_size: info.asset_name_buffer_size,
         source_file_name_buffer_size: info.source_file_name_buffer_size,
         tail: info.tail,
+        names: info.names,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
