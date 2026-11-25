@@ -184,15 +184,22 @@ fn adapter_args() -> Vec<String> {
 }
 
 fn main() {
-    let setup: OverlaySetup = serde_json::from_str(SETUP_JSON).expect("embedded setup must parse");
-    let mut model = OverlayModel::from_setup(setup).expect("embedded setup must be valid");
+    let setup_text = std::env::var_os("KOTAMA_OVERLAY_SETUP")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_else(|| SETUP_JSON.to_string());
+    let setup: OverlaySetup = serde_json::from_str(&setup_text).expect("overlay setup must parse");
+    let mut model = OverlayModel::from_setup(setup).expect("overlay setup must be valid");
     let expanded = std::env::var("KOTAMA_OVERLAY_EXPANDED").is_ok();
     if expanded {
         model.expand();
     }
+    if std::env::var("KOTAMA_OVERLAY_GRANT_WRITE").is_ok() {
+        model.grant_write();
+    }
     let initial_size = model.window_rect();
     let origin = (initial_size.x, initial_size.y);
     let adapter = adapter_args();
+    let invoke_id = std::env::var("KOTAMA_OVERLAY_INVOKE").ok();
     tauri::Builder::default()
         .manage(Shared::new(Session {
             model,
@@ -216,6 +223,13 @@ fn main() {
                         f64::from(initial_size.height),
                     ));
                 }
+            }
+            if let Some(id) = invoke_id.clone() {
+                let state = app.state::<Shared>();
+                let session = state.lock().map_err(|error| error.to_string())?;
+                let request = ActionRequest { id };
+                let result = invoke(&session.model, &session.adapter, Some(request));
+                println!("startup-action={:?}", result.outcome);
             }
             Ok(())
         })
