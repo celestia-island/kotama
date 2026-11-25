@@ -37,6 +37,26 @@ cargo build -p kotama-overlay-tauri
 ./target/debug/kotama-overlay-tauri
 ```
 
+## Action adapter
+
+Both shells can hand an **allowed** action id to an explicitly configured external program:
+
+```sh
+# egui
+./target/debug/kotama-overlay-egui --setup actions.json --grant-write \
+  --adapter /path/to/python --adapter-arg /path/to/adapter.py --invoke my.action
+
+# Tauri
+./target/debug/kotama-overlay-tauri --adapter /path/to/python --adapter-arg /path/to/adapter.py
+```
+
+The shell appends the action id to the configured argv and runs it with `Command` (no shell
+interpolation). The program runs only after `authorize` returns `Allowed`, so the read-only default
+still blocks write actions until `--grant-write` / the Hikari `write` control grants capability.
+The repository ships no adapter implementation; game- or product-specific code stays outside.
+
+`--invoke <id>` is a headless demo/test hook that applies one action on the first frame.
+
 Environment switches used by capture harnesses:
 
 - `KOTAMA_OVERLAY_EXPANDED=1` starts the Tauri shell expanded (and resizes on the first snapshot).
