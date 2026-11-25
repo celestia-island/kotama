@@ -1,4 +1,5 @@
 target/
 tauri-shell/node_modules/
-tauri-shell/dist/
+tauri-shell/dist/*
+!tauri-shell/dist/.gitkeep
 tauri-shell/src-tauri/gen/

@@ -75,3 +75,8 @@ cargo test --manifest-path ui/Cargo.toml --workspace
 
 The root `just gate` covers `kotama-overlay`; UI shells are a separate workspace because native
 Tauri/egui dependencies are platform-specific.
+
+A tracked `tauri-shell/dist/.gitkeep` lets `just ui-check` resolve Tauri's `frontendDist` on a
+clean checkout. `just ui-build` still requires a real frontend: run
+`cd ui/tauri-shell && npm install && npm run build` first, otherwise the Tauri binary packages an
+empty shell.
