@@ -25,6 +25,7 @@ asset-manifest = []
 asset = []
 asset-relocation = []
 apt-movie = []
+apt-image-map = []
 apt-geometry = []
 
 [dependencies]

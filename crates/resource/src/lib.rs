@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod apt;
 pub mod apt_geometry;
+pub mod apt_image_map;
 pub mod apt_movie;
 pub mod asset;
 pub mod asset_manifest;
@@ -55,6 +56,8 @@ pub enum ResourceKind {
     AssetRelocation,
     /// APT movie character.
     AptMovie,
+    /// APT image map.
+    AptImageMap,
 }
 
 impl ResourceKind {
@@ -77,6 +80,7 @@ impl ResourceKind {
             Self::Asset => "asset",
             Self::AssetRelocation => "asset-relocation",
             Self::AptMovie => "apt-movie",
+            Self::AptImageMap => "apt-image-map",
         }
     }
 
@@ -99,6 +103,7 @@ impl ResourceKind {
             "asset" => Some(Self::Asset),
             "asset-relocation" => Some(Self::AssetRelocation),
             "apt-movie" => Some(Self::AptMovie),
+            "apt-image-map" => Some(Self::AptImageMap),
             _ => None,
         }
     }
@@ -122,6 +127,7 @@ impl ResourceKind {
             Self::Asset => "asset",
             Self::AssetRelocation => "asset-relocation",
             Self::AptMovie => "apt-movie",
+            Self::AptImageMap => "apt-image-map",
         }
     }
 
@@ -144,6 +150,7 @@ impl ResourceKind {
             Self::Asset => cfg!(feature = "asset"),
             Self::AssetRelocation => cfg!(feature = "asset-relocation"),
             Self::AptMovie => cfg!(feature = "apt-movie"),
+            Self::AptImageMap => cfg!(feature = "apt-image-map"),
         }
     }
 }
@@ -201,6 +208,8 @@ pub enum Resource<'a> {
     AssetRelocation(asset_relocation::AssetRelocation),
     /// APT movie character.
     AptMovie(apt_movie::AptMovieInfo),
+    /// APT image map.
+    AptImageMap(apt_image_map::AptImageMap),
 }
 
 impl Resource<'_> {
@@ -223,6 +232,7 @@ impl Resource<'_> {
             Self::Asset(_) => ResourceKind::Asset,
             Self::AssetRelocation(_) => ResourceKind::AssetRelocation,
             Self::AptMovie(_) => ResourceKind::AptMovie,
+            Self::AptImageMap(_) => ResourceKind::AptImageMap,
         }
     }
 }
@@ -281,6 +291,9 @@ impl Resource<'_> {
             )),
             Self::AptMovie(_) => Err(ResourceError::Unsupported(
                 "APT movie frames are opaque; inspect header".to_string(),
+            )),
+            Self::AptImageMap(_) => Err(ResourceError::Unsupported(
+                "APT image map is a text table; inspect assignments".to_string(),
             )),
         }
     }
@@ -402,6 +415,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if extension_matches(extension, "dat") {
+        return Some(Identification {
+            kind: ResourceKind::AptImageMap,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::AptImageMap.enabled(),
+        });
+    }
     if extension_matches(extension, "apt") {
         return Some(Identification {
             kind: ResourceKind::AptMovie,
@@ -492,6 +512,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
             asset_relocation::parse(bytes).map(Resource::AssetRelocation)
         }
         ResourceKind::AptMovie => apt_movie::parse(bytes, 16).map(Resource::AptMovie),
+        ResourceKind::AptImageMap => apt_image_map::parse(bytes).map(Resource::AptImageMap),
     }
 }
 
