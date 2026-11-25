@@ -29,6 +29,7 @@ apt-image-map = []
 pvz-reanim = ["dep:flate2"]
 pak = []
 imp = []
+apt-bin = []
 apt-geometry = []
 
 [dependencies]
