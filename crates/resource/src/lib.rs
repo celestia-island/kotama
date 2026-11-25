@@ -10,6 +10,7 @@ pub mod apt;
 pub mod apt_geometry;
 pub mod big;
 pub mod csf;
+pub mod dds;
 pub mod dos_com;
 pub mod swf;
 pub mod vbs;
@@ -34,6 +35,8 @@ pub enum ResourceKind {
     Csf,
     /// APT geometry text.
     AptGeometry,
+    /// DDS surface.
+    Dds,
 }
 
 impl ResourceKind {
@@ -49,6 +52,7 @@ impl ResourceKind {
             Self::AptConst => "apt-const",
             Self::Csf => "csf",
             Self::AptGeometry => "apt-geometry",
+            Self::Dds => "dds",
         }
     }
 
@@ -64,6 +68,7 @@ impl ResourceKind {
             "apt-const" => Some(Self::AptConst),
             "csf" => Some(Self::Csf),
             "apt-geometry" => Some(Self::AptGeometry),
+            "dds" => Some(Self::Dds),
             _ => None,
         }
     }
@@ -80,6 +85,7 @@ impl ResourceKind {
             Self::AptConst => "apt-const",
             Self::Csf => "csf",
             Self::AptGeometry => "apt-geometry",
+            Self::Dds => "dds",
         }
     }
 
@@ -95,6 +101,7 @@ impl ResourceKind {
             Self::AptConst => cfg!(feature = "apt-const"),
             Self::Csf => cfg!(feature = "csf"),
             Self::AptGeometry => cfg!(feature = "apt-geometry"),
+            Self::Dds => cfg!(feature = "dds"),
         }
     }
 }
@@ -138,6 +145,8 @@ pub enum Resource<'a> {
     Csf(csf::CsfFile),
     /// APT geometry text.
     AptGeometry(apt_geometry::AptGeometry),
+    /// DDS surface header.
+    Dds(dds::DdsInfo),
 }
 
 impl Resource<'_> {
@@ -153,6 +162,7 @@ impl Resource<'_> {
             Self::AptConst(_) => ResourceKind::AptConst,
             Self::Csf(_) => ResourceKind::Csf,
             Self::AptGeometry(_) => ResourceKind::AptGeometry,
+            Self::Dds(_) => ResourceKind::Dds,
         }
     }
 }
@@ -190,6 +200,9 @@ impl Resource<'_> {
             )),
             Self::AptGeometry(_) => Err(ResourceError::Unsupported(
                 "APT geometry is a text scene; inspect records".to_string(),
+            )),
+            Self::Dds(_) => Err(ResourceError::Unsupported(
+                "DDS is a surface container; inspect header".to_string(),
             )),
         }
     }
@@ -253,6 +266,13 @@ fn extension_matches(extension: Option<&str>, wanted: &str) -> bool {
 /// Identify a resource from contents and an optional extension hint.
 #[must_use]
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification> {
+    if dds::has_magic(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::Dds,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::Dds.enabled(),
+        });
+    }
     if csf::has_magic(bytes) {
         return Some(Identification {
             kind: ResourceKind::Csf,
@@ -343,6 +363,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::AptConst => apt::parse(bytes).map(Resource::AptConst),
         ResourceKind::Csf => csf::parse(bytes).map(Resource::Csf),
         ResourceKind::AptGeometry => apt_geometry::parse(bytes).map(Resource::AptGeometry),
+        ResourceKind::Dds => dds::parse(bytes).map(Resource::Dds),
     }
 }
 
