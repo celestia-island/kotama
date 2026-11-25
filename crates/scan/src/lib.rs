@@ -1996,6 +1996,29 @@ fn is_epilogue_tail(raw: &[u8]) -> bool {
     )
 }
 
+/// 扫描 vtable：通用指针表扫描 ∪ RTTI 锚定的虚表。
+///
+/// RTTI 锚定的表是精确事实（`CompleteObjectLocator` 指回的 vftable）。通用扫描要求
+/// 连续 ≥2 个槽位都解析到函数入口，因此会漏掉「只有析构槽」「槽位是 NULL」或槽位指向
+/// 未发现函数的表；两者合并后按 RVA 升序、去重。
+#[must_use]
+pub fn vtables_with_rtti(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable> {
+    use std::collections::BTreeSet;
+
+    let mut tables = vtables(module, functions);
+    let mut known: BTreeSet<u64> = tables.iter().map(|table| table.rva).collect();
+    for table in msvc_rtti::scan(module).vtables {
+        if known.insert(table.address_point) {
+            tables.push(Vtable {
+                rva: table.address_point,
+                targets: table.slots,
+            });
+        }
+    }
+    tables.sort_by_key(|table| table.rva);
+    tables
+}
+
 /// 直接（rel）call 的位置 → 目标，按目标归组（用于判断候选是否被外部函数调用）。
 fn direct_call_sites(
     module: &ViewAdapter<'_>,
@@ -2251,6 +2274,33 @@ mod tests {
             .count();
         assert!(hits >= 2, "expected literal references, got {xrefs:?}");
         assert!(xrefs.iter().all(|x| x.text.len() >= 4));
+    }
+
+    /// `--vtables` 合并 RTTI 锚定的虚表：RTTI 给出的是精确事实，通用扫描漏掉的
+    /// （只有析构槽、槽位为 NULL、槽位指向未发现函数）都由它补齐。
+    #[test]
+    fn vtables_include_rtti_anchored_tables() {
+        let Some(path) = fixture("x86-windows-msvc/-O2/msvc_rtti.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let functions = discover(&module);
+        let facts = msvc_rtti::scan(&module);
+        assert!(!facts.vtables.is_empty(), "fixture should expose MSVC RTTI");
+        let merged = vtables_with_rtti(&module, &functions);
+        let rvas: std::collections::BTreeSet<u64> = merged.iter().map(|table| table.rva).collect();
+        for table in &facts.vtables {
+            assert!(
+                rvas.contains(&table.address_point),
+                "RTTI-anchored vtable {:#x} missing from --vtables",
+                table.address_point
+            );
+        }
+        // 合并结果的每个表都至少有一个槽位目标，且 RVA 不重复。
+        assert!(merged.iter().all(|table| !table.targets.is_empty()));
+        let unique: std::collections::BTreeSet<u64> = merged.iter().map(|t| t.rva).collect();
+        assert_eq!(unique.len(), merged.len());
     }
 
     #[test]

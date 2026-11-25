@@ -14,7 +14,7 @@ use kotama_image::LoadedModule;
 use kotama_scan::call_graph;
 use kotama_scan::discover;
 use kotama_scan::string_xrefs;
-use kotama_scan::vtables;
+use kotama_scan::vtables_with_rtti;
 use serde::Serialize;
 
 const USAGE: &str = "\
@@ -28,7 +28,7 @@ Commands:
                              --limit <N>        how many functions to decompile (default 8)
                              --xref             also emit the function-level call graph
                              --strings          also emit string cross-references
-                             --vtables          also emit the generic vtable scan
+                             --vtables          also emit vtables (generic pointer tables plus RTTI-anchored ones)
                              --rtti             also emit MSVC RTTI/vtable facts (PE/MSVC)
   oracle <path> [--dump <ghidra-list>]
                            Run Ghidra headless and diff its function list against ours;
@@ -1553,7 +1553,7 @@ fn analyze(args: &[String]) -> ExitCode {
                 .collect()
         }),
         vtables: vtables_flag.then(|| {
-            vtables(&module, &functions)
+            vtables_with_rtti(&module, &functions)
                 .into_iter()
                 .map(|table| VtableJson {
                     rva: format!("0x{:x}", table.rva),
