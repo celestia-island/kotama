@@ -92,6 +92,7 @@ cargo run -p kotama-cli -- --version       # version + payload ABI version
 cargo run -p kotama-cli -- analyze <file>  # function table as JSON (with evidence)
 cargo run -p kotama-cli -- analyze <file> --decompile --limit 8   # plus pseudo-C
 cargo run -p kotama-cli -- analyze <file> --rtti                # MSVC RTTI/vtable facts
+cargo run -p kotama-cli -- analyze <file> --extract-resource 12 --resource-output manifest.xml  # raw PE resource payload
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <target>  # Windows: launch + inject + handshake
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll --pid <pid>       # Windows: attach to a running target
 cargo run -p kotama-cli -- live inject --payload my_hook.dll --pid <pid> --load-only                # Windows: load a self-initializing DLL without the agent protocol
