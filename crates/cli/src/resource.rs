@@ -95,6 +95,23 @@ struct DdsJson {
 }
 
 #[derive(Serialize)]
+struct TgaJson {
+    kind: &'static str,
+    id_length: u8,
+    color_map_type: u8,
+    image_type: u8,
+    color_map_first: u16,
+    color_map_length: u16,
+    color_map_entry_size: u8,
+    x_origin: u16,
+    y_origin: u16,
+    width: u16,
+    height: u16,
+    pixel_depth: u8,
+    image_descriptor: u8,
+}
+
+#[derive(Serialize)]
 struct GeometryStyleJson {
     kind: String,
     color: Vec<u8>,
@@ -170,7 +187,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -218,6 +235,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "apt" => apt_command(&args[1..]),
         "csf" => csf_command(&args[1..]),
         "dds" => dds_command(&args[1..]),
+        "tga" => tga_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -404,6 +422,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::Dds(_) => InfoJson {
             kind: "dds",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::Tga(_) => InfoJson {
+            kind: "tga",
             compression: None,
             version: None,
             declared_length: None,
@@ -846,6 +880,46 @@ fn dds_command(args: &[String]) -> ExitCode {
         caps2: info.caps2,
         caps3: info.caps3,
         caps4: info.caps4,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn tga_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Tga(info) = resource else {
+        return fail("tga requires a TGA image");
+    };
+    let json = TgaJson {
+        kind: "tga",
+        id_length: info.id_length,
+        color_map_type: info.color_map_type,
+        image_type: info.image_type,
+        color_map_first: info.color_map_first,
+        color_map_length: info.color_map_length,
+        color_map_entry_size: info.color_map_entry_size,
+        x_origin: info.x_origin,
+        y_origin: info.y_origin,
+        width: info.width,
+        height: info.height,
+        pixel_depth: info.pixel_depth,
+        image_descriptor: info.image_descriptor,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {

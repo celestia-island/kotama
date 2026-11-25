@@ -13,6 +13,7 @@ pub mod csf;
 pub mod dds;
 pub mod dos_com;
 pub mod swf;
+pub mod tga;
 pub mod vbs;
 pub mod w3d;
 
@@ -37,6 +38,8 @@ pub enum ResourceKind {
     AptGeometry,
     /// DDS surface.
     Dds,
+    /// TGA image header.
+    Tga,
 }
 
 impl ResourceKind {
@@ -53,6 +56,7 @@ impl ResourceKind {
             Self::Csf => "csf",
             Self::AptGeometry => "apt-geometry",
             Self::Dds => "dds",
+            Self::Tga => "tga",
         }
     }
 
@@ -69,6 +73,7 @@ impl ResourceKind {
             "csf" => Some(Self::Csf),
             "apt-geometry" => Some(Self::AptGeometry),
             "dds" => Some(Self::Dds),
+            "tga" => Some(Self::Tga),
             _ => None,
         }
     }
@@ -86,6 +91,7 @@ impl ResourceKind {
             Self::Csf => "csf",
             Self::AptGeometry => "apt-geometry",
             Self::Dds => "dds",
+            Self::Tga => "tga",
         }
     }
 
@@ -102,6 +108,7 @@ impl ResourceKind {
             Self::Csf => cfg!(feature = "csf"),
             Self::AptGeometry => cfg!(feature = "apt-geometry"),
             Self::Dds => cfg!(feature = "dds"),
+            Self::Tga => cfg!(feature = "tga"),
         }
     }
 }
@@ -147,6 +154,8 @@ pub enum Resource<'a> {
     AptGeometry(apt_geometry::AptGeometry),
     /// DDS surface header.
     Dds(dds::DdsInfo),
+    /// TGA image header.
+    Tga(tga::TgaInfo),
 }
 
 impl Resource<'_> {
@@ -163,6 +172,7 @@ impl Resource<'_> {
             Self::Csf(_) => ResourceKind::Csf,
             Self::AptGeometry(_) => ResourceKind::AptGeometry,
             Self::Dds(_) => ResourceKind::Dds,
+            Self::Tga(_) => ResourceKind::Tga,
         }
     }
 }
@@ -203,6 +213,9 @@ impl Resource<'_> {
             )),
             Self::Dds(_) => Err(ResourceError::Unsupported(
                 "DDS is a surface container; inspect header".to_string(),
+            )),
+            Self::Tga(_) => Err(ResourceError::Unsupported(
+                "TGA is an image container; inspect header".to_string(),
             )),
         }
     }
@@ -317,6 +330,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if extension_matches(extension, "tga") {
+        return Some(Identification {
+            kind: ResourceKind::Tga,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::Tga.enabled(),
+        });
+    }
     if extension_matches(extension, "w3d") {
         return Some(Identification {
             kind: ResourceKind::W3d,
@@ -364,6 +384,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Csf => csf::parse(bytes).map(Resource::Csf),
         ResourceKind::AptGeometry => apt_geometry::parse(bytes).map(Resource::AptGeometry),
         ResourceKind::Dds => dds::parse(bytes).map(Resource::Dds),
+        ResourceKind::Tga => tga::parse(bytes).map(Resource::Tga),
     }
 }
 

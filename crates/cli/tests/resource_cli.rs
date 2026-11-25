@@ -476,6 +476,42 @@ fn dds_header_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-tga")]
+#[test]
+fn tga_header_is_inspected() {
+    let root = temp_dir("tga");
+    let source = root.join("image.tga");
+    let mut bytes = vec![0u8; 18];
+    bytes[2] = 2;
+    bytes[12..14].copy_from_slice(&64u16.to_le_bytes());
+    bytes[14..16].copy_from_slice(&32u16.to_le_bytes());
+    bytes[16] = 24;
+    bytes[17] = 0x20;
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "tga");
+    assert_eq!(facts["basis"], "extension");
+
+    let tga = kotama()
+        .args(["resource", "tga"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(tga.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&tga.stdout).unwrap();
+    assert_eq!(facts["width"], 64);
+    assert_eq!(facts["height"], 32);
+    assert_eq!(facts["pixel_depth"], 24);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
