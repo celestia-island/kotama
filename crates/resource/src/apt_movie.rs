@@ -7,7 +7,7 @@
 use crate::ResourceError;
 
 /// One APT character reference.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct AptCharacter {
     /// Character offset relative to the 16-byte prefix.
     pub offset: u32,
@@ -15,6 +15,10 @@ pub struct AptCharacter {
     pub type_id: u32,
     /// Character type name.
     pub type_name: &'static str,
+    /// Shape bounds (left, top, right, bottom).
+    pub bounds: Option<[f32; 4]>,
+    /// Shape geometry id.
+    pub geometry: Option<u32>,
 }
 
 /// One APT import.
@@ -40,7 +44,7 @@ pub struct AptExport {
 }
 
 /// Parsed APT movie facts.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct AptMovieInfo {
     /// Movie entry offset.
     pub entry_offset: usize,
@@ -172,10 +176,31 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
                 "APT character signature is invalid".to_string(),
             ));
         }
+        let bounds = if type_id == 1 {
+            let mut values = [0f32; 4];
+            for (slot, index) in values.iter_mut().zip(0..4) {
+                let raw = u32_at(bytes, character_offset + 8 + index * 4).ok_or_else(|| {
+                    ResourceError::Invalid("APT shape bounds are unreadable".to_string())
+                })?;
+                *slot = f32::from_bits(raw);
+            }
+            Some(values)
+        } else {
+            None
+        };
+        let geometry = if type_id == 1 {
+            Some(u32_at(bytes, character_offset + 24).ok_or_else(|| {
+                ResourceError::Invalid("APT shape geometry is unreadable".to_string())
+            })?)
+        } else {
+            None
+        };
         characters.push(AptCharacter {
             offset: pointer,
             type_id,
             type_name: character_type_name(type_id),
+            bounds,
+            geometry,
         });
         if type_id == 7 {
             let texture_id = u32_at(bytes, character_offset + 8).ok_or_else(|| {
@@ -310,6 +335,33 @@ mod tests {
         let info = parse(&bytes, 16).unwrap();
         assert_eq!(info.characters[0].type_name, "image");
         assert_eq!(info.texture_ids, vec![42]);
+    }
+
+    #[test]
+    fn parses_shape_geometry() {
+        let mut bytes = vec![0u8; 16];
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&[0; 12]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&56u32.to_le_bytes());
+        bytes.extend_from_slice(&800u32.to_le_bytes());
+        bytes.extend_from_slice(&600u32.to_le_bytes());
+        bytes.extend_from_slice(&33u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.resize(72, 0);
+        bytes.extend_from_slice(&64u32.to_le_bytes());
+        bytes.resize(80, 0);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        for value in [-1.0f32, -2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        let info = parse(&bytes, 16).unwrap();
+        assert_eq!(info.characters[0].type_name, "shape");
+        assert_eq!(info.characters[0].bounds, Some([-1.0, -2.0, 3.0, 4.0]));
+        assert_eq!(info.characters[0].geometry, Some(7));
     }
 
     #[test]
