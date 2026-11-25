@@ -904,6 +904,43 @@ fn pak_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-pak")]
+#[test]
+fn pak_entry_is_extracted() {
+    let root = temp_dir("pak-extract");
+    let source = root.join("sample.pak");
+    let output = root.join("out.txt");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0xBAC0_4AC0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.push(0);
+    data.push(5);
+    data.extend_from_slice(b"hello");
+    data.extend_from_slice(&3u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.push(0xFF);
+    data.extend_from_slice(b"abc");
+    let encrypted: Vec<u8> = data.iter().map(|byte| byte ^ 0xF7).collect();
+    fs::write(&source, &encrypted).unwrap();
+
+    let extracted = kotama()
+        .args(["resource", "pak-extract"])
+        .arg(&source)
+        .arg("--entry")
+        .arg("hello")
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    assert_eq!(fs::read_to_string(&output).unwrap(), "abc");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
