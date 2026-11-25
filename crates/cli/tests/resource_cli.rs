@@ -611,7 +611,7 @@ fn asset_header_is_inspected() {
     let mut bytes = vec![0u8; 36];
     bytes[0..16].copy_from_slice(&[1u8; 16]);
     bytes[20..24].copy_from_slice(&856u32.to_le_bytes());
-    bytes[24..28].copy_from_slice(&4u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&5u32.to_le_bytes());
     bytes[32..36].copy_from_slice(&37u32.to_le_bytes());
     bytes.extend_from_slice(b"ArmorTemplate:JapanHiveGeneratorArmorA");
     bytes.extend_from_slice(&[0; 3]);
@@ -619,16 +619,19 @@ fn asset_header_is_inspected() {
     for value in [
         0xffe88740u32,
         0x645864f3,
-        48,
+        60,
         0x6c827073,
         0x5d448fd8,
-        52,
+        64,
         0x11111111,
         0x22222222,
-        56,
+        68,
         0x33333333,
         0x44444444,
-        60,
+        72,
+        0x55555555,
+        0x66666666,
+        76,
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -636,6 +639,21 @@ fn asset_header_is_inspected() {
     bytes.extend_from_slice(&24u32.to_le_bytes());
     bytes.extend_from_slice(&[1, 0, 0, 0]);
     bytes.extend_from_slice(&7u32.to_le_bytes());
+    for value in [
+        0x6c827073u32,
+        0x5d448fd8,
+        0,
+        0xb151a0eb,
+        0,
+        254,
+        0x6c827073,
+        0x5d448fd8,
+        0,
+    ] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(&258u32.to_le_bytes());
+    bytes.extend_from_slice(b"REGION\0");
     fs::write(&source, &bytes).unwrap();
 
     let identify = kotama()
@@ -656,7 +674,7 @@ fn asset_header_is_inspected() {
     assert!(asset.status.success());
     let facts: serde_json::Value = serde_json::from_slice(&asset.stdout).unwrap();
     assert_eq!(facts["data_size"], 856);
-    assert_eq!(facts["property_count"], 4);
+    assert_eq!(facts["property_count"], 5);
     assert_eq!(facts["type_name"], "ArmorTemplate:JapanHiveGeneratorArmorA");
     assert_eq!(
         facts["data_path"],
@@ -664,12 +682,12 @@ fn asset_header_is_inspected() {
     );
     assert_eq!(facts["properties"][0]["name_hash"], 0xffe88740u64);
     assert_eq!(facts["properties"][0]["type_hash"], 0x645864f3u64);
-    assert_eq!(facts["properties"][0]["value_or_offset"], 48u64);
+    assert_eq!(facts["properties"][0]["value_or_offset"], 60u64);
 
     let map = root.join("hash-map.tsv");
     fs::write(
         &map,
-        b"4293429056\tDefault\n1683514611\tfloat_t\n1820487795\tCount\n1564774360\tsize_t\n286331153\tIsTrainable\n572662306\tbool\n858993459\tFlags\n1145324612\tuint32_t\n",
+        b"4293429056\tDefault\n1683514611\tfloat_t\n1820487795\tCount\n1564774360\tsize_t\n286331153\tIsTrainable\n572662306\tbool\n858993459\tFlags\n1145324612\tuint32_t\n1431655765\tBrowser\n1717986918\tStringList\n",
     )
     .unwrap();
     let resolved = kotama()
@@ -693,6 +711,15 @@ fn asset_header_is_inspected() {
     assert_eq!(facts["properties"][3]["name"], "Flags");
     assert_eq!(facts["properties"][3]["property_type"], "uint32_t");
     assert_eq!(facts["properties"][3]["value"], 7);
+    assert_eq!(facts["properties"][4]["name"], "Browser");
+    assert_eq!(facts["properties"][4]["property_type"], "StringList");
+    assert_eq!(
+        facts["properties"][4]["value"],
+        serde_json::json!(["REGION"]),
+        "property = {} stderr = {}",
+        facts["properties"][4],
+        String::from_utf8_lossy(&resolved.stderr)
+    );
     fs::remove_dir_all(&root).unwrap();
 }
 
