@@ -122,6 +122,26 @@ struct Vp6Json {
 }
 
 #[derive(Serialize)]
+struct AssetReferenceJson {
+    type_id: u32,
+    instance_id: u32,
+}
+
+#[derive(Serialize)]
+struct AssetManifestEntryJson {
+    type_id: u32,
+    instance_id: u32,
+    type_hash: u32,
+    instance_hash: u32,
+    instance_size: u32,
+    relocation_size: u32,
+    imports_size: u32,
+    name: String,
+    source_name: String,
+    references: Vec<AssetReferenceJson>,
+}
+
+#[derive(Serialize)]
 struct AssetManifestJson {
     kind: &'static str,
     big_endian: bool,
@@ -139,6 +159,7 @@ struct AssetManifestJson {
     asset_name_buffer_size: u32,
     source_file_name_buffer_size: u32,
     names: Vec<String>,
+    entries: Vec<AssetManifestEntryJson>,
 }
 
 #[derive(Serialize)]
@@ -1068,6 +1089,29 @@ fn manifest_command(args: &[String]) -> ExitCode {
         asset_name_buffer_size: info.asset_name_buffer_size,
         source_file_name_buffer_size: info.source_file_name_buffer_size,
         names: info.names,
+        entries: info
+            .entries
+            .into_iter()
+            .map(|entry| AssetManifestEntryJson {
+                type_id: entry.type_id,
+                instance_id: entry.instance_id,
+                type_hash: entry.type_hash,
+                instance_hash: entry.instance_hash,
+                instance_size: entry.instance_size,
+                relocation_size: entry.relocation_size,
+                imports_size: entry.imports_size,
+                name: entry.name,
+                source_name: entry.source_name,
+                references: entry
+                    .references
+                    .into_iter()
+                    .map(|reference| AssetReferenceJson {
+                        type_id: reference.type_id,
+                        instance_id: reference.instance_id,
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {

@@ -557,10 +557,20 @@ fn asset_manifest_header_is_inspected() {
     let mut bytes = vec![0u8; 48];
     bytes[1] = 1;
     bytes[2..4].copy_from_slice(&6u16.to_le_bytes());
-    bytes[12..16].copy_from_slice(&13u32.to_le_bytes());
-    bytes[16..20].copy_from_slice(&3_303_040u32.to_le_bytes());
-    bytes[44..48].copy_from_slice(&487u32.to_le_bytes());
-    bytes.extend_from_slice(b"AptAptData:Foo\0source.xml\0");
+    bytes[12..16].copy_from_slice(&1u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&16u32.to_le_bytes());
+    bytes[32..36].copy_from_slice(&8u32.to_le_bytes());
+    bytes[40..44].copy_from_slice(&15u32.to_le_bytes());
+    bytes[44..48].copy_from_slice(&11u32.to_le_bytes());
+    let mut entry = Vec::new();
+    for value in [1u32, 2, 3, 4, 0, 1, 0, 0, 16, 8, 4, 0] {
+        entry.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(&entry);
+    bytes.extend_from_slice(&7u32.to_le_bytes());
+    bytes.extend_from_slice(&8u32.to_le_bytes());
+    bytes.extend_from_slice(b"AptAptData:Foo\0");
+    bytes.extend_from_slice(b"source.xml\0");
     fs::write(&source, &bytes).unwrap();
 
     let identify = kotama()
@@ -581,11 +591,15 @@ fn asset_manifest_header_is_inspected() {
     assert!(manifest.status.success());
     let facts: serde_json::Value = serde_json::from_slice(&manifest.stdout).unwrap();
     assert_eq!(facts["version"], 6);
-    assert_eq!(facts["asset_count"], 13);
-    assert_eq!(facts["total_instance_data_size"], 3_303_040);
-    assert_eq!(facts["source_file_name_buffer_size"], 487);
+    assert_eq!(facts["asset_count"], 1);
+    assert_eq!(facts["total_instance_data_size"], 16);
+    assert_eq!(facts["source_file_name_buffer_size"], 11);
     assert_eq!(facts["names"][0], "AptAptData:Foo");
     assert_eq!(facts["names"][1], "source.xml");
+    assert_eq!(facts["entries"][0]["name"], "AptAptData:Foo");
+    assert_eq!(facts["entries"][0]["source_name"], "source.xml");
+    assert_eq!(facts["entries"][0]["references"][0]["type_id"], 7);
+    assert_eq!(facts["entries"][0]["references"][0]["instance_id"], 8);
     fs::remove_dir_all(&root).unwrap();
 }
 
