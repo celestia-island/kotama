@@ -1471,10 +1471,44 @@ fn parse_string_list(bytes: &[u8], table_offset: usize, raw: u32) -> Option<serd
                 .iter()
                 .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
         {
-            return None;
+            break;
         }
         strings.push(String::from_utf8_lossy(text).to_string());
         cursor += 12;
+    }
+    if strings.is_empty() {
+        let mut cursor = table_offset;
+        while let Some(raw) = bytes.get(cursor..cursor.checked_add(4)?) {
+            let Ok(raw) = raw.try_into() else {
+                break;
+            };
+            if u32::from_le_bytes(raw) == 0x0001_0100 {
+                let mut text_cursor = cursor + 28;
+                while text_cursor < bytes.len() {
+                    let Some(end) = bytes[text_cursor..].iter().position(|byte| *byte == 0) else {
+                        break;
+                    };
+                    let end = text_cursor + end;
+                    let text = &bytes[text_cursor..end];
+                    if text.is_empty() {
+                        text_cursor = end + 1;
+                        continue;
+                    }
+                    if !text
+                        .iter()
+                        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+                    {
+                        break;
+                    }
+                    strings.push(String::from_utf8_lossy(text).to_string());
+                    text_cursor = end + 1;
+                }
+                if !strings.is_empty() {
+                    return Some(serde_json::json!(strings));
+                }
+            }
+            cursor += 1;
+        }
     }
     (!strings.is_empty()).then(|| serde_json::json!(strings))
 }
@@ -2398,5 +2432,19 @@ fn extract_command(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => fail(error),
+    }
+}
+
+#[cfg(test)]
+mod string_list_tests {
+    use super::parse_string_list;
+
+    #[test]
+    fn v1_marker_fallback_reads_following_strings() {
+        let mut bytes = vec![0u8; 0x80];
+        bytes[0x40..0x44].copy_from_slice(&0x0001_0100u32.to_le_bytes());
+        bytes[0x5c..0x70].copy_from_slice(b"REGION\0Amsterdam_AM\0");
+        let value = parse_string_list(&bytes, 0, 0x40).unwrap();
+        assert_eq!(value, serde_json::json!(["REGION", "Amsterdam_AM"]));
     }
 }
