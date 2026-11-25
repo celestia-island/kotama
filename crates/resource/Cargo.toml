@@ -24,6 +24,7 @@ vp6 = []
 asset-manifest = []
 asset = []
 asset-relocation = []
+apt-movie = []
 apt-geometry = []
 
 [dependencies]
