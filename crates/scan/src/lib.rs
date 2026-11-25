@@ -744,6 +744,15 @@ fn read_cstring(space: &dyn AddressSpace, rva: u64) -> Option<String> {
     }
 }
 
+/// 一张表的来源：通用指针表扫描，还是 MSVC RTTI 锚定的精确 vtable。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VtableKind {
+    /// 通用扫描：非执行节里连续解析到函数入口的指针表（可能是 vtable，也可能是回调表）。
+    PointerTable,
+    /// RTTI 锚定：由 `CompleteObjectLocator` 指回的 vftable，槽位内容可信。
+    RttiAnchored,
+}
+
 /// 一个识别出的 vtable（或纯函数指针表）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Vtable {
@@ -751,6 +760,8 @@ pub struct Vtable {
     pub rva: u64,
     /// 槽位目标（函数入口 RVA，按槽位顺序）。
     pub targets: Vec<u64>,
+    /// 这张表是怎么来的。
+    pub kind: VtableKind,
 }
 
 /// 扫描 vtable / 纯函数指针表。
@@ -835,6 +846,7 @@ pub fn vtables(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable
                 out.push(Vtable {
                     rva: run_start.expect("run nonempty implies start"),
                     targets: std::mem::take(&mut run),
+                    kind: VtableKind::PointerTable,
                 });
                 run_start = None;
             } else {
@@ -846,6 +858,7 @@ pub fn vtables(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable
             out.push(Vtable {
                 rva: run_start.unwrap_or_default(),
                 targets: run,
+                kind: VtableKind::PointerTable,
             });
         }
     }
@@ -2017,12 +2030,16 @@ pub fn vtables_with_rtti(module: &LoadedModule, functions: &[FunctionEntry]) -> 
 
     let mut tables = vtables(module, functions);
     let mut known: BTreeSet<u64> = tables.iter().map(|table| table.rva).collect();
-    for table in msvc_rtti::scan(module).vtables {
-        if known.insert(table.address_point) {
+    for fact in msvc_rtti::scan(module).vtables {
+        if known.insert(fact.address_point) {
             tables.push(Vtable {
-                rva: table.address_point,
-                targets: table.slots,
+                rva: fact.address_point,
+                targets: fact.slots,
+                kind: VtableKind::RttiAnchored,
             });
+        } else if let Some(existing) = tables.iter_mut().find(|t| t.rva == fact.address_point) {
+            // 通用扫描也认出来的表：RTTI 锚点把它升级成精确事实。
+            existing.kind = VtableKind::RttiAnchored;
         }
     }
     tables.sort_by_key(|table| table.rva);
@@ -2307,8 +2324,16 @@ mod tests {
                 table.address_point
             );
         }
-        // 合并结果的每个表都至少有一个槽位目标，且 RVA 不重复。
+        // 合并结果的每个表都至少有一个槽位目标，且 RVA 不重复；RTTI 锚定的表要带头衔。
         assert!(merged.iter().all(|table| !table.targets.is_empty()));
+        let anchored: std::collections::BTreeSet<u64> = merged
+            .iter()
+            .filter(|table| table.kind == VtableKind::RttiAnchored)
+            .map(|table| table.rva)
+            .collect();
+        for table in &facts.vtables {
+            assert!(anchored.contains(&table.address_point));
+        }
         let unique: std::collections::BTreeSet<u64> = merged.iter().map(|t| t.rva).collect();
         assert_eq!(unique.len(), merged.len());
     }
