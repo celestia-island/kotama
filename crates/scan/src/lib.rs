@@ -751,8 +751,8 @@ pub struct Vtable {
 ///    用 [`LoadedModule::relative_relocations`]（这也是为什么它必须由 image 提供）。
 /// 2. 非 PIE / PE：槽里是原始绝对地址，减 `image_base` 回 RVA。
 ///
-/// 「每个目标都是已知函数」这一条杀掉 GOT / 字符串指针表 / C 结构体混排的噪声；
-/// 代价是 C++ 夹具外的覆盖依赖函数表质量——这是有意的保守。
+/// 「每个目标都是已知函数（或其跳转 thunk）」这一条杀掉 GOT / 字符串指针表 / C 结构体
+/// 混排的噪声；代价是 C++ 夹具外的覆盖依赖函数表质量——这是有意的保守。
 /// 确定性：按表 RVA 升序；目标列表保持槽位顺序。
 #[must_use]
 pub fn vtables(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable> {
@@ -771,6 +771,22 @@ pub fn vtables(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable
         .filter(|s| !s.executable && s.size > 0 && s.rva > 0)
         .map(|s| (s.rva, s.size))
         .collect();
+
+    // 槽位可能指向链接器 thunk（`/INCREMENTAL` 的 ILT thunk、跳转 stub），真身是 thunk
+    // 的跳转目标：`jmp rel32` / `jmp rel8` 落在已知函数上时，槽位同样算函数槽。
+    let thunk_destination = |rva: u64| -> Option<u64> {
+        let bytes = space.read(rva, 6)?;
+        let (length, rel) = match bytes[0] {
+            0xE9 => (
+                5i64,
+                i64::from(i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]])),
+            ),
+            0xEB => (2i64, i64::from(i8::from_le_bytes([bytes[1]]))),
+            _ => return None,
+        };
+        let target = u64::try_from(i64::try_from(rva).ok()? + length + rel).ok()?;
+        entries.contains(&target).then_some(target)
+    };
 
     let mut out: Vec<Vtable> = Vec::new();
     for (start, size) in candidates {
@@ -798,7 +814,8 @@ pub fn vtables(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Vtable
                 };
                 (value > module.image_base).then(|| value - module.image_base)
             });
-            let is_function = resolved.is_some_and(|rva| entries.contains(&rva));
+            let is_function = resolved
+                .is_some_and(|rva| entries.contains(&rva) || thunk_destination(rva).is_some());
             if is_function {
                 if run_start.is_none() {
                     run_start = Some(slot);
