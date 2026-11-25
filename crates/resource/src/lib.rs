@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod apt;
 pub mod apt_geometry;
+pub mod asset_manifest;
 pub mod big;
 pub mod csf;
 pub mod dds;
@@ -43,6 +44,8 @@ pub enum ResourceKind {
     Tga,
     /// VP6 movie header.
     Vp6,
+    /// BinaryAssetBuilder manifest header.
+    AssetManifest,
 }
 
 impl ResourceKind {
@@ -61,6 +64,7 @@ impl ResourceKind {
             Self::Dds => "dds",
             Self::Tga => "tga",
             Self::Vp6 => "vp6",
+            Self::AssetManifest => "asset-manifest",
         }
     }
 
@@ -79,6 +83,7 @@ impl ResourceKind {
             "dds" => Some(Self::Dds),
             "tga" => Some(Self::Tga),
             "vp6" => Some(Self::Vp6),
+            "asset-manifest" => Some(Self::AssetManifest),
             _ => None,
         }
     }
@@ -98,6 +103,7 @@ impl ResourceKind {
             Self::Dds => "dds",
             Self::Tga => "tga",
             Self::Vp6 => "vp6",
+            Self::AssetManifest => "asset-manifest",
         }
     }
 
@@ -116,6 +122,7 @@ impl ResourceKind {
             Self::Dds => cfg!(feature = "dds"),
             Self::Tga => cfg!(feature = "tga"),
             Self::Vp6 => cfg!(feature = "vp6"),
+            Self::AssetManifest => cfg!(feature = "asset-manifest"),
         }
     }
 }
@@ -165,6 +172,8 @@ pub enum Resource<'a> {
     Tga(tga::TgaInfo),
     /// VP6 movie header.
     Vp6(vp6::Vp6Info),
+    /// BinaryAssetBuilder manifest header.
+    AssetManifest(asset_manifest::AssetManifestInfo),
 }
 
 impl Resource<'_> {
@@ -183,6 +192,7 @@ impl Resource<'_> {
             Self::Dds(_) => ResourceKind::Dds,
             Self::Tga(_) => ResourceKind::Tga,
             Self::Vp6(_) => ResourceKind::Vp6,
+            Self::AssetManifest(_) => ResourceKind::AssetManifest,
         }
     }
 }
@@ -229,6 +239,9 @@ impl Resource<'_> {
             )),
             Self::Vp6(_) => Err(ResourceError::Unsupported(
                 "VP6 is a movie container; inspect header".to_string(),
+            )),
+            Self::AssetManifest(_) => Err(ResourceError::Unsupported(
+                "asset manifest is a header table; inspect fields".to_string(),
             )),
         }
     }
@@ -350,6 +363,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if extension_matches(extension, "manifest") {
+        return Some(Identification {
+            kind: ResourceKind::AssetManifest,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::AssetManifest.enabled(),
+        });
+    }
     if extension_matches(extension, "tga") {
         return Some(Identification {
             kind: ResourceKind::Tga,
@@ -406,6 +426,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Dds => dds::parse(bytes).map(Resource::Dds),
         ResourceKind::Tga => tga::parse(bytes).map(Resource::Tga),
         ResourceKind::Vp6 => vp6::parse(bytes).map(Resource::Vp6),
+        ResourceKind::AssetManifest => asset_manifest::parse(bytes).map(Resource::AssetManifest),
     }
 }
 

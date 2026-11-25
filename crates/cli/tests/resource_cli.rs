@@ -549,6 +549,41 @@ fn vp6_header_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-asset-manifest")]
+#[test]
+fn asset_manifest_header_is_inspected() {
+    let root = temp_dir("asset-manifest");
+    let source = root.join("sample.manifest");
+    let mut bytes = vec![0u8; 48];
+    bytes[1] = 1;
+    bytes[2..4].copy_from_slice(&6u16.to_le_bytes());
+    bytes[12..16].copy_from_slice(&13u32.to_le_bytes());
+    bytes[40..44].copy_from_slice(&487u32.to_le_bytes());
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "asset-manifest");
+    assert_eq!(facts["basis"], "extension");
+
+    let manifest = kotama()
+        .args(["resource", "manifest"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(manifest.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&manifest.stdout).unwrap();
+    assert_eq!(facts["version"], 6);
+    assert_eq!(facts["total_instance_data_size"], 13);
+    assert_eq!(facts["source_file_name_buffer_size"], 487);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
