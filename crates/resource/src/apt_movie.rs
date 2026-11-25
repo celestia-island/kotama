@@ -64,6 +64,8 @@ pub struct AptMovieInfo {
     pub imports: Vec<AptImport>,
     /// Exports.
     pub exports: Vec<AptExport>,
+    /// Image texture ids.
+    pub texture_ids: Vec<u32>,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -144,6 +146,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         .ok_or_else(|| ResourceError::Invalid("APT export list is unreadable".to_string()))?
         as usize;
     let mut characters = Vec::new();
+    let mut texture_ids = Vec::new();
     for index in 0..character_count as usize {
         let pointer_offset = PREFIX
             .checked_add(character_list)
@@ -174,6 +177,12 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             type_id,
             type_name: character_type_name(type_id),
         });
+        if type_id == 7 {
+            let texture_id = u32_at(bytes, character_offset + 8).ok_or_else(|| {
+                ResourceError::Invalid("APT image texture id is unreadable".to_string())
+            })?;
+            texture_ids.push(texture_id);
+        }
     }
     let mut imports = Vec::new();
     for index in 0..import_count as usize {
@@ -229,6 +238,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         characters,
         imports,
         exports,
+        texture_ids,
     })
 }
 
@@ -277,6 +287,29 @@ mod tests {
         assert_eq!(info.imports[0].movie, "movie");
         assert_eq!(info.imports[0].name, "name");
         assert_eq!(info.imports[0].character, 5);
+    }
+
+    #[test]
+    fn parses_image_texture_ids() {
+        let mut bytes = vec![0u8; 16];
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&[0; 12]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&56u32.to_le_bytes());
+        bytes.extend_from_slice(&800u32.to_le_bytes());
+        bytes.extend_from_slice(&600u32.to_le_bytes());
+        bytes.extend_from_slice(&33u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.resize(72, 0);
+        bytes.extend_from_slice(&64u32.to_le_bytes());
+        bytes.resize(80, 0);
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&42u32.to_le_bytes());
+        let info = parse(&bytes, 16).unwrap();
+        assert_eq!(info.characters[0].type_name, "image");
+        assert_eq!(info.texture_ids, vec![42]);
     }
 
     #[test]
