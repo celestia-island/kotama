@@ -50,7 +50,7 @@ Proven scope:
 | --- | --- |
 | Containers | ELF32 / ELF64 / PE32 / PE64 (x86 and x64) |
 | Function discovery | Five evidence channels (symtab / dynsym / PE exception directory or `.pdata` / entry / direct call targets), each row carries provenance |
-| PE metadata | Exception directory + `.xdata` unwind/handler/chain facts, MSVC vtable/RTTI classes and inheritance offsets, RSDS-authenticated companion PDBs, resource directory leaves (type/name/id/language/code page/RVA/size) |
+| PE metadata | Exception directory + `.xdata` unwind/handler/chain facts, MSVC vtable/RTTI classes and inheritance offsets, RSDS-authenticated companion PDBs, resource directory leaves (type/name/id/language/code page/RVA/size), RT_VERSION fixed file/product version + StringFileInfo |
 | Live Windows | Toolhelp modules, native memory scan/freeze, LoadLibrary injection over named pipes or loopback TCP, thread stacks walked with StackWalk64 + dbghelp |
 | Boundaries | Exact boundaries first (symbol lengths, exception directory, PDB); inferred boundaries refined by linear sweep — shared tail blocks no longer truncate real functions |
 | Decompilation | Basic blocks + address-anchor comments; **jump tables of dense switches are recovered** (10/10 branches on the ELF64 fixture matrix, 100% confidence) |
