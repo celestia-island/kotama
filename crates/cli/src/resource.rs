@@ -122,6 +122,13 @@ struct Vp6Json {
 }
 
 #[derive(Serialize)]
+struct AssetPropertyJson {
+    name_hash: u32,
+    type_hash: u32,
+    value_or_offset: u32,
+}
+
+#[derive(Serialize)]
 struct AssetJson {
     kind: &'static str,
     id: String,
@@ -131,6 +138,8 @@ struct AssetJson {
     unknown_28: u32,
     type_name: String,
     data_path: String,
+    property_table_offset: usize,
+    properties: Vec<AssetPropertyJson>,
 }
 
 #[derive(Serialize)]
@@ -1181,6 +1190,16 @@ fn asset_command(args: &[String]) -> ExitCode {
         unknown_28: info.unknown_28,
         type_name: info.type_name,
         data_path: info.data_path,
+        property_table_offset: info.property_table_offset,
+        properties: info
+            .properties
+            .iter()
+            .map(|property| AssetPropertyJson {
+                name_hash: property.name_hash,
+                type_hash: property.type_hash,
+                value_or_offset: property.value_or_offset,
+            })
+            .collect(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
