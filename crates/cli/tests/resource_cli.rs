@@ -1148,6 +1148,30 @@ fn imp_groups_are_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-apt-bin")]
+#[test]
+fn apt_bin_prefix_is_inspected() {
+    let root = temp_dir("apt-bin");
+    let source = root.join("sample.bin");
+    let mut data = vec![0u8; 16];
+    data.extend_from_slice(b"Apt Data:74\x1aREGION\x00Amsterdam_AM\x00");
+    fs::write(&source, &data).unwrap();
+    let output = kotama()
+        .args(["resource", "apt-bin"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(facts["prefix_length"], 16);
+    assert_eq!(facts["type_id"], "74");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
