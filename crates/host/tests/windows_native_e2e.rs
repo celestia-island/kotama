@@ -471,7 +471,8 @@ fn live_e2e_attach_then_inject_into_x86_target_over_default_pid_pipe() {
         static_rvas.difference(&live_rvas).collect::<Vec<_>>()
     );
     // 文件里头页与 .text 之间没有后备字节，静态看不到那里的零填充；活体里它让节首
-    // 成为合法的填充起点。除此之外两边的起点集合必须逐项相同。
+    // 成为合法的填充起点。另一类活体独有的起点是运行期才写进数据节的函数指针
+    // （CRT 初始化、回调注册），它们必须带着引用型证据出现，否则就是活体自身的误报。
     let section_starts: std::collections::BTreeSet<u64> = image
         .sections
         .iter()
@@ -479,11 +480,24 @@ fn live_e2e_attach_then_inject_into_x86_target_over_default_pid_pipe() {
         .map(|section| section.rva)
         .collect();
     let live_only: Vec<u64> = live_rvas.difference(&static_rvas).copied().collect();
+    let referenced = |rva: u64| {
+        live_functions.iter().any(|function| {
+            function.rva == rva
+                && function.evidence.iter().any(|evidence| {
+                    matches!(
+                        evidence,
+                        kotama_scan::Evidence::PointerTarget
+                            | kotama_scan::Evidence::ImmediateTarget
+                    )
+                })
+        })
+    };
     assert!(
-        live_only.iter().all(|rva| section_starts.contains(rva)),
-        "live-only starts must be executable section starts, got {live_only:?}"
+        live_only
+            .iter()
+            .all(|rva| section_starts.contains(rva) || referenced(*rva)),
+        "live-only starts need a section start or a live reference, got {live_only:?}"
     );
-
     let server = NamedPipeServer::for_pid(pid).expect("deterministic default pipe");
     let session = Session::with_injection(TargetProcess::open(pid).expect("open inject target"))
         .expect("explicit injection grant");

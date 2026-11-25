@@ -2226,8 +2226,11 @@ mod tests {
         let tables = vtables(&module, &functions);
         // Fan / Pump 两个 vtable，每个至少 step/mode/两个 dtor 共 3+ 槽。
         assert!(tables.len() >= 2, "vtables: {tables:?}");
+        // 「每个表都 ≥3 槽」是夹具布局相关的期望：链接器把只有两个虚函数的类也排进
+        // 同一段 .rodata 时，合法的表就是 2 槽（重建夹具后实测出现），所以只要求
+        // 至少两个 3 槽以上的表，保留原来 Fan / Pump 每个都够大的本意。
         assert!(
-            tables.iter().all(|t| t.targets.len() >= 3),
+            tables.iter().filter(|t| t.targets.len() >= 3).count() >= 2,
             "vtables too small: {tables:?}"
         );
         let entries: std::collections::BTreeSet<u64> = functions.iter().map(|f| f.rva).collect();
