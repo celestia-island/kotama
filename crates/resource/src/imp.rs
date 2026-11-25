@@ -42,7 +42,9 @@ pub fn parse(bytes: &[u8]) -> Result<ImpInfo, ResourceError> {
     let mut current = Vec::new();
     for value in values {
         if value == GROUP_SEPARATOR {
-            groups.push(std::mem::take(&mut current));
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+            }
         } else {
             current.push(value);
         }
