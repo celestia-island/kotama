@@ -122,6 +122,18 @@ struct Vp6Json {
 }
 
 #[derive(Serialize)]
+struct AssetJson {
+    kind: &'static str,
+    id: String,
+    unknown_16: u32,
+    data_size: u32,
+    property_count: u32,
+    unknown_28: u32,
+    type_name: String,
+    data_path: String,
+}
+
+#[derive(Serialize)]
 struct AssetReferenceJson {
     type_id: u32,
     instance_id: u32,
@@ -242,7 +254,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -293,6 +305,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "tga" => tga_command(&args[1..]),
         "vp6" => vp6_command(&args[1..]),
         "manifest" => manifest_command(&args[1..]),
+        "asset" => asset_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -527,6 +540,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::AssetManifest(_) => InfoJson {
             kind: "asset-manifest",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::Asset(_) => InfoJson {
+            kind: "asset",
             compression: None,
             version: None,
             declared_length: None,
@@ -1112,6 +1141,46 @@ fn manifest_command(args: &[String]) -> ExitCode {
                     .collect(),
             })
             .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn asset_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Asset(info) = resource else {
+        return fail("asset requires an asset header");
+    };
+    let json = AssetJson {
+        kind: "asset",
+        id: info
+            .id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(""),
+        unknown_16: info.unknown_16,
+        data_size: info.data_size,
+        property_count: info.property_count,
+        unknown_28: info.unknown_28,
+        type_name: info.type_name,
+        data_path: info.data_path,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
