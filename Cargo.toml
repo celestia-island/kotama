@@ -14,7 +14,7 @@ workspace = true
 
 [workspace]
 resolver = "2"
-members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource"]
+members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay"]
 
 [workspace.package]
 version = "0.1.0"

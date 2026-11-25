@@ -268,6 +268,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kotama-overlay"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kotama-pack"
 version = "0.1.0"
 dependencies = [
