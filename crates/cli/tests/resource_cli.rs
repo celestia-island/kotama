@@ -559,6 +559,7 @@ fn asset_manifest_header_is_inspected() {
     bytes[2..4].copy_from_slice(&6u16.to_le_bytes());
     bytes[12..16].copy_from_slice(&13u32.to_le_bytes());
     bytes[40..44].copy_from_slice(&487u32.to_le_bytes());
+    bytes.extend_from_slice(b"AptAptData:Foo\0source.xml\0");
     fs::write(&source, &bytes).unwrap();
 
     let identify = kotama()
@@ -581,6 +582,8 @@ fn asset_manifest_header_is_inspected() {
     assert_eq!(facts["version"], 6);
     assert_eq!(facts["total_instance_data_size"], 13);
     assert_eq!(facts["source_file_name_buffer_size"], 487);
+    assert_eq!(facts["names"][0], "AptAptData:Foo");
+    assert_eq!(facts["names"][1], "source.xml");
     fs::remove_dir_all(&root).unwrap();
 }
 
