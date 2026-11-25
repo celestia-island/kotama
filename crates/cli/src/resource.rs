@@ -1623,6 +1623,19 @@ fn asset_property_value(
             let value = u32::from_le_bytes(value_at(4)?.try_into().ok()?);
             Some(serde_json::json!(value))
         }
+        Some("Vector2" | "vector2" | "VECTOR2") => {
+            let raw = value_at(8)?;
+            let x = f32::from_le_bytes(raw[0..4].try_into().ok()?);
+            let y = f32::from_le_bytes(raw[4..8].try_into().ok()?);
+            (x.is_finite() && y.is_finite()).then(|| serde_json::json!([x, y]))
+        }
+        Some("Vector3" | "vector3" | "Vector" | "vector") => {
+            let raw = value_at(12)?;
+            let x = f32::from_le_bytes(raw[0..4].try_into().ok()?);
+            let y = f32::from_le_bytes(raw[4..8].try_into().ok()?);
+            let z = f32::from_le_bytes(raw[8..12].try_into().ok()?);
+            (x.is_finite() && y.is_finite() && z.is_finite()).then(|| serde_json::json!([x, y, z]))
+        }
         Some("bool") => Some(serde_json::json!(value_at(1)?[0] != 0)),
         Some("StringList") => parse_string_list(bytes, table_offset, raw),
         Some(kind)
@@ -2710,7 +2723,26 @@ fn extract_command(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod string_list_tests {
-    use super::parse_string_list;
+    use super::{asset_property_value, parse_string_list};
+
+    #[test]
+    fn vector2_is_two_floats() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&2.5f32.to_le_bytes());
+        let value = asset_property_value(&bytes, 0, Some("Vector2"), 0).unwrap();
+        assert_eq!(value, serde_json::json!([1.0, 2.5]));
+    }
+
+    #[test]
+    fn vector3_is_three_floats() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        bytes.extend_from_slice(&3.0f32.to_le_bytes());
+        let value = asset_property_value(&bytes, 0, Some("Vector3"), 0).unwrap();
+        assert_eq!(value, serde_json::json!([1.0, 2.0, 3.0]));
+    }
 
     #[test]
     fn v1_pointer_slot_reads_marker_table() {
