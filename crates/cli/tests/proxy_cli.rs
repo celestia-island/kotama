@@ -146,5 +146,71 @@ int main(void) {
         !second.status.success(),
         "existing outputs must not be overwritten"
     );
+
+    let hooks = root.join("hooks.c");
+    write(
+        &hooks,
+        "int __cdecl KOTAMA_OVERRIDE_5(void) { return 99; }\nint __cdecl KOTAMA_OVERRIDE_7(void) { return 77; }\n",
+    );
+    let out_override = root.join("override");
+    let override_output = Command::new(env!("CARGO_BIN_EXE_kotama"))
+        .args(["proxy", "generate"])
+        .arg(&original)
+        .arg("--output")
+        .arg(&out_override)
+        .arg("--backing")
+        .arg("original_real.dll")
+        .arg("--override")
+        .arg("Alpha")
+        .arg("--override-ordinal")
+        .arg("7")
+        .arg("--hooks")
+        .arg(&hooks)
+        .arg("--build")
+        .env("KOTAMA_ZIG", &zig)
+        .output()
+        .expect("generate override mirror");
+    assert!(
+        override_output.status.success(),
+        "override generation failed:\n{}\n{}",
+        String::from_utf8_lossy(&override_output.stdout),
+        String::from_utf8_lossy(&override_output.stderr)
+    );
+    fs::copy(&original, out_override.join("original_real.dll")).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(out_override.join("manifest.json")).unwrap()).unwrap();
+    let overridden = manifest["exports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|export| export["action"] == "override")
+        .count();
+    assert_eq!(overridden, 2);
+    assert_eq!(manifest["hooks"]["source"], "hooks.c");
+
+    write(
+        &out_override.join("client_override.c"),
+        r#"#include <windows.h>
+typedef int (__cdecl *IntFn)(void);
+typedef void (WINAPI *SleepFn)(DWORD);
+int main(void) {
+    HMODULE module = LoadLibraryW(L"mirror.dll");
+    if (!module) return 20;
+    IntFn alpha = (IntFn)GetProcAddress(module, "Alpha");
+    IntFn alias = (IntFn)GetProcAddress(module, "Alias");
+    IntFn plain = (IntFn)GetProcAddress(module, (LPCSTR)7);
+    SleepFn forwarded = (SleepFn)GetProcAddress(module, "Forwarded");
+    if (!alpha || !alias || !plain || !forwarded) return 21;
+    if (alpha() != 99 || alias() != 42 || plain() != 77) return 22;
+    forwarded(0);
+    return 0;
+}
+"#,
+    );
+    run(cc(&zig, target)
+        .arg("-o")
+        .arg(out_override.join("client.exe"))
+        .arg(out_override.join("client_override.c")));
+    run(Command::new(out_override.join("client.exe")).current_dir(&out_override));
     fs::remove_dir_all(&root).unwrap();
 }
