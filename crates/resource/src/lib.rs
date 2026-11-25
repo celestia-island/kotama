@@ -17,6 +17,7 @@ pub mod big;
 pub mod csf;
 pub mod dds;
 pub mod dos_com;
+pub mod pak;
 pub mod pvz_reanim;
 pub mod swf;
 pub mod tga;
@@ -61,6 +62,8 @@ pub enum ResourceKind {
     AptImageMap,
     /// PvZ Reanim compiled container.
     PvzReanim,
+    /// PopCap PAK container.
+    Pak,
 }
 
 impl ResourceKind {
@@ -85,6 +88,7 @@ impl ResourceKind {
             Self::AptMovie => "apt-movie",
             Self::AptImageMap => "apt-image-map",
             Self::PvzReanim => "pvz-reanim",
+            Self::Pak => "pak",
         }
     }
 
@@ -109,6 +113,7 @@ impl ResourceKind {
             "apt-movie" => Some(Self::AptMovie),
             "apt-image-map" => Some(Self::AptImageMap),
             "pvz-reanim" => Some(Self::PvzReanim),
+            "pak" => Some(Self::Pak),
             _ => None,
         }
     }
@@ -134,6 +139,7 @@ impl ResourceKind {
             Self::AptMovie => "apt-movie",
             Self::AptImageMap => "apt-image-map",
             Self::PvzReanim => "pvz-reanim",
+            Self::Pak => "pak",
         }
     }
 
@@ -158,6 +164,7 @@ impl ResourceKind {
             Self::AptMovie => cfg!(feature = "apt-movie"),
             Self::AptImageMap => cfg!(feature = "apt-image-map"),
             Self::PvzReanim => cfg!(feature = "pvz-reanim"),
+            Self::Pak => cfg!(feature = "pak"),
         }
     }
 }
@@ -219,6 +226,8 @@ pub enum Resource<'a> {
     AptImageMap(apt_image_map::AptImageMap),
     /// PvZ Reanim compiled container.
     PvzReanim(pvz_reanim::PvzReanimInfo),
+    /// PopCap PAK container.
+    Pak(pak::PopCapPak),
 }
 
 impl Resource<'_> {
@@ -243,6 +252,7 @@ impl Resource<'_> {
             Self::AptMovie(_) => ResourceKind::AptMovie,
             Self::AptImageMap(_) => ResourceKind::AptImageMap,
             Self::PvzReanim(_) => ResourceKind::PvzReanim,
+            Self::Pak(_) => ResourceKind::Pak,
         }
     }
 }
@@ -307,6 +317,9 @@ impl Resource<'_> {
             )),
             Self::PvzReanim(_) => Err(ResourceError::Unsupported(
                 "Reanim tracks are opaque; inspect header".to_string(),
+            )),
+            Self::Pak(_) => Err(ResourceError::Unsupported(
+                "PAK bodies are opaque; inspect entries".to_string(),
             )),
         }
     }
@@ -428,6 +441,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
+    if pak::has_magic(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::Pak,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::Pak.enabled(),
+        });
+    }
     if pvz_reanim::has_magic(bytes) {
         return Some(Identification {
             kind: ResourceKind::PvzReanim,
@@ -534,6 +554,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::AptMovie => apt_movie::parse(bytes, 16).map(Resource::AptMovie),
         ResourceKind::AptImageMap => apt_image_map::parse(bytes).map(Resource::AptImageMap),
         ResourceKind::PvzReanim => pvz_reanim::parse(bytes).map(Resource::PvzReanim),
+        ResourceKind::Pak => pak::parse(bytes).map(Resource::Pak),
     }
 }
 

@@ -31,6 +31,7 @@ resource-asset-relocation = ["kotama-resource/asset-relocation"]
 resource-apt-movie = ["kotama-resource/apt-movie"]
 resource-apt-image-map = ["kotama-resource/apt-image-map"]
 resource-pvz-reanim = ["kotama-resource/pvz-reanim"]
+resource-pak = ["kotama-resource/pak"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]

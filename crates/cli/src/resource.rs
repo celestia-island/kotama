@@ -357,6 +357,22 @@ struct MeshJson {
 }
 
 #[derive(Serialize)]
+struct PakEntryJson {
+    name: String,
+    size: u32,
+    filetime: u64,
+    offset: usize,
+}
+
+#[derive(Serialize)]
+struct PakJson {
+    kind: &'static str,
+    files: usize,
+    bytes: u64,
+    entries: Vec<PakEntryJson>,
+}
+
+#[derive(Serialize)]
 struct ExtractJson {
     kind: &'static str,
     output: String,
@@ -365,7 +381,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -421,6 +437,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "apt-movie" => apt_movie_command(&args[1..]),
         "apt-image-map" => apt_image_map_command(&args[1..]),
         "pvz-reanim" => pvz_reanim_command(&args[1..]),
+        "pak" => pak_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -735,6 +752,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::PvzReanim(_) => InfoJson {
             kind: "pvz-reanim",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::Pak(_) => InfoJson {
+            kind: "pak",
             compression: None,
             version: None,
             declared_length: None,
@@ -1760,6 +1793,70 @@ fn pvz_reanim_command(args: &[String]) -> ExitCode {
         print!("{text}");
         return ExitCode::SUCCESS;
     }
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn pak_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut limit = 20usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                limit = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return usage(),
+                };
+                index += 1;
+            }
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "pak" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let pak = match kotama_resource::pak::parse(&bytes) {
+        Ok(pak) => pak,
+        Err(error) => return fail_kind(&error),
+    };
+    let json = PakJson {
+        kind: "pak",
+        files: pak.entries.len(),
+        bytes: pak.entries.iter().map(|entry| u64::from(entry.size)).sum(),
+        entries: pak
+            .entries
+            .iter()
+            .take(limit)
+            .map(|entry| PakEntryJson {
+                name: entry.name.clone(),
+                size: entry.size,
+                filetime: entry.filetime,
+                offset: entry.offset,
+            })
+            .collect(),
+    };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
             println!("{text}");
