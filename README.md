@@ -60,7 +60,9 @@ Proven scope:
 Known limits: type inference and struct recovery are still P1; PDB-less PE boundaries rely on
 the exception directory plus call targets; the generic vtable scan stays narrower than MSVC
 RTTI; Windows injection is x64-to-x64; `--pid` attach is same-user, expects no non-empty
-`KOTAMA_PAYLOAD_*` in the target, and resolves the main `.exe` by path; the GUI/service surface is not started.
+`KOTAMA_PAYLOAD_*` in the target, and resolves the main `.exe` by path; the pure forwarding
+mirror preserves exports, ordinals and original forwarders but hook overrides/logging are not
+implemented yet; the GUI/service surface is not started.
 
 Design decisions and process records live in pull-request descriptions (design documents do
 not enter the source tree).
@@ -71,7 +73,7 @@ not enter the source tree).
 | --- | --- | --- |
 | Static | load → function discovery → basic-block decompilation → SEH/RTTI/PDB evidence and Ghidra differential ✅ / type inference · structs | P0 ✅ / P1 |
 | Dynamic | Windows injection (named pipe / TCP) → memory / stack snapshots → scan / freeze ✅; hook / trace and Linux injection matrix pending | P2–P4 |
-| Packaging | per-platform agent + manifest lanes for GNU x64/x86 and MSVC ✅; `hooks.toml` hook ABI pending | P4 |
+| Packaging | per-platform agent + manifest lanes for GNU x64/x86 and MSVC ✅; lossless PE export facts + buildable forwarding mirrors ✅; hook overrides / logging and `hooks.toml` hook ABI pending | P4 |
 | Surface | services (REST / WS / MCP) + hikari web UI + evernight remote nodes | P5–P6 |
 
 Two foundations, everything else stands on them:
@@ -92,6 +94,14 @@ cargo run -p kotama-cli -- analyze <file> --decompile --limit 8   # plus pseudo-
 cargo run -p kotama-cli -- analyze <file> --rtti                # MSVC RTTI/vtable facts
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll -- <target>  # Windows: launch + inject + handshake
 cargo run -p kotama-cli -- live inject --payload dist/x86_64-pc-windows-gnu/kotama_agent.dll --pid <pid>       # Windows: attach to a running target
+cargo run -p kotama-cli -- live inject --payload my_hook.dll --pid <pid> --load-only                # Windows: load a self-initializing DLL without the agent protocol
+cargo run -p kotama-cli -- proxy inspect <dll>                                                      # complete PE export facts (aliases, ordinals, forwarders)
+cargo run -p kotama-cli -- proxy generate <dll> --output out --build                                # buildable forwarding mirror + manifest
+
+Mirror backing modes: the default `--backing <stem>_original.dll` expects the caller to rename or
+copy the original to that name (drop-in replacement). For a DLL that cannot load under a new name
+(KnownDLLs such as `user32.dll`), pass `--backing user32.dll` instead and load the generated
+`mirror.dll` explicitly under its own name — the mirror then forwards to the real system module.
 just bench-windows                          # native Windows bench (add --oracle for Ghidra)
 KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
 python3 tools/build_fixtures.py --run --host-samples   # fixture matrix + run smoke
