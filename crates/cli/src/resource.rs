@@ -88,6 +88,9 @@ struct MeshJson {
     normal_count: usize,
     triangle_count: usize,
     material_info: Option<Vec<u32>>,
+    vertex_material_names: Vec<String>,
+    texture_names: Vec<String>,
+    user_text: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -491,6 +494,9 @@ fn mesh_command(args: &[String]) -> ExitCode {
         normal_count: normals.len(),
         triangle_count: triangles.len(),
         material_info: file.material_info().map(|values| values.to_vec()),
+        vertex_material_names: file.vertex_material_names(),
+        texture_names: file.texture_names(),
+        user_text: file.user_text(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
