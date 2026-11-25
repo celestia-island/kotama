@@ -23,6 +23,7 @@ tga = []
 vp6 = []
 asset-manifest = []
 asset = []
+asset-relocation = []
 apt-geometry = []
 
 [dependencies]
