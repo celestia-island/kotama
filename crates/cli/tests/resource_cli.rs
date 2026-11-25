@@ -436,6 +436,46 @@ fn apt_geometry_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-dds")]
+#[test]
+fn dds_header_is_inspected() {
+    let root = temp_dir("dds");
+    let source = root.join("surface.dds");
+    let mut bytes = vec![0u8; 128];
+    bytes[0..4].copy_from_slice(b"DDS ");
+    bytes[4..8].copy_from_slice(&124u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&0x1007u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&32u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&64u32.to_le_bytes());
+    bytes[28..32].copy_from_slice(&4u32.to_le_bytes());
+    bytes[80..84].copy_from_slice(&0x4u32.to_le_bytes());
+    bytes[84..88].copy_from_slice(b"DXT1");
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "dds");
+    assert_eq!(facts["basis"], "magic");
+
+    let dds = kotama()
+        .args(["resource", "dds"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(dds.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&dds.stdout).unwrap();
+    assert_eq!(facts["width"], 64);
+    assert_eq!(facts["height"], 32);
+    assert_eq!(facts["mipmaps"], 4);
+    assert_eq!(facts["fourcc"], "DXT1");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

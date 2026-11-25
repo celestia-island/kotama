@@ -22,6 +22,7 @@ resource-big = ["kotama-resource/big"]
 resource-w3d = ["kotama-resource/w3d"]
 resource-apt-const = ["kotama-resource/apt-const"]
 resource-csf = ["kotama-resource/csf"]
+resource-dds = ["kotama-resource/dds"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]
