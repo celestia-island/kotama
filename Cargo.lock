@@ -218,6 +218,7 @@ dependencies = [
  "kotama-pack",
  "kotama-proto",
  "kotama-proxy",
+ "kotama-resource",
  "kotama-scan",
  "serde",
  "serde_json",
@@ -296,6 +297,13 @@ dependencies = [
  "kotama-image",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "kotama-resource"
+version = "0.1.0"
+dependencies = [
+ "flate2",
 ]
 
 [[package]]

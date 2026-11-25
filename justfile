@@ -11,10 +11,14 @@ check:
 # Lint with clippy (deny warnings).
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy -p kotama-resource --all-targets --all-features -- -D warnings
+    cargo clippy -p kotama-cli --all-targets --all-features -- -D warnings
 
 # Run all tests.
 test:
     cargo test --workspace
+    cargo test -p kotama-resource --all-features
+    cargo test -p kotama-cli --all-features
 
 # Format check.
 fmt:

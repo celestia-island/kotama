@@ -18,6 +18,7 @@ use kotama_scan::vtables_with_rtti;
 use serde::Serialize;
 
 mod proxy;
+mod resource;
 
 const USAGE: &str = "\
 kotama — static dissection and live instrumentation for binaries
@@ -52,6 +53,10 @@ Commands:
                            Generate a complete forwarding mirror and manifest; optionally build it with Zig
                              --override <name> / --override-ordinal <n>   local symbols from --hooks <file.c>
                              --exclude <name> / --exclude-ordinal <n>     deny wins over include
+  resource identify <path> Identify SWF / VBS / DOS COM
+  resource info <path>     [--kind swf|vbs|dos-com] parsed metadata as JSON
+  resource extract <path> --output <path> [--kind ...] [--max-output <bytes>]
+                           Extract verbatim bytes or decoded text (feature-gated)
   serve                    Start the service surface (web UI + MCP)       (not wired yet)
 
 Options:
@@ -78,6 +83,7 @@ fn main() -> ExitCode {
         Some("live") => live(&args.collect::<Vec<_>>()),
         Some("pack") => pack(&args.collect::<Vec<_>>()),
         Some("proxy") => proxy::run(&args.collect::<Vec<_>>()),
+        Some("resource") => resource::run(&args.collect::<Vec<_>>()),
         Some(command) => {
             eprintln!("kotama: unknown command `{command}`\n\n{USAGE}");
             ExitCode::from(2)
