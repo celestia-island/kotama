@@ -40,6 +40,8 @@ ui-build:
     cargo build --manifest-path ui/Cargo.toml --workspace
 
 # Check the optional desktop shells (format, clippy, tests).
+# A tracked dist/.gitkeep lets Tauri codegen resolve frontendDist on a clean
+# checkout; ui-build still refuses to package that placeholder.
 ui-check:
     cargo fmt --all --manifest-path ui/Cargo.toml -- --check
     cargo clippy --manifest-path ui/Cargo.toml --workspace --all-targets -- -D warnings
