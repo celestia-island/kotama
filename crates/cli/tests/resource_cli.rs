@@ -867,6 +867,43 @@ fn pvz_reanim_is_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-pak")]
+#[test]
+fn pak_is_inspected() {
+    let root = temp_dir("pak");
+    let source = root.join("sample.pak");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0xBAC0_4AC0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.push(0);
+    data.push(5);
+    data.extend_from_slice(b"hello");
+    data.extend_from_slice(&3u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.push(0xFF);
+    data.extend_from_slice(b"abc");
+    let encrypted: Vec<u8> = data.iter().map(|byte| byte ^ 0xF7).collect();
+    fs::write(&source, &encrypted).unwrap();
+
+    let pak = kotama()
+        .args(["resource", "pak"])
+        .arg(&source)
+        .arg("--limit")
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(
+        pak.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pak.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&pak.stdout).unwrap();
+    assert_eq!(facts["files"], 1);
+    assert_eq!(facts["bytes"], 3);
+    assert_eq!(facts["entries"][0]["name"], "hello");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
