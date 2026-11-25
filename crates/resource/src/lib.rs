@@ -10,6 +10,7 @@ pub mod big;
 pub mod dos_com;
 pub mod swf;
 pub mod vbs;
+pub mod w3d;
 
 /// A recognized resource format.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +23,8 @@ pub enum ResourceKind {
     DosCom,
     /// EA BIG archive container (BIGF/BIG4).
     Big,
+    /// W3D chunk container.
+    W3d,
 }
 
 impl ResourceKind {
@@ -33,6 +36,7 @@ impl ResourceKind {
             Self::Vbs => "vbs",
             Self::DosCom => "dos-com",
             Self::Big => "big",
+            Self::W3d => "w3d",
         }
     }
 
@@ -44,6 +48,7 @@ impl ResourceKind {
             "vbs" => Some(Self::Vbs),
             "dos-com" | "com" => Some(Self::DosCom),
             "big" | "bigf" | "big4" => Some(Self::Big),
+            "w3d" => Some(Self::W3d),
             _ => None,
         }
     }
@@ -56,6 +61,7 @@ impl ResourceKind {
             Self::Vbs => "vbs",
             Self::DosCom => "dos-com",
             Self::Big => "big",
+            Self::W3d => "w3d",
         }
     }
 
@@ -67,6 +73,7 @@ impl ResourceKind {
             Self::Vbs => cfg!(feature = "vbs"),
             Self::DosCom => cfg!(feature = "dos-com"),
             Self::Big => cfg!(feature = "big"),
+            Self::W3d => cfg!(feature = "w3d"),
         }
     }
 }
@@ -102,6 +109,8 @@ pub enum Resource<'a> {
     DosCom(dos_com::DosComResource<'a>),
     /// EA BIG archive container.
     Big(big::BigArchive<'a>),
+    /// W3D chunk container.
+    W3d(w3d::W3dFile<'a>),
 }
 
 impl Resource<'_> {
@@ -113,6 +122,7 @@ impl Resource<'_> {
             Self::Vbs(_) => ResourceKind::Vbs,
             Self::DosCom(_) => ResourceKind::DosCom,
             Self::Big(_) => ResourceKind::Big,
+            Self::W3d(_) => ResourceKind::W3d,
         }
     }
 }
@@ -138,6 +148,9 @@ impl Resource<'_> {
             Self::DosCom(resource) => resource.extract(),
             Self::Big(_) => Err(ResourceError::Unsupported(
                 "BIG archive is a container; select an entry".to_string(),
+            )),
+            Self::W3d(_) => Err(ResourceError::Unsupported(
+                "W3D is a chunk container; select a chunk".to_string(),
             )),
         }
     }
@@ -222,6 +235,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Vbs.enabled(),
         });
     }
+    if extension_matches(extension, "w3d") {
+        return Some(Identification {
+            kind: ResourceKind::W3d,
+            basis: DetectionBasis::Extension,
+            enabled: ResourceKind::W3d.enabled(),
+        });
+    }
     if extension_matches(extension, "com") {
         return Some(Identification {
             kind: ResourceKind::DosCom,
@@ -257,6 +277,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Vbs => vbs::parse(bytes).map(Resource::Vbs),
         ResourceKind::DosCom => dos_com::parse(bytes).map(Resource::DosCom),
         ResourceKind::Big => big::parse(bytes).map(Resource::Big),
+        ResourceKind::W3d => w3d::parse(bytes).map(Resource::W3d),
     }
 }
 

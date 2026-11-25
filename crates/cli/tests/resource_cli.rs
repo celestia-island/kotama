@@ -199,6 +199,52 @@ fn big_archive_is_identified_and_inspected() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-w3d")]
+#[test]
+fn w3d_chunks_are_inspected() {
+    let root = temp_dir("w3d");
+    let source = root.join("model.w3d");
+    let mut child = 31u32.to_le_bytes().to_vec();
+    child.extend_from_slice(&4u32.to_le_bytes());
+    child.extend_from_slice(b"abcd");
+    let mut bytes = 0u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&(0x8000_0000u32 | child.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&child);
+    fs::write(&source, &bytes).unwrap();
+
+    let identify = kotama()
+        .args(["resource", "identify"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(identify.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    assert_eq!(facts["kind"], "w3d");
+    assert_eq!(facts["basis"], "extension");
+
+    let info = kotama()
+        .args(["resource", "info"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(info.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(facts["chunks"], 2);
+
+    let chunks = kotama()
+        .args(["resource", "chunks"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(chunks.status.success());
+    let facts: serde_json::Value = serde_json::from_slice(&chunks.stdout).unwrap();
+    assert_eq!(facts["count"], 2);
+    assert_eq!(facts["chunks"][1]["type_id"], 31);
+    assert_eq!(facts["chunks"][1]["depth"], 1);
+    assert_eq!(facts["chunks"][1]["offset"], 8);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {
