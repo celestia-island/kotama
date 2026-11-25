@@ -240,6 +240,7 @@ fn w3d_chunks_are_inspected() {
     let facts: serde_json::Value = serde_json::from_slice(&chunks.stdout).unwrap();
     assert_eq!(facts["count"], 2);
     assert_eq!(facts["chunks"][1]["type_id"], 31);
+    assert_eq!(facts["chunks"][1]["name"], "mesh_header3");
     assert_eq!(facts["chunks"][1]["depth"], 1);
     assert_eq!(facts["chunks"][1]["offset"], 8);
     fs::remove_dir_all(&root).unwrap();
