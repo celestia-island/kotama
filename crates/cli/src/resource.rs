@@ -389,6 +389,19 @@ struct PakRepackJson {
 }
 
 #[derive(Serialize)]
+struct StringHitJson {
+    offset: usize,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct StringsJson {
+    kind: &'static str,
+    count: usize,
+    strings: Vec<StringHitJson>,
+}
+
+#[derive(Serialize)]
 struct ExtractJson {
     kind: &'static str,
     output: String,
@@ -397,7 +410,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource strings <path> [--min-len <count>] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -438,6 +451,7 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     match command {
         "identify" => identify_command(&args[1..]),
+        "strings" => strings_command(&args[1..]),
         "info" => info_command(&args[1..]),
         "entries" => entries_command(&args[1..]),
         "chunks" => chunks_command(&args[1..]),
@@ -2197,6 +2211,85 @@ fn pak_repack_command(args: &[String]) -> ExitCode {
         output: output.display().to_string(),
         files: reparsed.entries.len(),
         bytes: encoded.len() as u64,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn strings_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut min_len = 4usize;
+    let mut limit = 100usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--min-len" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                min_len = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return usage(),
+                };
+                index += 1;
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                limit = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return usage(),
+                };
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let mut strings = Vec::new();
+    let mut start: Option<usize> = None;
+    for (offset, byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_graphic() || *byte == b' ' {
+            if start.is_none() {
+                start = Some(offset);
+            }
+        } else if let Some(begin) = start {
+            if offset - begin >= min_len {
+                strings.push(StringHitJson {
+                    offset: begin,
+                    text: String::from_utf8_lossy(&bytes[begin..offset]).to_string(),
+                });
+                if strings.len() == limit {
+                    break;
+                }
+            }
+            start = None;
+        }
+    }
+    if let Some(begin) = start {
+        if bytes.len() - begin >= min_len && strings.len() < limit {
+            strings.push(StringHitJson {
+                offset: begin,
+                text: String::from_utf8_lossy(&bytes[begin..]).to_string(),
+            });
+        }
+    }
+    let json = StringsJson {
+        kind: "strings",
+        count: strings.len(),
+        strings,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
