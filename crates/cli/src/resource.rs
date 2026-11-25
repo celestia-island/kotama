@@ -29,6 +29,22 @@ struct InfoJson {
     size: Option<usize>,
     load_address: Option<u32>,
     entry: Option<u32>,
+    archive_version: Option<&'static str>,
+    entries: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct EntryJson<'a> {
+    name: &'a str,
+    offset: u32,
+    size: u32,
+}
+
+#[derive(Serialize)]
+struct EntriesJson<'a> {
+    kind: &'static str,
+    count: usize,
+    entries: Vec<EntryJson<'a>>,
 }
 
 #[derive(Serialize)]
@@ -40,7 +56,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com]\n  kotama resource extract <path> --output <path> [--kind swf|vbs|dos-com] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -82,6 +98,7 @@ pub fn run(args: &[String]) -> ExitCode {
     match command {
         "identify" => identify_command(&args[1..]),
         "info" => info_command(&args[1..]),
+        "entries" => entries_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
     }
@@ -147,6 +164,8 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             size: None,
             load_address: None,
             entry: None,
+            archive_version: None,
+            entries: None,
         },
         Resource::Vbs(vbs) => InfoJson {
             kind: "vbs",
@@ -158,6 +177,8 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             size: Some(vbs.text.len()),
             load_address: None,
             entry: None,
+            archive_version: None,
+            entries: None,
         },
         Resource::DosCom(com) => InfoJson {
             kind: "dos-com",
@@ -169,6 +190,21 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
             size: Some(com.size()),
             load_address: Some(kotama_resource::dos_com::LOAD_ADDRESS),
             entry: Some(kotama_resource::dos_com::ENTRY_ADDRESS),
+            archive_version: None,
+            entries: None,
+        },
+        Resource::Big(archive) => InfoJson {
+            kind: "big",
+            compression: None,
+            version: None,
+            declared_length: Some(archive.archive_size),
+            stored_length: Some(archive.data.len()),
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: Some(archive.version.short()),
+            entries: Some(archive.entries.len()),
         },
     }
 }
@@ -211,12 +247,78 @@ fn info_command(args: &[String]) -> ExitCode {
     }
 }
 
+fn entries_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut limit = 200usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                limit = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Big(archive) = resource else {
+        return fail("entries requires a BIG archive");
+    };
+    let entries = archive
+        .entries
+        .iter()
+        .take(limit)
+        .map(|entry| EntryJson {
+            name: entry.name,
+            offset: entry.offset,
+            size: entry.size,
+        })
+        .collect();
+    let json = EntriesJson {
+        kind: "big",
+        count: archive.entries.len(),
+        entries,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
 fn extract_command(args: &[String]) -> ExitCode {
     let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
         return usage();
     };
     let mut kind = None;
     let mut output: Option<PathBuf> = None;
+    let mut entry = None;
     let mut max_output = DEFAULT_MAX_OUTPUT;
     let mut index = 1;
     while index < args.len() {
@@ -232,6 +334,13 @@ fn extract_command(args: &[String]) -> ExitCode {
                     return usage();
                 };
                 output = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--entry" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                entry = Some(value.clone());
                 index += 1;
             }
             "--max-output" => {
@@ -263,10 +372,20 @@ fn extract_command(args: &[String]) -> ExitCode {
         Ok(resource) => resource,
         Err(error) => return fail_kind(&error),
     };
-    let payload = match resource.extract(max_output) {
-        Ok(Extracted::Bytes(bytes)) => bytes.into_owned(),
-        Ok(Extracted::Text(text)) => text.as_bytes().to_vec(),
-        Err(error) => return fail_kind(&error),
+    let payload = if let Some(entry) = entry {
+        let Resource::Big(archive) = &resource else {
+            return fail("--entry requires a BIG archive");
+        };
+        match archive.extract(&entry) {
+            Some(bytes) => bytes.to_vec(),
+            None => return fail(format!("BIG entry not found: {entry}")),
+        }
+    } else {
+        match resource.extract(max_output) {
+            Ok(Extracted::Bytes(bytes)) => bytes.into_owned(),
+            Ok(Extracted::Text(text)) => text.as_bytes().to_vec(),
+            Err(error) => return fail_kind(&error),
+        }
     };
     let mut file = match fs::OpenOptions::new()
         .write(true)
