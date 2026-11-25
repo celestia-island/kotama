@@ -122,6 +122,25 @@ struct Vp6Json {
 }
 
 #[derive(Serialize)]
+struct AssetManifestJson {
+    kind: &'static str,
+    big_endian: bool,
+    linked: bool,
+    version: u16,
+    stream_checksum: u32,
+    all_types_hash: u32,
+    total_instance_data_size: u32,
+    max_instance_chunk_size: u32,
+    max_relocation_chunk_size: u32,
+    max_imports_chunk_size: u32,
+    asset_reference_buffer_size: u32,
+    referenced_manifest_name_buffer_size: u32,
+    asset_name_buffer_size: u32,
+    source_file_name_buffer_size: u32,
+    tail: u32,
+}
+
+#[derive(Serialize)]
 struct GeometryStyleJson {
     kind: String,
     color: Vec<u8>,
@@ -201,7 +220,7 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -251,6 +270,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "dds" => dds_command(&args[1..]),
         "tga" => tga_command(&args[1..]),
         "vp6" => vp6_command(&args[1..]),
+        "manifest" => manifest_command(&args[1..]),
         "geometry" => geometry_command(&args[1..]),
         "extract" => extract_command(&args[1..]),
         _ => usage(),
@@ -469,6 +489,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::Vp6(_) => InfoJson {
             kind: "vp6",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AssetManifest(_) => InfoJson {
+            kind: "asset-manifest",
             compression: None,
             version: None,
             declared_length: None,
@@ -988,6 +1024,48 @@ fn vp6_command(args: &[String]) -> ExitCode {
         width: info.width,
         height: info.height,
         frame_count: info.frame_count,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn manifest_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AssetManifest(info) = resource else {
+        return fail("manifest requires an asset manifest header");
+    };
+    let json = AssetManifestJson {
+        kind: "asset-manifest",
+        big_endian: info.big_endian,
+        linked: info.linked,
+        version: info.version,
+        stream_checksum: info.stream_checksum,
+        all_types_hash: info.all_types_hash,
+        total_instance_data_size: info.total_instance_data_size,
+        max_instance_chunk_size: info.max_instance_chunk_size,
+        max_relocation_chunk_size: info.max_relocation_chunk_size,
+        max_imports_chunk_size: info.max_imports_chunk_size,
+        asset_reference_buffer_size: info.asset_reference_buffer_size,
+        referenced_manifest_name_buffer_size: info.referenced_manifest_name_buffer_size,
+        asset_name_buffer_size: info.asset_name_buffer_size,
+        source_file_name_buffer_size: info.source_file_name_buffer_size,
+        tail: info.tail,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {

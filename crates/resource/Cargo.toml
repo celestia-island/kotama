@@ -21,6 +21,7 @@ csf = []
 dds = []
 tga = []
 vp6 = []
+asset-manifest = []
 apt-geometry = []
 
 [dependencies]
