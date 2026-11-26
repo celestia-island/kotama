@@ -9,6 +9,7 @@ use std::fmt;
 pub mod apt;
 pub mod apt_bin;
 pub mod apt_data;
+pub mod apt_doaction;
 pub mod apt_geometry;
 pub mod apt_image_map;
 pub mod apt_movie;

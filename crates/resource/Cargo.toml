@@ -31,6 +31,7 @@ pak = []
 imp = []
 apt-bin = []
 apt-data = []
+apt-doaction = []
 apt-geometry = []
 
 [dependencies]
