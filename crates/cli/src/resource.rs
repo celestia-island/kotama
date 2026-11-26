@@ -178,10 +178,20 @@ struct AptAnimationEntryJson {
 }
 
 #[derive(Serialize)]
+struct AptPlacementJson {
+    flags: u32,
+    depth: u32,
+    character: u32,
+    matrix: [f32; 6],
+}
+
+#[derive(Serialize)]
 struct AptFrameControlJson {
     control_type: u32,
     offset: u32,
     end: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<AptPlacementJson>,
 }
 
 #[derive(Serialize)]
@@ -1952,6 +1962,12 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                         control_type: control.control_type,
                         offset: control.offset,
                         end: control.end,
+                        placement: control.placement.map(|placement| AptPlacementJson {
+                            flags: placement.flags,
+                            depth: placement.depth,
+                            character: placement.character,
+                            matrix: placement.matrix,
+                        }),
                     })
                     .collect(),
             })
