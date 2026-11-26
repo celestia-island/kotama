@@ -20,6 +20,7 @@ pub mod big;
 pub mod csf;
 pub mod dds;
 pub mod dos_com;
+pub mod fesl;
 pub mod imp;
 pub mod pak;
 pub mod pvz_reanim;
