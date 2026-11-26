@@ -1,4 +1,4 @@
-//! RA3-era CSF string table parser.
+//! CSF string table parser.
 //!
 //! Layout: four CC (CSF), version, label count, string count, zero, language,
 //! then LBL records containing a name and STR/STRW records. String values are

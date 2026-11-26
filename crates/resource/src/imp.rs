@@ -1,4 +1,4 @@
-//! RA3 .imp offset-table parser.
+//! Import offset-table parser.
 //!
 //! Layout: u32 hash, then u32 values separated into groups by 0xFFFFFFFF.
 

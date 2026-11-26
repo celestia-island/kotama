@@ -1,4 +1,4 @@
-//! RA3 APT data import-table parser.
+//! APT data import-table parser.
 //!
 //! Layout: optional prefix, `Apt Data:<version>\x1a`, padding, then
 //! 16-byte import entries `{movie_offset, name_offset, character, 0}`.

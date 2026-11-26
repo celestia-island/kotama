@@ -146,7 +146,7 @@ Resource parsers are opt-in: SWF (`resource-swf`, pure-Rust zlib; ZWS/LZMA is re
 VBScript text (`resource-vbs`; strict UTF-8/UTF-16 decoding, no execution), EA BIG archives
 (`resource-big`; BIGF/BIG4 table validation, entry lookup, container only), W3D
 (`resource-w3d`; chunk tree type/size/offset/depth evidence, container only), APT constants
-(`resource-apt-const`; typed constant table, including the RA3 16-byte prefix variant), APT geometry
+(`resource-apt-const`; typed constant table, including the 16-byte prefix variant), APT geometry
 (`resource-apt-geometry`; .ru styles/triangles/lines/bounds), and DOS COM
 (`resource-dos-com`; verbatim bytes, load/entry `0x100`). The library is I/O-free and deterministic;
 the CLI owns file access, refuses to overwrite outputs, and caps extraction at 256 MiB by default.

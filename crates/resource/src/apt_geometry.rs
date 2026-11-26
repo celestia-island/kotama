@@ -1,6 +1,6 @@
 //! APT geometry text parser.
 //!
-//! RA3-era .ru geometry uses short lines: c (finish style), s (style header),
+//! Compiled .ru geometry uses short lines: c (finish style), s (style header),
 //! t (triangle, six colon-separated floats) and l (line). This module keeps the
 //! inventory generic: styles, triangles, line count and bounds.
 
