@@ -1807,6 +1807,7 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
         return usage();
     };
     let mut entry_offset = 16usize;
+    let mut const_path: Option<PathBuf> = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -1818,6 +1819,13 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                     Ok(value) => value,
                     Err(_) => return usage(),
                 };
+                index += 1;
+            }
+            "--const" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                const_path = Some(PathBuf::from(value));
                 index += 1;
             }
             "--kind" => {
@@ -1837,6 +1845,16 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
         Ok(bytes) => bytes,
         Err(error) => return fail(error),
     };
+    if let Some(path) = const_path {
+        let const_bytes = match read_file(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => return fail(error),
+        };
+        match parse_apt_const(&const_bytes) {
+            Some((main_character, _, _)) => entry_offset = main_character as usize + 16,
+            None => return fail("APT constant file is invalid"),
+        }
+    }
     let info = match kotama_resource::apt_movie::parse(&bytes, entry_offset) {
         Ok(info) => info,
         Err(error) => return fail_kind(&error),
