@@ -194,6 +194,14 @@ struct AptFrameControlJson {
     end: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     placement: Option<AptPlacementJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_label: Option<AptFrameLabelJson>,
+}
+
+#[derive(Serialize)]
+struct AptFrameLabelJson {
+    name: String,
+    frame: u32,
 }
 
 #[derive(Serialize)]
@@ -1973,6 +1981,10 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                             matrix: placement.matrix,
                             colour: placement.colour,
                             colour_add: placement.colour_add,
+                        }),
+                        frame_label: control.frame_label.as_ref().map(|label| AptFrameLabelJson {
+                            name: label.name.clone(),
+                            frame: label.frame,
                         }),
                     })
                     .collect(),
