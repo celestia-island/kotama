@@ -223,6 +223,8 @@ struct AptMovieJson {
     animation_size: Option<u32>,
     animation_entries: Vec<AptAnimationEntryJson>,
     frames: Vec<AptFrameJson>,
+    imported_character_count: u32,
+    anonymous_character_count: u32,
 }
 
 #[derive(Serialize)]
@@ -1976,6 +1978,8 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                     .collect(),
             })
             .collect(),
+        imported_character_count: info.imported_character_count,
+        anonymous_character_count: info.anonymous_character_count,
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
