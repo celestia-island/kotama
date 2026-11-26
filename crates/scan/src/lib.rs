@@ -33,6 +33,54 @@ use kotama_image::SectionInfo;
 use kotama_image::SymbolInfo;
 use kotama_image::UnwindInfo;
 
+#[cfg(test)]
+mod field_xref_tests {
+    use super::field_accesses;
+
+    #[test]
+    fn decodes_base_disp_accesses() {
+        // 89 87 b4 55 00 00   mov [edi+0x55b4], eax
+        // ff 8f b4 55 00 00   dec dword [edi+0x55b4]
+        // 8b 8f b4 55 00 00   mov ecx, [edi+0x55b4]
+        let bytes = [
+            0x89, 0x87, 0xb4, 0x55, 0x00, 0x00, 0xff, 0x8f, 0xb4, 0x55, 0x00, 0x00, 0x8b, 0x8f,
+            0xb4, 0x55, 0x00, 0x00,
+        ];
+        let accesses = field_accesses(&bytes, 0x1000, 32);
+        assert_eq!(accesses.len(), 3);
+        assert!(accesses.iter().all(|access| access.disp == 0x55b4));
+        assert!(accesses.iter().all(|access| access.width == 4));
+        assert!(accesses[0].write);
+        assert!(accesses[1].write);
+        assert_eq!(accesses[0].insn_rva, 0x1000);
+        assert_eq!(accesses[2].insn_rva, 0x100C);
+    }
+
+    #[test]
+    fn skips_indexed_and_rip_relative() {
+        // 8b 04 8f            mov eax, [edi+ecx*4]   (index -> skip)
+        // 8b 87 b4 55 00 00   mov eax, [edi+0x55b4] (base+disp -> keep)
+        // 8b 47 fc            mov eax, [edi-4]       (negative disp)
+        let bytes = [
+            0x8b, 0x04, 0x8f, 0x8b, 0x87, 0xb4, 0x55, 0x00, 0x00, 0x8b, 0x47, 0xfc,
+        ];
+        let accesses = field_accesses(&bytes, 0x2000, 32);
+        assert_eq!(accesses.len(), 2);
+        assert_eq!(accesses[0].disp, 0x55b4);
+        assert_eq!(accesses[1].disp, -4);
+    }
+
+    #[test]
+    fn skips_stack_frame_bases() {
+        // 89 45 fc            mov [ebp-4], eax   (stack slot -> skip)
+        // 89 87 b4 55 00 00   mov [edi+0x55b4], eax (field -> keep)
+        let bytes = [0x89, 0x45, 0xfc, 0x89, 0x87, 0xb4, 0x55, 0x00, 0x00];
+        let accesses = field_accesses(&bytes, 0x3000, 32);
+        assert_eq!(accesses.len(), 1);
+        assert_eq!(accesses[0].disp, 0x55b4);
+    }
+}
+
 pub mod msvc_rtti;
 
 pub use kotama::Evidence;
@@ -742,6 +790,129 @@ fn read_cstring(space: &dyn AddressSpace, rva: u64) -> Option<String> {
     } else {
         None
     }
+}
+
+/// 一条结构体字段访问（`[base + disp]`）事实。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct FieldAccess {
+    /// 所在函数入口 RVA。
+    pub func_rva: u64,
+    /// 指令 RVA。
+    pub insn_rva: u64,
+    /// 结构体成员偏移。
+    pub disp: i64,
+    /// 访问宽度（字节）。
+    pub width: u32,
+    /// 是否为写访问。
+    pub write: bool,
+}
+
+/// 一条字段偏移的聚合视图。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FieldXref {
+    /// 结构体成员偏移。
+    pub disp: i64,
+    /// 命中该偏移的访问点（按 `(func_rva, insn_rva)` 升序）。
+    pub accesses: Vec<FieldAccess>,
+}
+
+/// 从一段机器码里解出所有 `[base + disp]` 形态的访存（不含 index / RIP 相对）。
+#[must_use]
+pub fn field_accesses(bytes: &[u8], ip: u64, bitness: u32) -> Vec<FieldAccess> {
+    let mut out = Vec::new();
+    let mut decoder = Decoder::with_ip(bitness, bytes, ip, DecoderOptions::NONE);
+    let mut instruction = Instruction::default();
+    while decoder.can_decode() {
+        decoder.decode_out(&mut instruction);
+        let Some(disp) = base_disp(&instruction) else {
+            continue;
+        };
+        let width = instruction.memory_size().size() as u32;
+        if width == 0 {
+            continue;
+        }
+        out.push(FieldAccess {
+            func_rva: 0,
+            insn_rva: instruction.ip(),
+            disp,
+            width,
+            write: writes_memory(&instruction),
+        });
+    }
+    out
+}
+
+fn base_disp(instruction: &Instruction) -> Option<i64> {
+    use iced_x86::Register as R;
+    let base = instruction.memory_base();
+    // 栈帧基址（ESP/EBP/RSP/RBP）后面跟的是局部变量，不是结构体成员；收进来只会把
+    // 「字段偏移」变成「栈槽统计」，与用途相反。
+    if base == R::None
+        || matches!(base, R::ESP | R::EBP | R::RSP | R::RBP)
+        || instruction.memory_index() != R::None
+        || instruction.is_ip_rel_memory_operand()
+        || instruction.memory_displ_size() == 0
+    {
+        return None;
+    }
+    let _ = base;
+    // 32 位模式里负偏移是 32 位补码；直接取 u64 会得到 0xFFFF_FFFC 这种巨值。
+    let disp = instruction.memory_displacement64();
+    let disp = match instruction.memory_displ_size() {
+        1 => i64::from(disp as u8 as i8),
+        2 => i64::from(disp as u16 as i16),
+        4 => i64::from(disp as u32 as i32),
+        _ => disp as i64,
+    };
+    Some(disp)
+}
+
+fn writes_memory(instruction: &Instruction) -> bool {
+    use iced_x86::Mnemonic as M;
+    if matches!(
+        instruction.mnemonic(),
+        M::Cmp | M::Test | M::Lea | M::Push | M::Pop | M::Fld | M::Fild
+    ) {
+        return false;
+    }
+    // 目标操作数是内存或寄存器-内存（`add [mem], reg` / `dec [mem]`）即写。
+    matches!(
+        instruction.op0_kind(),
+        OpKind::Memory | OpKind::MemorySegSI | OpKind::MemorySegDI | OpKind::MemoryESDI
+    )
+}
+
+/// 扫全部函数体，按成员偏移聚合 `[base + disp]` 访问。
+#[must_use]
+pub fn field_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<FieldXref> {
+    let space = module.address_space();
+    let bitness = module.arch.bitness();
+    let mut grouped: BTreeMap<i64, Vec<FieldAccess>> = BTreeMap::new();
+    for function in functions {
+        if function.size == 0 {
+            continue;
+        }
+        let Some(bytes) = space.read(
+            function.rva,
+            usize::try_from(function.size).unwrap_or(usize::MAX),
+        ) else {
+            continue;
+        };
+        for mut access in field_accesses(bytes, function.rva, bitness) {
+            if access.disp == 0 {
+                continue;
+            }
+            access.func_rva = function.rva;
+            grouped.entry(access.disp).or_default().push(access);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(disp, mut accesses)| {
+            accesses.sort_by_key(|access| (access.func_rva, access.insn_rva));
+            FieldXref { disp, accesses }
+        })
+        .collect()
 }
 
 /// 一张表的来源：通用指针表扫描，还是 MSVC RTTI 锚定的精确 vtable。
