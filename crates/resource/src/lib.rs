@@ -22,8 +22,6 @@ pub mod dds;
 pub mod dos_com;
 pub mod fesl;
 pub mod imp;
-pub mod pak;
-pub mod pvz_reanim;
 pub mod swf;
 pub mod tga;
 pub mod vbs;
@@ -57,7 +55,7 @@ pub enum ResourceKind {
     Vp6,
     /// BinaryAssetBuilder manifest header.
     AssetManifest,
-    /// RA3 binary asset header.
+    /// Binary asset header.
     Asset,
     /// Compiled asset relocation table.
     AssetRelocation,
@@ -65,15 +63,11 @@ pub enum ResourceKind {
     AptMovie,
     /// APT image map.
     AptImageMap,
-    /// PvZ Reanim compiled container.
-    PvzReanim,
-    /// PopCap PAK container.
-    Pak,
-    /// RA3 .imp offset table.
+    /// Import offset table.
     Imp,
-    /// RA3 .bin aggregate prefix.
+    /// Aggregate prefix of a compiled binary asset.
     AptBin,
-    /// RA3 APT data import table.
+    /// APT data import table.
     AptData,
 }
 
@@ -98,8 +92,6 @@ impl ResourceKind {
             Self::AssetRelocation => "asset-relocation",
             Self::AptMovie => "apt-movie",
             Self::AptImageMap => "apt-image-map",
-            Self::PvzReanim => "pvz-reanim",
-            Self::Pak => "pak",
             Self::Imp => "imp",
             Self::AptBin => "apt-bin",
             Self::AptData => "apt-data",
@@ -126,8 +118,6 @@ impl ResourceKind {
             "asset-relocation" => Some(Self::AssetRelocation),
             "apt-movie" => Some(Self::AptMovie),
             "apt-image-map" => Some(Self::AptImageMap),
-            "pvz-reanim" => Some(Self::PvzReanim),
-            "pak" => Some(Self::Pak),
             "imp" => Some(Self::Imp),
             "apt-bin" => Some(Self::AptBin),
             "apt-data" => Some(Self::AptData),
@@ -155,8 +145,6 @@ impl ResourceKind {
             Self::AssetRelocation => "asset-relocation",
             Self::AptMovie => "apt-movie",
             Self::AptImageMap => "apt-image-map",
-            Self::PvzReanim => "pvz-reanim",
-            Self::Pak => "pak",
             Self::Imp => "imp",
             Self::AptBin => "apt-bin",
             Self::AptData => "apt-data",
@@ -183,8 +171,6 @@ impl ResourceKind {
             Self::AssetRelocation => cfg!(feature = "asset-relocation"),
             Self::AptMovie => cfg!(feature = "apt-movie"),
             Self::AptImageMap => cfg!(feature = "apt-image-map"),
-            Self::PvzReanim => cfg!(feature = "pvz-reanim"),
-            Self::Pak => cfg!(feature = "pak"),
             Self::Imp => cfg!(feature = "imp"),
             Self::AptBin => cfg!(feature = "apt-bin"),
             Self::AptData => cfg!(feature = "apt-data"),
@@ -239,7 +225,7 @@ pub enum Resource<'a> {
     Vp6(vp6::Vp6Info),
     /// BinaryAssetBuilder manifest header.
     AssetManifest(asset_manifest::AssetManifestInfo),
-    /// RA3 binary asset header.
+    /// Binary asset header.
     Asset(asset::AssetInfo),
     /// Compiled asset relocation table.
     AssetRelocation(asset_relocation::AssetRelocation),
@@ -247,15 +233,11 @@ pub enum Resource<'a> {
     AptMovie(apt_movie::AptMovieInfo),
     /// APT image map.
     AptImageMap(apt_image_map::AptImageMap),
-    /// PvZ Reanim compiled container.
-    PvzReanim(pvz_reanim::PvzReanimInfo),
-    /// PopCap PAK container.
-    Pak(pak::PopCapPak),
-    /// RA3 .imp offset table.
+    /// Import offset table.
     Imp(imp::ImpInfo),
-    /// RA3 .bin aggregate prefix.
+    /// Aggregate prefix of a compiled binary asset.
     AptBin(apt_bin::AptBinInfo),
-    /// RA3 APT data import table.
+    /// APT data import table.
     AptData(apt_data::AptDataInfo),
 }
 
@@ -280,8 +262,6 @@ impl Resource<'_> {
             Self::AssetRelocation(_) => ResourceKind::AssetRelocation,
             Self::AptMovie(_) => ResourceKind::AptMovie,
             Self::AptImageMap(_) => ResourceKind::AptImageMap,
-            Self::PvzReanim(_) => ResourceKind::PvzReanim,
-            Self::Pak(_) => ResourceKind::Pak,
             Self::Imp(_) => ResourceKind::Imp,
             Self::AptBin(_) => ResourceKind::AptBin,
             Self::AptData(_) => ResourceKind::AptData,
@@ -346,12 +326,6 @@ impl Resource<'_> {
             )),
             Self::AptImageMap(_) => Err(ResourceError::Unsupported(
                 "APT image map is a text table; inspect assignments".to_string(),
-            )),
-            Self::PvzReanim(_) => Err(ResourceError::Unsupported(
-                "Reanim tracks are opaque; inspect header".to_string(),
-            )),
-            Self::Pak(_) => Err(ResourceError::Unsupported(
-                "PAK bodies are opaque; inspect entries".to_string(),
             )),
             Self::Imp(_) => Err(ResourceError::Unsupported(
                 "IMP offsets point to external data".to_string(),
@@ -482,20 +456,6 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::AptGeometry.enabled(),
         });
     }
-    if pak::has_magic(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::Pak,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::Pak.enabled(),
-        });
-    }
-    if pvz_reanim::has_magic(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::PvzReanim,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::PvzReanim.enabled(),
-        });
-    }
     if extension_matches(extension, "dat") {
         return Some(Identification {
             kind: ResourceKind::AptImageMap,
@@ -615,8 +575,6 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         }
         ResourceKind::AptMovie => apt_movie::parse(bytes, 16).map(Resource::AptMovie),
         ResourceKind::AptImageMap => apt_image_map::parse(bytes).map(Resource::AptImageMap),
-        ResourceKind::PvzReanim => pvz_reanim::parse(bytes).map(Resource::PvzReanim),
-        ResourceKind::Pak => pak::parse(bytes).map(Resource::Pak),
         ResourceKind::Imp => imp::parse(bytes).map(Resource::Imp),
         ResourceKind::AptBin => apt_bin::parse(bytes).map(Resource::AptBin),
         ResourceKind::AptData => apt_data::parse(bytes).map(Resource::AptData),
