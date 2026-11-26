@@ -1,6 +1,6 @@
 //! kotama resource: identify, inspect and extract non-image resources.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -184,6 +184,7 @@ struct AptMovieJson {
     export_count: u32,
     characters: Vec<AptCharacterJson>,
     imports: Vec<AptImportJson>,
+    character_names: BTreeMap<String, String>,
     exports: Vec<AptExportJson>,
     texture_ids: Vec<u32>,
 }
@@ -1835,6 +1836,12 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                 character: import.character,
                 pointer: import.pointer,
             })
+            .collect(),
+        character_names: info
+            .imports
+            .iter()
+            .filter(|import| import.character > 0 && !import.name.is_empty())
+            .map(|import| (import.character.to_string(), import.name.clone()))
             .collect(),
         exports: info
             .exports
