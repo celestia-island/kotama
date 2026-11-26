@@ -227,7 +227,8 @@ const fn pointer_size(container: Container) -> Option<u64> {
     match container {
         Container::Pe64 => Some(8),
         Container::Pe32 => Some(4),
-        Container::Elf64 | Container::Elf32 => None,
+        // MSVC RTTI is a PE-only convention; every other container is skipped.
+        _ => None,
     }
 }
 
