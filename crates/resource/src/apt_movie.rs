@@ -173,7 +173,11 @@ fn read_cstr(bytes: &[u8], offset: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes[offset..end]).to_string())
 }
 
-fn character_type_name(type_id: u32) -> &'static str {
+/// Human-readable name for an APT character type id.
+///
+/// Ids 13 and 14 are not assigned by the format and fall through to "unknown".
+#[must_use]
+pub const fn character_type_name(type_id: u32) -> &'static str {
     match type_id {
         1 => "shape",
         2 => "text",
@@ -187,6 +191,8 @@ fn character_type_name(type_id: u32) -> &'static str {
         10 => "static-text",
         11 => "none",
         12 => "video",
+        15 => "level",
+        16 => "custom-control",
         _ => "unknown",
     }
 }
@@ -521,6 +527,37 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_every_assigned_character_type() {
+        let expected = [
+            (1, "shape"),
+            (2, "text"),
+            (3, "font"),
+            (4, "button"),
+            (5, "sprite"),
+            (6, "sound"),
+            (7, "image"),
+            (8, "morph"),
+            (9, "movie"),
+            (10, "static-text"),
+            (11, "none"),
+            (12, "video"),
+            (15, "level"),
+            (16, "custom-control"),
+        ];
+        for (id, name) in expected {
+            assert_eq!(character_type_name(id), name);
+        }
+    }
+
+    #[test]
+    fn reports_unassigned_character_types_as_unknown() {
+        assert_eq!(character_type_name(0), "unknown");
+        assert_eq!(character_type_name(13), "unknown");
+        assert_eq!(character_type_name(14), "unknown");
+        assert_eq!(character_type_name(17), "unknown");
+    }
 
     #[test]
     fn parses_movie_and_characters() {
