@@ -16,6 +16,7 @@ use kotama_host::TargetProcess;
 use kotama_image::LoadedModule;
 use kotama_scan::call_graph;
 use kotama_scan::discover;
+use kotama_scan::field_xrefs;
 use kotama_scan::string_xrefs;
 use kotama_scan::vtables_with_rtti;
 use serde::Serialize;
@@ -34,6 +35,7 @@ Commands:
                              --limit <N>        how many functions to decompile (default 8)
                              --xref             also emit the function-level call graph
                              --strings          also emit string cross-references
+                             --fields           also emit [base+disp] field accesses grouped by offset
                              --vtables          also emit vtables (generic pointer tables plus RTTI-anchored ones)
                              --extract-resource <index>  write the raw PE resource payload at this resources[] index
                              --resource-output <path>   destination for --extract-resource (must not exist)
@@ -238,6 +240,8 @@ struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     string_xrefs: Option<Vec<StringXrefJson>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    field_xrefs: Option<Vec<FieldXrefJson>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     vtables: Option<Vec<VtableJson>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exceptions: Vec<ExceptionJson>,
@@ -336,6 +340,22 @@ struct StringXrefJson {
     func: String,
     rva: String,
     text: String,
+}
+
+/// 一条结构体字段访问（`--fields` 时才有）。
+#[derive(Serialize)]
+struct FieldAccessJson {
+    func: String,
+    insn: String,
+    width: u32,
+    write: bool,
+}
+
+/// 按成员偏移聚合的字段访问。
+#[derive(Serialize)]
+struct FieldXrefJson {
+    disp: i64,
+    accesses: Vec<FieldAccessJson>,
 }
 
 /// 一条函数级调用边（`--xref` 时才有）。
@@ -1551,6 +1571,7 @@ fn analyze(args: &[String]) -> ExitCode {
     let mut decompile = false;
     let mut xref = false;
     let mut strings = false;
+    let mut fields = false;
     let mut vtables_flag = false;
     let mut rtti_flag = false;
     let mut extract_resource: Option<usize> = None;
@@ -1562,6 +1583,7 @@ fn analyze(args: &[String]) -> ExitCode {
             "--decompile" => decompile = true,
             "--xref" => xref = true,
             "--strings" => strings = true,
+            "--fields" => fields = true,
             "--vtables" => vtables_flag = true,
             "--rtti" => rtti_flag = true,
             "--extract-resource" => match iter.next().and_then(|value| value.parse().ok()) {
@@ -1775,6 +1797,24 @@ fn analyze(args: &[String]) -> ExitCode {
                     })
                     .collect(),
             }
+        }),
+        field_xrefs: fields.then(|| {
+            field_xrefs(&module, &functions)
+                .into_iter()
+                .map(|xref| FieldXrefJson {
+                    disp: xref.disp,
+                    accesses: xref
+                        .accesses
+                        .iter()
+                        .map(|access| FieldAccessJson {
+                            func: format!("0x{:x}", access.func_rva),
+                            insn: format!("0x{:x}", access.insn_rva),
+                            width: access.width,
+                            write: access.write,
+                        })
+                        .collect(),
+                })
+                .collect()
         }),
         string_xrefs: strings.then(|| {
             string_xrefs(&module, &functions)
