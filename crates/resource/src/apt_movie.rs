@@ -130,6 +130,11 @@ pub struct AptMovieInfo {
     pub animation_entries: Vec<AptAnimationEntry>,
     /// Top-level frames with their controls.
     pub frames: Vec<AptFrame>,
+    /// Characters whose slot pointer is null; they carry no local payload and
+    /// take their symbol name from the matching `imports[]` entry.
+    pub imported_character_count: u32,
+    /// Characters with a local payload but no import/export symbol.
+    pub anonymous_character_count: u32,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -232,6 +237,10 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         as usize;
     let mut characters = Vec::new();
     let mut texture_ids = Vec::new();
+    // A null slot pointer means "this character comes from an import"; a local
+    // payload without any symbol is simply anonymous. Keeping the two counts
+    // apart stops "no local name" from being read as "unknown name".
+    let mut imported_character_count = 0u32;
     for index in 0..character_count as usize {
         let pointer_offset = base
             .checked_add(character_list)
@@ -241,6 +250,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             ResourceError::Invalid("APT character pointer is unreadable".to_string())
         })?;
         if pointer == 0 {
+            imported_character_count += 1;
             continue;
         }
         let character_offset = base
@@ -332,6 +342,12 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             })?,
         });
     }
+    // Every non-null character that no export names is anonymous by construction.
+    let anonymous_character_count = characters
+        .len()
+        .saturating_sub(exports.len())
+        .try_into()
+        .unwrap_or(u32::MAX);
     // `aFrames` is an array of `AptFrame` records, 8 bytes each:
     // `{ nControls, apControls }` where `apControls` points at an array of
     // control offsets. Layout confirmed against the SDK `apt2xml` oracle.
@@ -474,6 +490,8 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         animation_size,
         animation_entries,
         frames,
+        imported_character_count,
+        anonymous_character_count,
     })
 }
 
