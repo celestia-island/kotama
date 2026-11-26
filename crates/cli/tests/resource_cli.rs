@@ -1156,9 +1156,18 @@ fn apt_bin_prefix_is_inspected() {
     let mut data = vec![0u8; 16];
     data.extend_from_slice(b"Apt Data:74\x1aREGION\x00Amsterdam_AM\x00");
     fs::write(&source, &data).unwrap();
+    let constant = root.join("sample.const");
+    let mut const_data = vec![0u8; 16];
+    const_data.extend_from_slice(b"Apt constant file\x1a\x00\x00");
+    const_data.extend_from_slice(&1292u32.to_le_bytes());
+    const_data.extend_from_slice(&14u32.to_le_bytes());
+    const_data.extend_from_slice(&32u32.to_le_bytes());
+    fs::write(&constant, &const_data).unwrap();
     let output = kotama()
         .args(["resource", "apt-bin"])
         .arg(&source)
+        .arg("--const")
+        .arg(&constant)
         .output()
         .unwrap();
     assert!(
@@ -1169,6 +1178,9 @@ fn apt_bin_prefix_is_inspected() {
     let facts: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(facts["prefix_length"], 16);
     assert_eq!(facts["type_id"], "74");
+    assert_eq!(facts["main_character"], 1292);
+    assert_eq!(facts["constant_count"], 14);
+    assert_eq!(facts["constant_table"], 32);
     fs::remove_dir_all(&root).unwrap();
 }
 
