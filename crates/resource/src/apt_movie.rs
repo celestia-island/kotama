@@ -71,8 +71,17 @@ pub struct AptPlacement {
     pub colour_add: [i8; 4],
 }
 
+/// One decoded `FrameLabel` control payload.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AptFrameLabel {
+    /// Label text.
+    pub name: String,
+    /// Frame index this label attaches to.
+    pub frame: u32,
+}
+
 /// One control inside an APT frame.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct AptFrameControl {
     /// Control type (1 DoAction, 2 FrameLabel, 3 PlaceObject2, ...).
     pub control_type: u32,
@@ -82,6 +91,8 @@ pub struct AptFrameControl {
     pub end: u32,
     /// Decoded placement, when the control is a `PlaceObject2` with a full payload.
     pub placement: Option<AptPlacement>,
+    /// Decoded label, when the control is a `FrameLabel`.
+    pub frame_label: Option<AptFrameLabel>,
 }
 
 /// One top-level APT frame.
@@ -434,11 +445,23 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
                     colour_add,
                 }
             });
+            // FrameLabel carries a name pointer plus a fixed two-word prefix:
+            // `{ u32 name_ptr, u16 unused, u16 vft(Integer), u32 frame }`.
+            let frame_label =
+                (control_type == 2 && control_end - control_offset >= 12).then(|| {
+                    let name_pointer =
+                        u32_at(bytes, control_offset_usize + 4).unwrap_or(0) as usize;
+                    AptFrameLabel {
+                        name: read_cstr(bytes, base + name_pointer).unwrap_or_default(),
+                        frame: u32_at(bytes, control_offset_usize + 8).unwrap_or(0),
+                    }
+                });
             controls.push(AptFrameControl {
                 control_type,
                 offset: control_offset,
                 end: control_end,
                 placement,
+                frame_label,
             });
         }
         frames.push(AptFrame { index, controls });
@@ -587,6 +610,37 @@ mod tests {
         assert_eq!(placement.character, 23);
         assert_eq!(placement.matrix, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         assert_eq!(placement.colour, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn parses_frame_label_control() {
+        // A FrameLabel payload is `{ u32 name_ptr, u16 unused, u16 vft, u32 frame }`
+        // where name_ptr is relative to the Apt Data tag.
+        let mut bytes = b"Apt Data:74\x1a\x00\x00\x00\x00".to_vec();
+        bytes.extend_from_slice(&9u32.to_le_bytes()); // type: sprite
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // nFrames
+        bytes.extend_from_slice(&72u32.to_le_bytes()); // aFrames at tag+72
+        bytes.resize(72, 0);
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // nControls
+        bytes.extend_from_slice(&80u32.to_le_bytes()); // apControls
+        bytes.resize(80, 0);
+        bytes.extend_from_slice(&88u32.to_le_bytes()); // control 0 at tag+88
+        bytes.resize(88, 0);
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // type 2: FrameLabel
+        bytes.extend_from_slice(&104u32.to_le_bytes()); // name at tag+104
+        bytes.extend_from_slice(&7u32.to_le_bytes()); // frame index
+        bytes.resize(104, 0);
+        bytes.extend_from_slice(b"intro");
+        bytes.push(0);
+        let info = parse(&bytes, 16).unwrap();
+        let label = info.frames[0].controls[0]
+            .frame_label
+            .clone()
+            .expect("frame label should decode");
+        assert_eq!(label.name, "intro");
+        assert_eq!(label.frame, 7);
+        assert!(info.frames[0].controls[0].placement.is_none());
     }
 
     #[test]
