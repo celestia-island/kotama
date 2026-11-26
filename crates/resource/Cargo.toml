@@ -33,6 +33,7 @@ apt-bin = []
 apt-data = []
 apt-doaction = []
 apt-geometry = []
+fesl = []
 
 [dependencies]
 flate2 = { version = "^1", optional = true, default-features = false, features = ["rust_backend"] }
