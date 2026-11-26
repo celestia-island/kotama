@@ -143,6 +143,11 @@ pub struct ScanView<'a> {
 /// 确定性：同一 [`LoadedModule`] 两次调用返回逐字段相同的结果。
 #[must_use]
 pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
+    // Instruction-level discovery needs an x86 decoder. A recognised but
+    // non-disassemblable architecture yields no functions rather than a panic.
+    if !module.arch.is_disassemblable() {
+        return Vec::new();
+    }
     let view = ScanView {
         container: module.container,
         arch: module.arch,
@@ -192,6 +197,10 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
 ///
 /// 结论：剩余漏召回是「无引用、无填充的叶子函数」，只有符号信息能分辨，静态侧不再猜。
 pub fn discover_with(view: ScanView<'_>, space: &dyn AddressSpace) -> Vec<FunctionEntry> {
+    // Same gate as `discover`: never hand a non-x86 architecture to the decoder.
+    if !view.arch.is_disassemblable() {
+        return Vec::new();
+    }
     discover_impl(view, space, None)
 }
 
@@ -229,7 +238,11 @@ fn discover_impl(
     //    symtab 但留调试信息的通道；与 symtab 互为印证。
     let debug_evidence = match module.container {
         Container::Elf64 | Container::Elf32 => Evidence::Dwarf,
+        // Mach-O carries DWARF too; the PDB channel is PE-only.
+        Container::MachO64 | Container::MachO32 => Evidence::Dwarf,
         Container::Pe64 | Container::Pe32 => Evidence::Pdb,
+        // No debug channel is wired for these; only container membership.
+        _ => Evidence::Pdb,
     };
     for symbol in module.debug_functions {
         let entry = table.entry(symbol.rva).or_default();

@@ -31,8 +31,11 @@ use object::NameOrOrdinal;
 /// 装载错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageError {
-    /// 输入不是 kotama 支持的容器（当前：ELF / PE 可执行）。
+    /// 输入不是 kotama 能识别的容器。
     UnsupportedFormat,
+    /// 容器已识别，但它不是可装载的映像（目标文件 / 导入桩 / 归档 /
+    /// 通用二进制 / 共享缓存）。携带格式短名。
+    NotLoadable(&'static str),
     /// 容器结构损坏，object 无法解析。
     Parse(String),
 }
@@ -40,7 +43,10 @@ pub enum ImageError {
 impl fmt::Display for ImageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedFormat => f.write_str("unsupported container (want ELF or PE)"),
+            Self::UnsupportedFormat => f.write_str("unsupported container"),
+            Self::NotLoadable(kind) => {
+                write!(f, "recognised {kind} file is not a loadable image")
+            }
             Self::Parse(msg) => write!(f, "parse failed: {msg}"),
         }
     }
@@ -118,6 +124,30 @@ pub enum Container {
     Pe64,
     /// 32 位 PE。
     Pe32,
+    /// 64 位 Mach-O。
+    MachO64,
+    /// 32 位 Mach-O。
+    MachO32,
+    /// 64 位 Mach-O universal (fat) binary.
+    MachOFat64,
+    /// 32 位 Mach-O universal (fat) binary.
+    MachOFat32,
+    /// Mach-O dyld shared cache.
+    DyldCache,
+    /// WebAssembly module.
+    Wasm,
+    /// 64 位 XCOFF。
+    Xcoff64,
+    /// 32 位 XCOFF。
+    Xcoff32,
+    /// COFF object file.
+    Coff,
+    /// COFF bigobj object file.
+    CoffBig,
+    /// Windows short import file.
+    CoffImport,
+    /// Unix ar archive.
+    Archive,
 }
 
 impl Container {
@@ -129,7 +159,31 @@ impl Container {
             Self::Elf32 => "elf32",
             Self::Pe64 => "pe64",
             Self::Pe32 => "pe32",
+            Self::MachO64 => "macho64",
+            Self::MachO32 => "macho32",
+            Self::MachOFat64 => "macho-fat64",
+            Self::MachOFat32 => "macho-fat32",
+            Self::DyldCache => "dyld-cache",
+            Self::Wasm => "wasm",
+            Self::Xcoff64 => "xcoff64",
+            Self::Xcoff32 => "xcoff32",
+            Self::Coff => "coff",
+            Self::CoffBig => "coff-big",
+            Self::CoffImport => "coff-import",
+            Self::Archive => "archive",
         }
+    }
+
+    /// Whether the container is a fully loaded executable image with segments.
+    ///
+    /// Object files, import stubs and archives are recognised but carry no
+    /// loadable address space, so they are identified and then rejected.
+    #[must_use]
+    pub const fn is_loadable(self) -> bool {
+        matches!(
+            self,
+            Self::Elf64 | Self::Elf32 | Self::Pe64 | Self::Pe32 | Self::MachO64 | Self::MachO32
+        )
     }
 }
 
@@ -140,16 +194,31 @@ pub enum Arch {
     X86_64,
     /// x86（32 位）。
     X86,
+    /// A recognised architecture that this toolkit cannot disassemble.
+    ///
+    /// The container and its symbols are still reported; only instruction-level
+    /// work (scan / decomp) is refused. Carries the canonical architecture name.
+    Other(&'static str),
 }
 
 impl Arch {
     /// iced 反汇编器要求的位宽（32 / 64）。
+    ///
+    /// Returns 0 for [`Arch::Other`]: callers must gate on
+    /// [`Arch::is_disassemblable`] before touching instruction decoding.
     #[must_use]
     pub const fn bitness(self) -> u32 {
         match self {
             Self::X86_64 => 64,
             Self::X86 => 32,
+            Self::Other(_) => 0,
         }
+    }
+
+    /// True when instruction-level analysis is possible for this architecture.
+    #[must_use]
+    pub const fn is_disassemblable(self) -> bool {
+        !matches!(self, Self::Other(_))
     }
 
     /// 短名（进 JSON 报告）。
@@ -158,6 +227,7 @@ impl Arch {
         match self {
             Self::X86_64 => "x86_64",
             Self::X86 => "x86",
+            Self::Other(name) => name,
         }
     }
 }
@@ -394,6 +464,56 @@ fn image_base(file: &object::File<'_>, data: &[u8], container: Container) -> u64
             .min()
             .unwrap_or(0),
         Container::Pe64 | Container::Pe32 => pe_image_base(data),
+        // Mach-O: the lowest NON-ZERO segment vmaddr is the image base. A
+        // `__PAGEZERO` segment sits at 0 with a huge size and must be skipped,
+        // otherwise every RVA keeps its absolute link-time address.
+        Container::MachO64 | Container::MachO32 => file
+            .segments()
+            .map(|segment| segment.address())
+            .filter(|address| *address != 0)
+            .min()
+            .unwrap_or(0),
+        // Not loadable: identify() rejects these before from_object runs.
+        Container::MachOFat64
+        | Container::MachOFat32
+        | Container::DyldCache
+        | Container::Wasm
+        | Container::Xcoff64
+        | Container::Xcoff32
+        | Container::Coff
+        | Container::CoffBig
+        | Container::CoffImport
+        | Container::Archive => 0,
+    }
+}
+
+/// Canonical short name for an architecture this toolkit cannot disassemble.
+#[must_use]
+fn arch_name(arch: object::Architecture) -> &'static str {
+    use object::Architecture as A;
+    match arch {
+        A::Aarch64 => "aarch64",
+        A::Arm => "arm",
+        A::Riscv64 => "riscv64",
+        A::Riscv32 => "riscv32",
+        A::PowerPc64 => "powerpc64",
+        A::PowerPc => "powerpc",
+        A::Mips64 => "mips64",
+        A::Mips => "mips",
+        A::Sparc64 => "sparc64",
+        A::S390x => "s390x",
+        A::LoongArch64 => "loongarch64",
+        A::Wasm32 => "wasm32",
+        A::Wasm64 => "wasm64",
+        A::X86_64_X32 => "x86_64_x32",
+        A::Avr => "avr",
+        A::Msp430 => "msp430",
+        A::Bpf => "bpf",
+        A::Csky => "csky",
+        A::Sbf => "sbf",
+        A::Xtensa => "xtensa",
+        A::Aarch64_Ilp32 => "aarch64_ilp32",
+        _ => "unknown",
     }
 }
 
@@ -1022,8 +1142,25 @@ impl LoadedModule {
                 FileKind::Elf32 => Container::Elf32,
                 FileKind::Pe64 => Container::Pe64,
                 FileKind::Pe32 => Container::Pe32,
+                FileKind::MachO64 => Container::MachO64,
+                FileKind::MachO32 => Container::MachO32,
+                FileKind::MachOFat64 => Container::MachOFat64,
+                FileKind::MachOFat32 => Container::MachOFat32,
+                FileKind::DyldCache => Container::DyldCache,
+                FileKind::Wasm => Container::Wasm,
+                FileKind::Xcoff64 => Container::Xcoff64,
+                FileKind::Xcoff32 => Container::Xcoff32,
+                FileKind::Coff => Container::Coff,
+                FileKind::CoffBig => Container::CoffBig,
+                FileKind::CoffImport => Container::CoffImport,
+                FileKind::Archive => Container::Archive,
                 _ => return Err(ImageError::UnsupportedFormat),
             };
+        if !container.is_loadable() {
+            // Recognised, but there is no loadable image behind it. Report the
+            // format so callers can say what they saw instead of "unsupported".
+            return Err(ImageError::NotLoadable(container.short()));
+        }
         let file = object::File::parse(data).map_err(|e| ImageError::Parse(e.to_string()))?;
         Self::from_object(&file, data, container)
     }
@@ -1081,11 +1218,7 @@ impl LoadedModule {
         let arch = match file.architecture() {
             object::Architecture::X86_64 => Arch::X86_64,
             object::Architecture::I386 => Arch::X86,
-            other => {
-                return Err(ImageError::Parse(format!(
-                    "arch {other:?} not supported in P0 (x86/x64 only)"
-                )))
-            }
+            other => Arch::Other(arch_name(other)),
         };
 
         // 归一基址：一切 RVA = 绝对地址 - base（ELF = 最小 LOAD 段 vaddr；PE = ImageBase）。
@@ -1162,6 +1295,12 @@ impl LoadedModule {
             if symbol.kind() != object::SymbolKind::Text || !symbol.is_definition() {
                 continue;
             }
+            // A zero-size Text symbol at the image base is the container's own
+            // header marker (the Mach-O execute header, an ELF header alias),
+            // not a function. Dropping it keeps the function table honest.
+            if symbol.size() == 0 && to_rva(symbol.address()) == 0 {
+                continue;
+            }
             symbols.push(SymbolInfo {
                 rva: to_rva(symbol.address()),
                 size: symbol.size(),
@@ -1227,7 +1366,14 @@ impl LoadedModule {
         imports.sort_by(|a, b| (&a.library, &a.name).cmp(&(&b.library, &b.name)));
         imports.dedup_by(|a, b| a.library == b.library && a.name == b.name);
 
-        let entry_rva = (file.entry() != 0).then_some(to_rva(file.entry()));
+        // Mach-O's LC_MAIN entry offset is already image-relative, unlike ELF
+        // and PE where the entry is an absolute/virtual address. Subtracting the
+        // base again would underflow to 0 and fabricate a function at RVA 0.
+        let raw_entry = file.entry();
+        let entry_rva = (raw_entry != 0).then_some(match container {
+            Container::MachO64 | Container::MachO32 => raw_entry,
+            _ => to_rva(raw_entry),
+        });
 
         // 自相对重定位（ELF PIE 的 vtable/GOT 真值所在）。
         let mut relative_relocations = Vec::new();
@@ -1617,5 +1763,167 @@ mod tests {
             LoadedModule::parse(b"not a binary at all"),
             Err(ImageError::UnsupportedFormat)
         ));
+    }
+
+    #[test]
+    fn recognises_object_files_as_not_loadable() {
+        // A Unix ar archive is a real, well-formed container that carries no
+        // loadable image. It must be reported by name, not as "unsupported".
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend_from_slice(b"member/         0           0     0     644     4         `");
+        archive.extend_from_slice(b"data");
+        assert!(matches!(
+            LoadedModule::parse(&archive),
+            Err(ImageError::NotLoadable("archive"))
+        ));
+    }
+
+    /// Build a minimal but well-formed 64-bit Mach-O with a __PAGEZERO
+    /// segment at 0 and a __TEXT segment at the given base, plus one Text symbol.
+    fn minimal_macho64(base: u64, symbol_rva: u64, symbol_name: &str) -> Vec<u8> {
+        let mut b = Vec::new();
+        let push64 = |b: &mut Vec<u8>, v: u64| b.extend_from_slice(&v.to_le_bytes());
+        let push32 = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
+        // mach_header_64
+        push32(&mut b, 0xfeed_facf); // MH_MAGIC_64
+        push32(&mut b, 0x0100_0007); // CPU_TYPE_X86_64
+        push32(&mut b, 3); // cpusubtype
+        push32(&mut b, 2); // MH_EXECUTE
+        push32(&mut b, 3); // ncmds
+        let sizeofcmds_pos = b.len();
+        push32(&mut b, 0); // sizeofcmds, patched below
+        push32(&mut b, 0); // flags
+        push32(&mut b, 0); // reserved
+        let cmds_start = b.len();
+        // LC_SEGMENT_64 __PAGEZERO
+        push32(&mut b, 0x19);
+        push32(&mut b, 72);
+        b.extend_from_slice(b"__PAGEZERO\0\0\0\0\0\0");
+        push64(&mut b, 0);
+        push64(&mut b, 0x1_0000_0000);
+        push64(&mut b, 0);
+        push64(&mut b, 0);
+        push32(&mut b, 0);
+        push32(&mut b, 0);
+        push32(&mut b, 0);
+        push32(&mut b, 0);
+        // LC_SEGMENT_64 __TEXT with one section_64 (__text).
+        push32(&mut b, 0x19);
+        push32(&mut b, 72 + 80);
+        b.extend_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        push64(&mut b, base);
+        push64(&mut b, 0x1000);
+        push64(&mut b, 0);
+        push64(&mut b, 0x1000);
+        push32(&mut b, 5);
+        push32(&mut b, 5);
+        push32(&mut b, 1); // nsects
+        push32(&mut b, 0);
+        // section_64 __text: sectname[16], segname[16], addr, size, offset,
+        // align, reloff, nreloc, flags, reserved1, reserved2, reserved3
+        b.extend_from_slice(b"__text\0\0\0\0\0\0\0\0\0\0");
+        b.extend_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        push64(&mut b, base);
+        push64(&mut b, 0x100);
+        push32(&mut b, 0); // offset
+        push32(&mut b, 4); // align
+        push32(&mut b, 0); // reloff
+        push32(&mut b, 0); // nreloc
+        push32(&mut b, 0x80000400); // S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
+        push32(&mut b, 0);
+        push32(&mut b, 0);
+        push32(&mut b, 0);
+        // LC_SYMTAB
+        push32(&mut b, 0x2);
+        push32(&mut b, 24);
+        let symoff_pos = b.len();
+        push32(&mut b, 0);
+        push32(&mut b, 1); // nsyms
+        let stroff_pos = b.len();
+        push32(&mut b, 0);
+        let strsize_pos = b.len();
+        push32(&mut b, 0);
+        let sizeofcmds = (b.len() - cmds_start) as u32;
+        b[sizeofcmds_pos..sizeofcmds_pos + 4].copy_from_slice(&sizeofcmds.to_le_bytes());
+        while b.len() % 8 != 0 {
+            b.push(0);
+        }
+        // nlist_64: strx, type, sect, desc, value
+        let symoff = b.len() as u32;
+        push32(&mut b, 1);
+        b.push(0x0f); // N_SECT | N_EXT
+        b.push(1);
+        b.extend_from_slice(&0u16.to_le_bytes()); // desc is u16
+        push64(&mut b, base + symbol_rva);
+        let stroff = b.len() as u32;
+        b.push(0);
+        b.extend_from_slice(symbol_name.as_bytes());
+        b.push(0);
+        let strsize = b.len() as u32 - stroff;
+        b[symoff_pos..symoff_pos + 4].copy_from_slice(&symoff.to_le_bytes());
+        b[stroff_pos..stroff_pos + 4].copy_from_slice(&stroff.to_le_bytes());
+        b[strsize_pos..strsize_pos + 4].copy_from_slice(&strsize.to_le_bytes());
+        b.resize(0x2000, 0);
+        b
+    }
+
+    #[test]
+    fn macho64_base_skips_pagezero_and_normalises_rvas() {
+        let bytes = minimal_macho64(0x1_0000_0000, 0x1488, "_main");
+        let module = LoadedModule::parse(&bytes).unwrap();
+        assert_eq!(module.container, Container::MachO64);
+        assert_eq!(module.arch, Arch::X86_64);
+        assert_eq!(module.image_base, 0x1_0000_0000);
+        assert_eq!(module.symbols.len(), 1);
+        assert_eq!(module.symbols[0].rva, 0x1488);
+        assert_eq!(module.symbols[0].name, "_main");
+    }
+
+    #[test]
+    fn macho_header_marker_symbol_is_not_a_function() {
+        let bytes = minimal_macho64(0x1_0000_0000, 0, "__mh_execute_header");
+        let module = LoadedModule::parse(&bytes).unwrap();
+        assert!(module.symbols.is_empty());
+    }
+
+    #[test]
+    fn wasm_is_recognised_as_not_loadable() {
+        // A wasm module: magic + version + one custom section (id 0, size,
+        // name length, name). The format gate needs a well-formed module,
+        // not just the magic.
+        let mut bytes = b"\0asm".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        // Custom section: id 0, payload size 5, name length 4, "name".
+        bytes.extend_from_slice(&[0, 5, 4]);
+        bytes.extend_from_slice(b"name");
+        // Type section: one () -> () function type.
+        bytes.extend_from_slice(&[1, 4, 1, 0x60, 0, 0]);
+        let got = LoadedModule::parse(&bytes);
+        assert!(
+            matches!(&got, Err(ImageError::NotLoadable("wasm"))),
+            "actual: {got:?}"
+        );
+    }
+
+    #[test]
+    fn other_arch_is_recognised_but_not_disassemblable() {
+        let arch = Arch::Other("aarch64");
+        assert!(!arch.is_disassemblable());
+        assert_eq!(arch.bitness(), 0);
+        assert_eq!(arch.short(), "aarch64");
+        assert!(Arch::X86_64.is_disassemblable());
+        assert!(Arch::X86.is_disassemblable());
+    }
+
+    #[test]
+    fn container_short_names_are_stable() {
+        assert_eq!(Container::MachO64.short(), "macho64");
+        assert_eq!(Container::MachOFat64.short(), "macho-fat64");
+        assert_eq!(Container::DyldCache.short(), "dyld-cache");
+        assert_eq!(Container::Wasm.short(), "wasm");
+        assert_eq!(Container::Xcoff64.short(), "xcoff64");
+        assert_eq!(Container::CoffBig.short(), "coff-big");
+        assert!(Container::MachO32.is_loadable());
+        assert!(!Container::Coff.is_loadable());
     }
 }
