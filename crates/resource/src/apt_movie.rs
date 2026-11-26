@@ -54,8 +54,21 @@ pub struct AptAnimationEntry {
     pub count: u32,
 }
 
+/// One decoded `PlaceObject2` control payload.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AptPlacement {
+    /// Placement flags (has-clip-actions / move / character / matrix ...).
+    pub flags: u32,
+    /// Display-list depth.
+    pub depth: u32,
+    /// Character id (0 when the control only moves an existing depth).
+    pub character: u32,
+    /// 2D affine matrix: `[a, b, c, d, tx, ty]`.
+    pub matrix: [f32; 6],
+}
+
 /// One control inside an APT frame.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct AptFrameControl {
     /// Control type (1 DoAction, 2 FrameLabel, 3 PlaceObject2, ...).
     pub control_type: u32,
@@ -63,10 +76,12 @@ pub struct AptFrameControl {
     pub offset: u32,
     /// Control end offset relative to the Apt Data tag.
     pub end: u32,
+    /// Decoded placement, when the control is a `PlaceObject2` with a full payload.
+    pub placement: Option<AptPlacement>,
 }
 
 /// One top-level APT frame.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct AptFrame {
     /// Frame index.
     pub index: u32,
@@ -345,10 +360,30 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             let Some(control_type) = u32_at(bytes, control_offset_usize) else {
                 continue;
             };
+            // PlaceObject2 is the only fixed-size payload decoded so far:
+            // type, flags, depth, character, then the six matrix floats.
+            let placement = (control_type == 3 && control_end - control_offset >= 40).then(|| {
+                let flags = u32_at(bytes, control_offset_usize + 4).unwrap_or(0);
+                let depth = u32_at(bytes, control_offset_usize + 8).unwrap_or(0);
+                let character = u32_at(bytes, control_offset_usize + 12).unwrap_or(0);
+                let mut matrix = [0f32; 6];
+                for (slot, index) in matrix.iter_mut().zip(0..6) {
+                    *slot = u32_at(bytes, control_offset_usize + 16 + index * 4)
+                        .map(f32::from_bits)
+                        .unwrap_or(0.0);
+                }
+                AptPlacement {
+                    flags,
+                    depth,
+                    character,
+                    matrix,
+                }
+            });
             controls.push(AptFrameControl {
                 control_type,
                 offset: control_offset,
                 end: control_end,
+                placement,
             });
         }
         frames.push(AptFrame { index, controls });
