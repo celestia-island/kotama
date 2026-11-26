@@ -65,6 +65,10 @@ pub struct AptPlacement {
     pub character: u32,
     /// 2D affine matrix: `[a, b, c, d, tx, ty]`.
     pub matrix: [f32; 6],
+    /// Colour multiplier: `[red, green, blue, alpha]`, 0-255 (255 = unchanged).
+    pub colour: [u8; 4],
+    /// Colour addend: `[red, green, blue, alpha]`, signed.
+    pub colour_add: [i8; 4],
 }
 
 /// One control inside an APT frame.
@@ -362,7 +366,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             };
             // PlaceObject2 is the only fixed-size payload decoded so far:
             // type, flags, depth, character, then the six matrix floats.
-            let placement = (control_type == 3 && control_end - control_offset >= 40).then(|| {
+            let placement = (control_type == 3 && control_end - control_offset >= 44).then(|| {
                 let flags = u32_at(bytes, control_offset_usize + 4).unwrap_or(0);
                 let depth = u32_at(bytes, control_offset_usize + 8).unwrap_or(0);
                 let character = u32_at(bytes, control_offset_usize + 12).unwrap_or(0);
@@ -372,11 +376,31 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
                         .map(f32::from_bits)
                         .unwrap_or(0.0);
                 }
+                let mut colour = [255u8; 4];
+                if control_end - control_offset >= 44 {
+                    for (slot, index) in colour.iter_mut().zip(0..4) {
+                        *slot = bytes
+                            .get(control_offset_usize + 40 + index)
+                            .copied()
+                            .unwrap_or(255);
+                    }
+                }
+                let mut colour_add = [0i8; 4];
+                if control_end - control_offset >= 48 {
+                    for (slot, index) in colour_add.iter_mut().zip(0..4) {
+                        *slot = bytes
+                            .get(control_offset_usize + 44 + index)
+                            .copied()
+                            .unwrap_or(0) as i8;
+                    }
+                }
                 AptPlacement {
                     flags,
                     depth,
                     character,
                     matrix,
+                    colour,
+                    colour_add,
                 }
             });
             controls.push(AptFrameControl {
