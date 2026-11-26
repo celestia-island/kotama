@@ -6,8 +6,8 @@ Two minimal shells over the shared `kotama-overlay` crate:
 - `tauri-shell/` — Tauri 2 + Hikari Vue (Vue JSX transform), transparent always-on-top window.
 
 Both load the same action manifest (`../demo-actions.json`) and only draw snapshots plus forward
-pointer/key events. Action ids are printed to stdout; neither shell owns a target process. The real
-PvZ adapter stays local in `_scratch` and never enters this repository.
+pointer/key events. Action ids are printed to stdout; neither shell owns a target process. Target-specific
+adapters are written per project and never enter this repository.
 
 ## Build
 

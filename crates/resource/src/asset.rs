@@ -1,4 +1,4 @@
-//! RA3 binary asset header parser.
+//! Binary asset header parser.
 //!
 //! Extracted `.asset` files carry a 16-byte identifier, a type name and a
 //! `DATA:` XML reference. Property values stay opaque in this module.

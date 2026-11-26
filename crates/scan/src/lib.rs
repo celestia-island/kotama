@@ -183,7 +183,7 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
 /// PE exception directory。
 ///
 /// 已量測并否決的起点规则（不要再试；数据来自带 PDB 的 MSVC 样本 sqlite3 / zstd / FLTK，
-/// 以及真实 PE32 样本 game / lua / PvZ）：
+/// 以及若干真实 PE32 样本）：
 ///
 /// - 「紧跟在 `ret` 之后、且没有任何直接引用」：1,485 个候选里只有 8 个是真过程
 ///   （三份真值合计），真实样本上会新增数千个函数体内块。
@@ -2424,7 +2424,7 @@ mod tests {
         assert!(functions.iter().all(|f| f.rva < 0x100_0000),);
     }
 
-    /// x86 非 PIE（RA3 / 旧版游戏都是这一类）：`push offset str` / `mov reg, imm32` 的
+    /// x86 非 PIE（旧版原生程序多属此类）：`push offset str` / `mov reg, imm32` 的
     /// 绝对地址立即数也要归到引用它的函数——此前只认 x64 的 RIP 相对形态，x86 永远为空。
     #[test]
     fn string_xrefs_find_absolute_immediate_references() {

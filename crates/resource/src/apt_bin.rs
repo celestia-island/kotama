@@ -1,4 +1,4 @@
-//! RA3 .bin aggregate prefix parser.
+//! Aggregate prefix parser for compiled APT binary assets.
 //!
 //! These aggregates start with an opaque prefix, then an Apt Data marker and
 //! a numeric type id. Only the prefix facts and printable strings are decoded.

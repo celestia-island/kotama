@@ -1,6 +1,6 @@
 //! APT constant file parser.
 //!
-//! Layout observed in RA3-era Apt UI data: 17-byte magic "Apt constant file",
+//! Layout observed in Apt UI constant data: 17-byte magic "Apt constant file",
 //! three padding bytes, u32 AptData entry offset, u32 entry count, u32 header
 //! size (32), then typed entries. Strings are absolute NUL-terminated offsets.
 
