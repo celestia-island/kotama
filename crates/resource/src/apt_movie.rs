@@ -43,6 +43,15 @@ pub struct AptExport {
     pub character: u32,
 }
 
+/// One APT animation table entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AptAnimationEntry {
+    /// Entry offset.
+    pub offset: u32,
+    /// Entry count.
+    pub count: u32,
+}
+
 /// Parsed APT movie facts.
 #[derive(Clone, PartialEq, Debug)]
 pub struct AptMovieInfo {
@@ -70,6 +79,14 @@ pub struct AptMovieInfo {
     pub exports: Vec<AptExport>,
     /// Image texture ids.
     pub texture_ids: Vec<u32>,
+    /// Animation file offset.
+    pub animation_file: Option<u32>,
+    /// Animation file version.
+    pub animation_version: Option<u32>,
+    /// Animation file size.
+    pub animation_size: Option<u32>,
+    /// Animation table entries.
+    pub animation_entries: Vec<AptAnimationEntry>,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -251,6 +268,35 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             })?,
         });
     }
+    let animation_file = u32_at(bytes, entry_offset + 12).filter(|value| *value != 0);
+    let mut animation_version = None;
+    let mut animation_size = None;
+    let mut animation_entries = Vec::new();
+    if let Some(file_offset) = animation_file {
+        let base = file_offset as usize;
+        if u32_at(bytes, base) == Some(0x0987_6543) {
+            animation_version = u32_at(bytes, base + 4);
+            animation_size = u32_at(bytes, base + 8);
+            if let Some(count) = u32_at(bytes, base + 16).filter(|count| *count <= 1024) {
+                for index in 0..count as usize {
+                    let offset = base
+                        .checked_add(20)
+                        .and_then(|offset| offset.checked_add(index * 8))
+                        .ok_or_else(|| {
+                            ResourceError::Invalid("APT animation table is too large".to_string())
+                        })?;
+                    animation_entries.push(AptAnimationEntry {
+                        offset: u32_at(bytes, offset).ok_or_else(|| {
+                            ResourceError::Invalid("APT animation offset is unreadable".to_string())
+                        })?,
+                        count: u32_at(bytes, offset + 4).ok_or_else(|| {
+                            ResourceError::Invalid("APT animation count is unreadable".to_string())
+                        })?,
+                    });
+                }
+            }
+        }
+    }
     Ok(AptMovieInfo {
         entry_offset,
         frame_count,
@@ -264,6 +310,10 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         imports,
         exports,
         texture_ids,
+        animation_file,
+        animation_version,
+        animation_size,
+        animation_entries,
     })
 }
 

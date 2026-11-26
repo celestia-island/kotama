@@ -172,6 +172,12 @@ struct AptExportJson {
 }
 
 #[derive(Serialize)]
+struct AptAnimationEntryJson {
+    offset: u32,
+    count: u32,
+}
+
+#[derive(Serialize)]
 struct AptMovieJson {
     kind: &'static str,
     entry_offset: usize,
@@ -187,6 +193,10 @@ struct AptMovieJson {
     character_names: BTreeMap<String, String>,
     exports: Vec<AptExportJson>,
     texture_ids: Vec<u32>,
+    animation_file: Option<u32>,
+    animation_version: Option<u32>,
+    animation_size: Option<u32>,
+    animation_entries: Vec<AptAnimationEntryJson>,
 }
 
 #[derive(Serialize)]
@@ -1905,6 +1915,17 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
             })
             .collect(),
         texture_ids: info.texture_ids.clone(),
+        animation_file: info.animation_file,
+        animation_version: info.animation_version,
+        animation_size: info.animation_size,
+        animation_entries: info
+            .animation_entries
+            .iter()
+            .map(|entry| AptAnimationEntryJson {
+                offset: entry.offset,
+                count: entry.count,
+            })
+            .collect(),
     };
     match serde_json::to_string_pretty(&json) {
         Ok(text) => {
