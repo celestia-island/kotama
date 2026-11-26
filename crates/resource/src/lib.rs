@@ -1,32 +1,18 @@
-//! Deterministic, I/O-free identification/parsing/extraction for non-image resources.
+//! Deterministic, I/O-free identification/parsing/extraction for widely used,
+//! vendor-neutral container and image formats.
 //!
 //! Only the standard library is used in the core. Format parsers are feature-gated so
-//! downstream consumers can opt out of any parser and its dependencies.
+//! downstream consumers can opt out of any parser and its dependencies. Parsers tied to a
+//! specific engine or studio deliberately do not live here; see the examples directory.
 
 use std::borrow::Cow;
 use std::fmt;
 
-pub mod apt;
-pub mod apt_bin;
-pub mod apt_data;
-pub mod apt_doaction;
-pub mod apt_geometry;
-pub mod apt_image_map;
-pub mod apt_movie;
-pub mod asset;
-pub mod asset_manifest;
-pub mod asset_relocation;
-pub mod big;
-pub mod csf;
 pub mod dds;
 pub mod dos_com;
-pub mod fesl;
-pub mod imp;
 pub mod swf;
 pub mod tga;
 pub mod vbs;
-pub mod vp6;
-pub mod w3d;
 
 /// A recognized resource format.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -37,38 +23,10 @@ pub enum ResourceKind {
     Vbs,
     /// DOS COM image.
     DosCom,
-    /// EA BIG archive container (BIGF/BIG4).
-    Big,
-    /// W3D chunk container.
-    W3d,
-    /// APT constant file.
-    AptConst,
-    /// CSF string table.
-    Csf,
-    /// APT geometry text.
-    AptGeometry,
     /// DDS surface.
     Dds,
     /// TGA image header.
     Tga,
-    /// VP6 movie header.
-    Vp6,
-    /// BinaryAssetBuilder manifest header.
-    AssetManifest,
-    /// Binary asset header.
-    Asset,
-    /// Compiled asset relocation table.
-    AssetRelocation,
-    /// APT movie character.
-    AptMovie,
-    /// APT image map.
-    AptImageMap,
-    /// Import offset table.
-    Imp,
-    /// Aggregate prefix of a compiled binary asset.
-    AptBin,
-    /// APT data import table.
-    AptData,
 }
 
 impl ResourceKind {
@@ -79,22 +37,8 @@ impl ResourceKind {
             Self::Swf => "swf",
             Self::Vbs => "vbs",
             Self::DosCom => "dos-com",
-            Self::Big => "big",
-            Self::W3d => "w3d",
-            Self::AptConst => "apt-const",
-            Self::Csf => "csf",
-            Self::AptGeometry => "apt-geometry",
             Self::Dds => "dds",
             Self::Tga => "tga",
-            Self::Vp6 => "vp6",
-            Self::AssetManifest => "asset-manifest",
-            Self::Asset => "asset",
-            Self::AssetRelocation => "asset-relocation",
-            Self::AptMovie => "apt-movie",
-            Self::AptImageMap => "apt-image-map",
-            Self::Imp => "imp",
-            Self::AptBin => "apt-bin",
-            Self::AptData => "apt-data",
         }
     }
 
@@ -105,22 +49,8 @@ impl ResourceKind {
             "swf" => Some(Self::Swf),
             "vbs" => Some(Self::Vbs),
             "dos-com" | "com" => Some(Self::DosCom),
-            "big" | "bigf" | "big4" => Some(Self::Big),
-            "w3d" => Some(Self::W3d),
-            "apt-const" => Some(Self::AptConst),
-            "csf" => Some(Self::Csf),
-            "apt-geometry" => Some(Self::AptGeometry),
             "dds" => Some(Self::Dds),
             "tga" => Some(Self::Tga),
-            "vp6" => Some(Self::Vp6),
-            "asset-manifest" => Some(Self::AssetManifest),
-            "asset" => Some(Self::Asset),
-            "asset-relocation" => Some(Self::AssetRelocation),
-            "apt-movie" => Some(Self::AptMovie),
-            "apt-image-map" => Some(Self::AptImageMap),
-            "imp" => Some(Self::Imp),
-            "apt-bin" => Some(Self::AptBin),
-            "apt-data" => Some(Self::AptData),
             _ => None,
         }
     }
@@ -132,22 +62,8 @@ impl ResourceKind {
             Self::Swf => "swf",
             Self::Vbs => "vbs",
             Self::DosCom => "dos-com",
-            Self::Big => "big",
-            Self::W3d => "w3d",
-            Self::AptConst => "apt-const",
-            Self::Csf => "csf",
-            Self::AptGeometry => "apt-geometry",
             Self::Dds => "dds",
             Self::Tga => "tga",
-            Self::Vp6 => "vp6",
-            Self::AssetManifest => "asset-manifest",
-            Self::Asset => "asset",
-            Self::AssetRelocation => "asset-relocation",
-            Self::AptMovie => "apt-movie",
-            Self::AptImageMap => "apt-image-map",
-            Self::Imp => "imp",
-            Self::AptBin => "apt-bin",
-            Self::AptData => "apt-data",
         }
     }
 
@@ -158,22 +74,8 @@ impl ResourceKind {
             Self::Swf => cfg!(feature = "swf"),
             Self::Vbs => cfg!(feature = "vbs"),
             Self::DosCom => cfg!(feature = "dos-com"),
-            Self::Big => cfg!(feature = "big"),
-            Self::W3d => cfg!(feature = "w3d"),
-            Self::AptConst => cfg!(feature = "apt-const"),
-            Self::Csf => cfg!(feature = "csf"),
-            Self::AptGeometry => cfg!(feature = "apt-geometry"),
             Self::Dds => cfg!(feature = "dds"),
             Self::Tga => cfg!(feature = "tga"),
-            Self::Vp6 => cfg!(feature = "vp6"),
-            Self::AssetManifest => cfg!(feature = "asset-manifest"),
-            Self::Asset => cfg!(feature = "asset"),
-            Self::AssetRelocation => cfg!(feature = "asset-relocation"),
-            Self::AptMovie => cfg!(feature = "apt-movie"),
-            Self::AptImageMap => cfg!(feature = "apt-image-map"),
-            Self::Imp => cfg!(feature = "imp"),
-            Self::AptBin => cfg!(feature = "apt-bin"),
-            Self::AptData => cfg!(feature = "apt-data"),
         }
     }
 }
@@ -181,7 +83,7 @@ impl ResourceKind {
 /// How a resource was recognized.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DetectionBasis {
-    /// Recognized from file contents (SWF magic).
+    /// Recognized from file contents (format magic).
     Magic,
     /// Recognized from a filename extension hint.
     Extension,
@@ -207,38 +109,10 @@ pub enum Resource<'a> {
     Vbs(vbs::VbsResource),
     /// DOS COM image.
     DosCom(dos_com::DosComResource<'a>),
-    /// EA BIG archive container.
-    Big(big::BigArchive<'a>),
-    /// W3D chunk container.
-    W3d(w3d::W3dFile<'a>),
-    /// APT constant file.
-    AptConst(apt::AptConstFile),
-    /// CSF string table.
-    Csf(csf::CsfFile),
-    /// APT geometry text.
-    AptGeometry(apt_geometry::AptGeometry),
     /// DDS surface header.
     Dds(dds::DdsInfo),
     /// TGA image header.
     Tga(tga::TgaInfo),
-    /// VP6 movie header.
-    Vp6(vp6::Vp6Info),
-    /// BinaryAssetBuilder manifest header.
-    AssetManifest(asset_manifest::AssetManifestInfo),
-    /// Binary asset header.
-    Asset(asset::AssetInfo),
-    /// Compiled asset relocation table.
-    AssetRelocation(asset_relocation::AssetRelocation),
-    /// APT movie character.
-    AptMovie(apt_movie::AptMovieInfo),
-    /// APT image map.
-    AptImageMap(apt_image_map::AptImageMap),
-    /// Import offset table.
-    Imp(imp::ImpInfo),
-    /// Aggregate prefix of a compiled binary asset.
-    AptBin(apt_bin::AptBinInfo),
-    /// APT data import table.
-    AptData(apt_data::AptDataInfo),
 }
 
 impl Resource<'_> {
@@ -249,22 +123,8 @@ impl Resource<'_> {
             Self::Swf(_) => ResourceKind::Swf,
             Self::Vbs(_) => ResourceKind::Vbs,
             Self::DosCom(_) => ResourceKind::DosCom,
-            Self::Big(_) => ResourceKind::Big,
-            Self::W3d(_) => ResourceKind::W3d,
-            Self::AptConst(_) => ResourceKind::AptConst,
-            Self::Csf(_) => ResourceKind::Csf,
-            Self::AptGeometry(_) => ResourceKind::AptGeometry,
             Self::Dds(_) => ResourceKind::Dds,
             Self::Tga(_) => ResourceKind::Tga,
-            Self::Vp6(_) => ResourceKind::Vp6,
-            Self::AssetManifest(_) => ResourceKind::AssetManifest,
-            Self::Asset(_) => ResourceKind::Asset,
-            Self::AssetRelocation(_) => ResourceKind::AssetRelocation,
-            Self::AptMovie(_) => ResourceKind::AptMovie,
-            Self::AptImageMap(_) => ResourceKind::AptImageMap,
-            Self::Imp(_) => ResourceKind::Imp,
-            Self::AptBin(_) => ResourceKind::AptBin,
-            Self::AptData(_) => ResourceKind::AptData,
         }
     }
 }
@@ -288,53 +148,11 @@ impl Resource<'_> {
             Self::Swf(resource) => resource.extract(max_output_len),
             Self::Vbs(resource) => resource.extract(),
             Self::DosCom(resource) => resource.extract(),
-            Self::Big(_) => Err(ResourceError::Unsupported(
-                "BIG archive is a container; select an entry".to_string(),
-            )),
-            Self::W3d(_) => Err(ResourceError::Unsupported(
-                "W3D is a chunk container; select a chunk".to_string(),
-            )),
-            Self::AptConst(_) => Err(ResourceError::Unsupported(
-                "APT constants are a table; inspect entries".to_string(),
-            )),
-            Self::Csf(_) => Err(ResourceError::Unsupported(
-                "CSF is a string table; inspect labels".to_string(),
-            )),
-            Self::AptGeometry(_) => Err(ResourceError::Unsupported(
-                "APT geometry is a text scene; inspect records".to_string(),
-            )),
             Self::Dds(_) => Err(ResourceError::Unsupported(
                 "DDS is a surface container; inspect header".to_string(),
             )),
             Self::Tga(_) => Err(ResourceError::Unsupported(
                 "TGA is an image container; inspect header".to_string(),
-            )),
-            Self::Vp6(_) => Err(ResourceError::Unsupported(
-                "VP6 is a movie container; inspect header".to_string(),
-            )),
-            Self::AssetManifest(_) => Err(ResourceError::Unsupported(
-                "asset manifest is a header table; inspect fields".to_string(),
-            )),
-            Self::Asset(_) => Err(ResourceError::Unsupported(
-                "asset property values are opaque; inspect header".to_string(),
-            )),
-            Self::AssetRelocation(_) => Err(ResourceError::Unsupported(
-                "relocation entries are opaque; inspect table".to_string(),
-            )),
-            Self::AptMovie(_) => Err(ResourceError::Unsupported(
-                "APT movie frames are opaque; inspect header".to_string(),
-            )),
-            Self::AptImageMap(_) => Err(ResourceError::Unsupported(
-                "APT image map is a text table; inspect assignments".to_string(),
-            )),
-            Self::Imp(_) => Err(ResourceError::Unsupported(
-                "IMP offsets point to external data".to_string(),
-            )),
-            Self::AptBin(_) => Err(ResourceError::Unsupported(
-                "BIN aggregate payload is opaque".to_string(),
-            )),
-            Self::AptData(_) => Err(ResourceError::Unsupported(
-                "APT data payload is opaque".to_string(),
             )),
         }
     }
@@ -405,36 +223,6 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Dds.enabled(),
         });
     }
-    if vp6::has_magic(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::Vp6,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::Vp6.enabled(),
-        });
-    }
-    if csf::has_magic(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::Csf,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::Csf.enabled(),
-        });
-    }
-    if bytes.get(..17) == Some(b"Apt constant file".as_slice())
-        || bytes.get(16..33) == Some(b"Apt constant file".as_slice())
-    {
-        return Some(Identification {
-            kind: ResourceKind::AptConst,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::AptConst.enabled(),
-        });
-    }
-    if big::has_magic(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::Big,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::Big.enabled(),
-        });
-    }
     if swf::has_magic(bytes) {
         return Some(Identification {
             kind: ResourceKind::Swf,
@@ -449,81 +237,11 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Vbs.enabled(),
         });
     }
-    if extension_matches(extension, "ru") {
-        return Some(Identification {
-            kind: ResourceKind::AptGeometry,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::AptGeometry.enabled(),
-        });
-    }
-    if extension_matches(extension, "dat") {
-        return Some(Identification {
-            kind: ResourceKind::AptImageMap,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::AptImageMap.enabled(),
-        });
-    }
-    if extension_matches(extension, "apt") {
-        return Some(Identification {
-            kind: ResourceKind::AptMovie,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::AptMovie.enabled(),
-        });
-    }
-    if extension_matches(extension, "imp") {
-        return Some(Identification {
-            kind: ResourceKind::Imp,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::Imp.enabled(),
-        });
-    }
-    if apt_data::has_marker(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::AptData,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::AptData.enabled(),
-        });
-    }
-    if extension_matches(extension, "bin") && apt_bin::has_marker(bytes) {
-        return Some(Identification {
-            kind: ResourceKind::AptBin,
-            basis: DetectionBasis::Magic,
-            enabled: ResourceKind::AptBin.enabled(),
-        });
-    }
-    if extension_matches(extension, "relo") {
-        return Some(Identification {
-            kind: ResourceKind::AssetRelocation,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::AssetRelocation.enabled(),
-        });
-    }
-    if extension_matches(extension, "asset") {
-        return Some(Identification {
-            kind: ResourceKind::Asset,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::Asset.enabled(),
-        });
-    }
-    if extension_matches(extension, "manifest") {
-        return Some(Identification {
-            kind: ResourceKind::AssetManifest,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::AssetManifest.enabled(),
-        });
-    }
     if extension_matches(extension, "tga") {
         return Some(Identification {
             kind: ResourceKind::Tga,
             basis: DetectionBasis::Extension,
             enabled: ResourceKind::Tga.enabled(),
-        });
-    }
-    if extension_matches(extension, "w3d") {
-        return Some(Identification {
-            kind: ResourceKind::W3d,
-            basis: DetectionBasis::Extension,
-            enabled: ResourceKind::W3d.enabled(),
         });
     }
     if extension_matches(extension, "com") {
@@ -560,64 +278,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Swf => swf::parse(bytes).map(Resource::Swf),
         ResourceKind::Vbs => vbs::parse(bytes).map(Resource::Vbs),
         ResourceKind::DosCom => dos_com::parse(bytes).map(Resource::DosCom),
-        ResourceKind::Big => big::parse(bytes).map(Resource::Big),
-        ResourceKind::W3d => w3d::parse(bytes).map(Resource::W3d),
-        ResourceKind::AptConst => apt::parse(bytes).map(Resource::AptConst),
-        ResourceKind::Csf => csf::parse(bytes).map(Resource::Csf),
-        ResourceKind::AptGeometry => apt_geometry::parse(bytes).map(Resource::AptGeometry),
         ResourceKind::Dds => dds::parse(bytes).map(Resource::Dds),
         ResourceKind::Tga => tga::parse(bytes).map(Resource::Tga),
-        ResourceKind::Vp6 => vp6::parse(bytes).map(Resource::Vp6),
-        ResourceKind::AssetManifest => asset_manifest::parse(bytes).map(Resource::AssetManifest),
-        ResourceKind::Asset => asset::parse(bytes).map(Resource::Asset),
-        ResourceKind::AssetRelocation => {
-            asset_relocation::parse(bytes).map(Resource::AssetRelocation)
-        }
-        ResourceKind::AptMovie => apt_movie::parse(bytes, 16).map(Resource::AptMovie),
-        ResourceKind::AptImageMap => apt_image_map::parse(bytes).map(Resource::AptImageMap),
-        ResourceKind::Imp => imp::parse(bytes).map(Resource::Imp),
-        ResourceKind::AptBin => apt_bin::parse(bytes).map(Resource::AptBin),
-        ResourceKind::AptData => apt_data::parse(bytes).map(Resource::AptData),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn swf_magic_wins_over_a_misleading_extension() {
-        let identification = identify(b"FWS\x0a\x08\0\0\0", Some("vbs")).unwrap();
-        assert_eq!(identification.kind, ResourceKind::Swf);
-        assert_eq!(identification.basis, DetectionBasis::Magic);
-        assert_eq!(identification.enabled, cfg!(feature = "swf"));
-    }
-
-    #[test]
-    fn extension_detection_is_case_insensitive_and_dot_tolerant() {
-        assert_eq!(
-            identify(b"x", Some(".VBS")).unwrap().kind,
-            ResourceKind::Vbs
-        );
-        assert_eq!(
-            identify(b"x", Some("COM")).unwrap().kind,
-            ResourceKind::DosCom
-        );
-        assert!(identify(b"x", Some("vbe")).is_none());
-    }
-
-    #[test]
-    fn disabled_features_are_reported_explicitly() {
-        if ResourceKind::Swf.enabled() {
-            return;
-        }
-        let error = parse(b"FWS\x0a\x08\0\0\0", None).unwrap_err();
-        assert!(matches!(
-            error,
-            ResourceError::FeatureDisabled {
-                kind: ResourceKind::Swf,
-                ..
-            }
-        ));
     }
 }

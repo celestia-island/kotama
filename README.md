@@ -100,14 +100,12 @@ cargo run -p kotama-cli -- proxy inspect <dll>                                  
 cargo run -p kotama-cli -- proxy generate <dll> --output out --build                                # buildable forwarding mirror + manifest
 cargo run -p kotama-cli -- proxy generate <dll> --output out --override <name> --hooks hooks.c --build  # selected local overrides; every other export still forwards
 cargo run -p kotama-cli -- proxy generate <dll> --output out --log-regex '^MessageBox' --log-exclude-regex 'Timeout' --build  # entry logging with a regex allow/deny list
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource identify <file>   # SWF / VBS / DOS COM / BIG / W3D / APT
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource info <file>       # format metadata as JSON
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource entries <file> --kind big --limit 20
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource chunks <file> --kind w3d --limit 20
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource apt <const>
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource geometry <shape.ru>
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource extract <file> --output out.bin
-cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-big,resource-w3d,resource-apt-const,resource-apt-geometry -- resource extract <big> --entry 'data\\asset.xml' --output asset.xml
+cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-dds,resource-tga -- resource identify <file>   # SWF / VBS / DOS COM / DDS / TGA
+cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com,resource-dds,resource-tga -- resource info <file>       # format metadata as JSON
+cargo run -p kotama-cli --features resource-dds,resource-tga -- resource dds <surface.dds>                                 # DDS header
+cargo run -p kotama-cli --features resource-dds,resource-tga -- resource tga <image.tga>                                   # TGA header
+cargo run -p kotama-cli -- resource strings <file> --min-len 8 --limit 20                                                  # printable runs
+cargo run -p kotama-cli --features resource-swf,resource-vbs,resource-dos-com -- resource extract <file> --output out.bin # decompressed body
 cargo test -p kotama-overlay                # platform-neutral hover-toolbar model
 just bench-windows                          # native Windows bench (add --oracle for Ghidra)
 KOTAMA_IDA=/path/to/idat.exe just bench-windows --oracle --ida   # optional IDA cross-check
@@ -142,14 +140,16 @@ hover expand/collapse, row hit testing, shortcut normalization, deterministic fr
 and a capability gate that denies write actions until the host explicitly grants them. It holds no
 platform handles and executes no actions; game-specific ids and effects stay in the host.
 
-Resource parsers are opt-in: SWF (`resource-swf`, pure-Rust zlib; ZWS/LZMA is recognized but not extracted),
-VBScript text (`resource-vbs`; strict UTF-8/UTF-16 decoding, no execution), EA BIG archives
-(`resource-big`; BIGF/BIG4 table validation, entry lookup, container only), W3D
-(`resource-w3d`; chunk tree type/size/offset/depth evidence, container only), APT constants
-(`resource-apt-const`; typed constant table, including the 16-byte prefix variant), APT geometry
-(`resource-apt-geometry`; .ru styles/triangles/lines/bounds), and DOS COM
-(`resource-dos-com`; verbatim bytes, load/entry `0x100`). The library is I/O-free and deterministic;
-the CLI owns file access, refuses to overwrite outputs, and caps extraction at 256 MiB by default.
+Resource parsers are opt-in and **vendor-neutral only**: SWF (`resource-swf`, pure-Rust zlib; ZWS/LZMA is recognized
+but not extracted), VBScript text (`resource-vbs`; strict UTF-8/UTF-16 decoding, no execution), DDS (`resource-dds`),
+TGA (`resource-tga`) and DOS COM (`resource-dos-com`; verbatim bytes, load/entry `0x100`). The library is I/O-free and
+deterministic; the CLI owns file access, refuses to overwrite outputs, and caps extraction at 256 MiB by default.
+
+Parsers tied to a particular engine or studio (APT, BIG, W3D, CSF, asset tables, import tables, VP6, FESL) live in
+`examples/engine-formats` as a **non-published study crate** with its own `engine-formats-cli` binary. They are
+deliberately kept out of the published toolkit so nobody reads the toolkit as targeting any specific product:
+
+    cargo run -p kotama-engine-formats --all-features --bin engine-formats-cli -- resource identify <file>
 
 Fixture matrix: `x86_64-linux-gnu / x86-linux-gnu / x86_64-windows-gnu / x86-windows-gnu`
 × `-O2/-O0`, plus native `x86_64-windows-msvc / x86-windows-msvc` with `/Zi` PDBs.
