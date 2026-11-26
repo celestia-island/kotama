@@ -54,6 +54,26 @@ pub struct AptAnimationEntry {
     pub count: u32,
 }
 
+/// One control inside an APT frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AptFrameControl {
+    /// Control type (1 DoAction, 2 FrameLabel, 3 PlaceObject2, ...).
+    pub control_type: u32,
+    /// Control payload offset relative to the Apt Data tag.
+    pub offset: u32,
+    /// Control end offset relative to the Apt Data tag.
+    pub end: u32,
+}
+
+/// One top-level APT frame.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AptFrame {
+    /// Frame index.
+    pub index: u32,
+    /// Controls in this frame.
+    pub controls: Vec<AptFrameControl>,
+}
+
 /// Parsed APT movie facts.
 #[derive(Clone, PartialEq, Debug)]
 pub struct AptMovieInfo {
@@ -89,6 +109,8 @@ pub struct AptMovieInfo {
     pub animation_size: Option<u32>,
     /// Animation table entries.
     pub animation_entries: Vec<AptAnimationEntry>,
+    /// Top-level frames with their controls.
+    pub frames: Vec<AptFrame>,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -159,6 +181,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
     }
     let frame_count = u32_at(bytes, entry_offset + 8)
         .ok_or_else(|| ResourceError::Invalid("APT frame count is unreadable".to_string()))?;
+    let frame_list = u32_at(bytes, entry_offset + 12).unwrap_or(0) as usize;
     let character_count = u32_at(bytes, entry_offset + 20)
         .ok_or_else(|| ResourceError::Invalid("APT character count is unreadable".to_string()))?;
     let character_list = u32_at(bytes, entry_offset + 24)
@@ -282,6 +305,54 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             })?,
         });
     }
+    let mut frames = Vec::new();
+    for index in 0..frame_count.min(4096) {
+        let slot = base
+            .checked_add(frame_list)
+            .and_then(|offset| offset.checked_add(4 + index as usize * 4))
+            .ok_or_else(|| ResourceError::Invalid("APT frame list is too large".to_string()))?;
+        let Some(frame_offset) = u32_at(bytes, slot) else {
+            break;
+        };
+        let frame_offset = frame_offset as usize;
+        if frame_offset == 0 || frame_offset >= bytes.len() {
+            frames.push(AptFrame {
+                index,
+                controls: Vec::new(),
+            });
+            continue;
+        }
+        let Some(control_count) = u32_at(bytes, frame_offset) else {
+            break;
+        };
+        let mut controls = Vec::new();
+        for control_index in 0..control_count.min(4096) as usize {
+            let pair = frame_offset
+                .checked_add(4 + control_index * 8)
+                .ok_or_else(|| {
+                    ResourceError::Invalid("APT frame controls are too large".to_string())
+                })?;
+            let Some(control_offset) = u32_at(bytes, pair) else {
+                break;
+            };
+            let Some(control_end) = u32_at(bytes, pair + 4) else {
+                break;
+            };
+            let control_offset_usize = control_offset as usize;
+            if control_offset_usize >= bytes.len() || control_offset >= control_end {
+                continue;
+            }
+            let Some(control_type) = u32_at(bytes, control_offset_usize) else {
+                continue;
+            };
+            controls.push(AptFrameControl {
+                control_type,
+                offset: control_offset,
+                end: control_end,
+            });
+        }
+        frames.push(AptFrame { index, controls });
+    }
     let animation_file = u32_at(bytes, entry_offset + 12).filter(|value| *value != 0);
     let mut animation_version = None;
     let mut animation_size = None;
@@ -328,6 +399,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         animation_version,
         animation_size,
         animation_entries,
+        frames,
     })
 }
 
