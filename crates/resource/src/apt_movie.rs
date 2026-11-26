@@ -1,15 +1,17 @@
 //! Minimal APT movie and character-type parser.
 //!
-//! RA3 AptData files carry a 16-byte prefix before the movie character. The
-//! entry offset is supplied by the caller (normally from the paired const
-//! file). Frame contents and nested character payloads stay opaque.
+//! Two layouts are accepted: a bare `.apt` whose `Apt Data:` tag starts at 0, and
+//! an extracted `.bin` whose tag begins after a 16-byte prefix. All internal
+//! pointers are relative to the tag, so the caller-visible entry offset already
+//! encodes the layout; the parser detects the tag instead of assuming a prefix.
+//! Frame contents and nested character payloads stay opaque.
 
 use crate::ResourceError;
 
 /// One APT character reference.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct AptCharacter {
-    /// Character offset relative to the 16-byte prefix.
+    /// Character offset relative to the Apt Data tag.
     pub offset: u32,
     /// Character type id.
     pub type_id: u32,
@@ -96,7 +98,18 @@ fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 const CHARACTER_SIGNATURE: u32 = 0x0987_6543;
-const PREFIX: usize = 16;
+const TAG: &[u8] = b"Apt Data:";
+
+/// Offset of the Apt Data tag: 0 for a bare `.apt`, else the prefix length.
+///
+/// Legacy synthetic fixtures omit the tag entirely; they keep the historical
+/// 16-byte prefix so old callers are unaffected.
+fn data_base(bytes: &[u8]) -> usize {
+    bytes
+        .windows(TAG.len())
+        .position(|window| window == TAG)
+        .unwrap_or(16)
+}
 
 fn read_cstr(bytes: &[u8], offset: usize) -> Option<String> {
     let end = bytes[offset..].iter().position(|byte| *byte == 0)? + offset;
@@ -127,6 +140,7 @@ fn character_type_name(type_id: u32) -> &'static str {
 /// Returns ResourceError::Invalid for a short file, wrong movie signature or a
 /// character pointer outside the file.
 pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, ResourceError> {
+    let base = data_base(bytes);
     let _header_end = entry_offset
         .checked_add(56)
         .filter(|end| *end <= bytes.len())
@@ -169,7 +183,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
     let mut characters = Vec::new();
     let mut texture_ids = Vec::new();
     for index in 0..character_count as usize {
-        let pointer_offset = PREFIX
+        let pointer_offset = base
             .checked_add(character_list)
             .and_then(|offset| offset.checked_add(index * 4))
             .ok_or_else(|| ResourceError::Invalid("APT character list is too large".to_string()))?;
@@ -179,7 +193,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         if pointer == 0 {
             continue;
         }
-        let character_offset = PREFIX
+        let character_offset = base
             .checked_add(pointer as usize)
             .filter(|offset| *offset < bytes.len())
             .ok_or_else(|| {
@@ -228,7 +242,7 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
     }
     let mut imports = Vec::new();
     for index in 0..import_count as usize {
-        let offset = PREFIX
+        let offset = base
             .checked_add(import_list)
             .and_then(|offset| offset.checked_add(index * 16))
             .ok_or_else(|| ResourceError::Invalid("APT import list is too large".to_string()))?;
@@ -237,10 +251,10 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
         let name_offset = u32_at(bytes, offset + 4)
             .ok_or_else(|| ResourceError::Invalid("APT import name is unreadable".to_string()))?;
         imports.push(AptImport {
-            movie: read_cstr(bytes, PREFIX + movie_offset as usize).ok_or_else(|| {
+            movie: read_cstr(bytes, base + movie_offset as usize).ok_or_else(|| {
                 ResourceError::Invalid("APT import movie string is unreadable".to_string())
             })?,
-            name: read_cstr(bytes, PREFIX + name_offset as usize).ok_or_else(|| {
+            name: read_cstr(bytes, base + name_offset as usize).ok_or_else(|| {
                 ResourceError::Invalid("APT import name string is unreadable".to_string())
             })?,
             character: u32_at(bytes, offset + 8).ok_or_else(|| {
@@ -253,14 +267,14 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
     }
     let mut exports = Vec::new();
     for index in 0..export_count as usize {
-        let offset = PREFIX
+        let offset = base
             .checked_add(export_list)
             .and_then(|offset| offset.checked_add(index * 8))
             .ok_or_else(|| ResourceError::Invalid("APT export list is too large".to_string()))?;
         let name_offset = u32_at(bytes, offset)
             .ok_or_else(|| ResourceError::Invalid("APT export name is unreadable".to_string()))?;
         exports.push(AptExport {
-            name: read_cstr(bytes, PREFIX + name_offset as usize).ok_or_else(|| {
+            name: read_cstr(bytes, base + name_offset as usize).ok_or_else(|| {
                 ResourceError::Invalid("APT export name string is unreadable".to_string())
             })?,
             character: u32_at(bytes, offset + 4).ok_or_else(|| {
