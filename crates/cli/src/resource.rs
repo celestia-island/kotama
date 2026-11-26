@@ -178,6 +178,19 @@ struct AptAnimationEntryJson {
 }
 
 #[derive(Serialize)]
+struct AptFrameControlJson {
+    control_type: u32,
+    offset: u32,
+    end: u32,
+}
+
+#[derive(Serialize)]
+struct AptFrameJson {
+    index: u32,
+    controls: Vec<AptFrameControlJson>,
+}
+
+#[derive(Serialize)]
 struct AptMovieJson {
     kind: &'static str,
     entry_offset: usize,
@@ -197,6 +210,7 @@ struct AptMovieJson {
     animation_version: Option<u32>,
     animation_size: Option<u32>,
     animation_entries: Vec<AptAnimationEntryJson>,
+    frames: Vec<AptFrameJson>,
 }
 
 #[derive(Serialize)]
@@ -1924,6 +1938,22 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
             .map(|entry| AptAnimationEntryJson {
                 offset: entry.offset,
                 count: entry.count,
+            })
+            .collect(),
+        frames: info
+            .frames
+            .iter()
+            .map(|frame| AptFrameJson {
+                index: frame.index,
+                controls: frame
+                    .controls
+                    .iter()
+                    .map(|control| AptFrameControlJson {
+                        control_type: control.control_type,
+                        offset: control.offset,
+                        end: control.end,
+                    })
+                    .collect(),
             })
             .collect(),
     };
