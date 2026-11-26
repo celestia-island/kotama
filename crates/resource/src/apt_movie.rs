@@ -198,9 +198,17 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             "APT movie signature is invalid".to_string(),
         ));
     }
-    let frame_count = u32_at(bytes, entry_offset + 8)
+    // Two layouts share this header. A bare/extracted `.apt` stores
+    // `{nFrames, aFrames}` at `+8`/`+12`. A fix-up `.bin` stores the raw
+    // `AptCharacter` `{dataBits, m_pAnimFile}` instead, so `+12` points at an
+    // `AptAnimFile` (magic 0x09876543) rather than a frame array. The magic
+    // decides which reading applies; `+0x14..` is the same movie data in both.
+    let raw_count = u32_at(bytes, entry_offset + 8)
         .ok_or_else(|| ResourceError::Invalid("APT frame count is unreadable".to_string()))?;
-    let frame_list = u32_at(bytes, entry_offset + 12).unwrap_or(0) as usize;
+    let raw_list = u32_at(bytes, entry_offset + 12).unwrap_or(0) as usize;
+    let fixed_up = u32_at(bytes, raw_list) == Some(CHARACTER_SIGNATURE);
+    let frame_count = if fixed_up { 0 } else { raw_count };
+    let frame_list = if fixed_up { 0 } else { raw_list };
     let character_count = u32_at(bytes, entry_offset + 20)
         .ok_or_else(|| ResourceError::Invalid("APT character count is unreadable".to_string()))?;
     let character_list = u32_at(bytes, entry_offset + 24)
@@ -563,6 +571,35 @@ mod tests {
         assert_eq!(placement.colour, [255, 255, 255, 255]);
     }
 
+    #[test]
+    fn detects_fixed_up_bin_layout() {
+        // A fix-up `.bin` stores `AptCharacter` at +8/+12: data bits and
+        // m_pAnimFile. Here +12 points at an AptAnimFile magic, so the parser
+        // must not treat it as a frame array.
+        let mut bytes = b"Apt Data:74\x1a\x00\x00\x00\x00".to_vec();
+        bytes.extend_from_slice(&9u32.to_le_bytes()); // type: sprite
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&0x27fu32.to_le_bytes()); // data bits
+        bytes.extend_from_slice(&72u32.to_le_bytes()); // m_pAnimFile at tag+72
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // 1 character
+        bytes.extend_from_slice(&40u32.to_le_bytes()); // character list at tag+40
+        bytes.extend_from_slice(&800u32.to_le_bytes());
+        bytes.extend_from_slice(&600u32.to_le_bytes());
+        bytes.extend_from_slice(&33u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no imports
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no exports
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.resize(40, 0);
+        bytes.extend_from_slice(&32u32.to_le_bytes()); // ptr: character at tag+32
+        bytes.resize(72, 0);
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        let info = parse(&bytes, 16).unwrap();
+        assert_eq!(info.frame_count, 0, "fixed-up layout has no frame table");
+        assert!(info.frames.is_empty());
+        assert_eq!(info.character_count, 1);
+    }
     #[test]
     fn parses_image_texture_ids() {
         let mut bytes = vec![0u8; 16];
