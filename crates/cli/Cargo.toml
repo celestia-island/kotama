@@ -34,6 +34,7 @@ resource-pvz-reanim = ["kotama-resource/pvz-reanim"]
 resource-pak = ["kotama-resource/pak"]
 resource-imp = ["kotama-resource/imp"]
 resource-apt-bin = ["kotama-resource/apt-bin"]
+resource-apt-data = ["kotama-resource/apt-data"]
 resource-apt-geometry = ["kotama-resource/apt-geometry"]
 
 [dependencies]
