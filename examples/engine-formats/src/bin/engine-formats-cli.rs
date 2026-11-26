@@ -1,0 +1,2112 @@
+//! EXAMPLE ONLY: inspect engine- and studio-specific resource formats.
+//!
+//! This binary is not part of the published toolkit. It exists so the format
+//! knowledge can be studied and exercised without implying the toolkit targets
+//! any particular engine.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use serde::Serialize;
+
+use kotama_engine_formats as kres;
+use kotama_engine_formats::{
+    identify, parse, parse_as, DetectionBasis, Extracted, Resource, ResourceError, ResourceKind,
+};
+
+// Kept for parity with the published CLI; engine formats are not extractable.
+#[allow(dead_code)]
+const DEFAULT_MAX_OUTPUT: usize = 256 * 1024 * 1024;
+
+#[derive(Serialize)]
+struct ExtractJson {
+    kind: &'static str,
+    output: String,
+    bytes_written: usize,
+}
+
+#[derive(Serialize)]
+struct IdentifyJson {
+    kind: &'static str,
+    basis: &'static str,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct InfoJson {
+    kind: &'static str,
+    compression: Option<&'static str>,
+    version: Option<u8>,
+    declared_length: Option<u32>,
+    stored_length: Option<usize>,
+    encoding: Option<&'static str>,
+    size: Option<usize>,
+    load_address: Option<u32>,
+    entry: Option<u32>,
+    archive_version: Option<&'static str>,
+    entries: Option<usize>,
+    chunks: Option<usize>,
+    apt_entry_offset: Option<u32>,
+    constants: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct Vp6Json {
+    kind: &'static str,
+    header_size: u32,
+    codec: String,
+    width: u16,
+    height: u16,
+    frame_count: u16,
+}
+
+#[derive(Serialize)]
+struct ChunkJson {
+    type_id: u32,
+    name: Option<&'static str>,
+    depth: u8,
+    offset: u64,
+    size: u32,
+    has_subchunks: bool,
+}
+
+#[derive(Serialize)]
+struct ChunksJson {
+    kind: &'static str,
+    count: usize,
+    chunks: Vec<ChunkJson>,
+}
+
+#[derive(Serialize)]
+struct AptConstantJson {
+    type_id: u32,
+    type_name: &'static str,
+    value: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct AssetPropertyJson {
+    name_hash: u32,
+    type_hash: u32,
+    value_or_offset: u32,
+    name: Option<String>,
+    property_type: Option<String>,
+    value: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct AssetJson {
+    kind: &'static str,
+    id: String,
+    version: u32,
+    type_hash: Option<u32>,
+    instance_hash: Option<u32>,
+    data_size: u32,
+    property_count: u32,
+    unknown_28: u32,
+    type_name: String,
+    data_path: String,
+    property_table_offset: usize,
+    properties: Vec<AssetPropertyJson>,
+}
+
+#[derive(Serialize)]
+struct AptCharacterJson {
+    offset: u32,
+    type_id: u32,
+    type_name: &'static str,
+    bounds: Option<Vec<f32>>,
+    geometry: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct AptImportJson {
+    movie: String,
+    name: String,
+    character: u32,
+    pointer: u32,
+}
+
+#[derive(Serialize)]
+struct AptExportJson {
+    name: String,
+    character: u32,
+}
+
+#[derive(Serialize)]
+struct AptAnimationEntryJson {
+    offset: u32,
+    count: u32,
+}
+
+#[derive(Serialize)]
+struct AptPlacementJson {
+    flags: u32,
+    depth: u32,
+    character: u32,
+    matrix: [f32; 6],
+    colour: [u8; 4],
+    colour_add: [i8; 4],
+}
+
+#[derive(Serialize)]
+struct AptFrameControlJson {
+    control_type: u32,
+    offset: u32,
+    end: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<AptPlacementJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_label: Option<AptFrameLabelJson>,
+}
+
+#[derive(Serialize)]
+struct AptFrameLabelJson {
+    name: String,
+    frame: u32,
+}
+
+#[derive(Serialize)]
+struct AptFrameJson {
+    index: u32,
+    controls: Vec<AptFrameControlJson>,
+}
+
+#[derive(Serialize)]
+struct AptMovieJson {
+    kind: &'static str,
+    entry_offset: usize,
+    frame_count: u32,
+    character_count: u32,
+    screen_width: u32,
+    screen_height: u32,
+    milliseconds_per_frame: u32,
+    import_count: u32,
+    export_count: u32,
+    characters: Vec<AptCharacterJson>,
+    imports: Vec<AptImportJson>,
+    character_names: BTreeMap<String, String>,
+    exports: Vec<AptExportJson>,
+    texture_ids: Vec<u32>,
+    animation_file: Option<u32>,
+    animation_version: Option<u32>,
+    animation_size: Option<u32>,
+    animation_entries: Vec<AptAnimationEntryJson>,
+    frames: Vec<AptFrameJson>,
+    imported_character_count: u32,
+    anonymous_character_count: u32,
+}
+
+#[derive(Serialize)]
+struct AptImageAssignmentJson {
+    image_id: i32,
+    texture_id: Option<i32>,
+    rectangle: Option<Vec<i32>>,
+}
+
+#[derive(Serialize)]
+struct AptImageMapJson {
+    kind: &'static str,
+    assignments: Vec<AptImageAssignmentJson>,
+}
+
+#[derive(Serialize)]
+struct RelocationEntryJson {
+    kind: u32,
+    offset: u32,
+}
+
+#[derive(Serialize)]
+struct RelocationJson {
+    kind: &'static str,
+    checksum: u32,
+    entries: Vec<RelocationEntryJson>,
+}
+
+#[derive(Serialize)]
+struct AssetReferenceJson {
+    type_id: u32,
+    instance_id: u32,
+}
+
+#[derive(Serialize)]
+struct AssetManifestEntryJson {
+    type_id: u32,
+    instance_id: u32,
+    type_hash: u32,
+    instance_hash: u32,
+    instance_size: u32,
+    relocation_size: u32,
+    imports_size: u32,
+    name: String,
+    source_name: String,
+    references: Vec<AssetReferenceJson>,
+}
+
+#[derive(Serialize)]
+struct AssetManifestJson {
+    kind: &'static str,
+    big_endian: bool,
+    linked: bool,
+    version: u16,
+    stream_checksum: u32,
+    all_types_hash: u32,
+    asset_count: u32,
+    total_instance_data_size: u32,
+    max_instance_chunk_size: u32,
+    max_relocation_chunk_size: u32,
+    max_imports_chunk_size: u32,
+    asset_reference_buffer_size: u32,
+    referenced_manifest_name_buffer_size: u32,
+    asset_name_buffer_size: u32,
+    source_file_name_buffer_size: u32,
+    names: Vec<String>,
+    entries: Vec<AssetManifestEntryJson>,
+}
+
+#[derive(Serialize)]
+struct GeometryStyleJson {
+    kind: String,
+    color: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct GeometryJson {
+    kind: &'static str,
+    styles: Vec<GeometryStyleJson>,
+    triangle_count: usize,
+    line_count: usize,
+    bounds: Option<Vec<f32>>,
+}
+
+#[derive(Serialize)]
+struct AptJson {
+    kind: &'static str,
+    apt_data_entry_offset: u32,
+    count: usize,
+    entries: Vec<AptConstantJson>,
+}
+
+#[derive(Serialize)]
+struct CsfLabelJson {
+    name: String,
+    values: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CsfJson {
+    kind: &'static str,
+    version: u32,
+    label_count: u32,
+    string_count: u32,
+    language: u32,
+    labels: Vec<CsfLabelJson>,
+}
+
+#[derive(Serialize)]
+struct MeshJson {
+    version: u32,
+    attributes: u32,
+    mesh_name: String,
+    container_name: String,
+    num_tris: u32,
+    num_vertices: u32,
+    num_materials: u32,
+    num_damage_stages: u32,
+    sort_level: u32,
+    prelit_version: u32,
+    future_counts: u32,
+    vertex_channels: u32,
+    face_channels: u32,
+    min: Vec<f32>,
+    max: Vec<f32>,
+    sphere_center: Vec<f32>,
+    sphere_radius: f32,
+    vertex_count: usize,
+    normal_count: usize,
+    triangle_count: usize,
+    material_info: Option<Vec<u32>>,
+    vertex_material_names: Vec<String>,
+    texture_names: Vec<String>,
+    user_text: Vec<String>,
+    material_pass_count: usize,
+    texture_stage_count: usize,
+    texture_ids: Vec<u32>,
+    stage_texcoord_count: usize,
+}
+
+#[derive(Serialize)]
+struct AptDataImportJson {
+    movie: String,
+    name: String,
+    character: u32,
+}
+
+#[derive(Serialize)]
+struct AptDataJson {
+    kind: &'static str,
+    tag: String,
+    imports: Vec<AptDataImportJson>,
+}
+
+#[derive(Serialize)]
+struct AptBinJson {
+    kind: &'static str,
+    prefix_length: usize,
+    type_id: String,
+    strings: Vec<String>,
+    main_character: Option<u32>,
+    constant_count: Option<u32>,
+    constant_table: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ImpExtractJson {
+    kind: &'static str,
+    group: usize,
+    entry: usize,
+    offset: usize,
+    length: usize,
+    output: String,
+}
+
+#[derive(Serialize)]
+struct ImpJson {
+    kind: &'static str,
+    hash: u32,
+    groups: Vec<Vec<u32>>,
+}
+
+#[derive(Serialize)]
+struct EntryJson<'a> {
+    name: &'a str,
+    offset: u32,
+    size: u32,
+}
+
+#[derive(Serialize)]
+struct EntriesJson<'a> {
+    kind: &'static str,
+    count: usize,
+    entries: Vec<EntryJson<'a>>,
+}
+
+fn entries_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut limit = 200usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                limit = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Big(archive) = resource else {
+        return fail("entries requires a BIG archive");
+    };
+    let entries = archive
+        .entries
+        .iter()
+        .take(limit)
+        .map(|entry| EntryJson {
+            name: entry.name,
+            offset: entry.offset,
+            size: entry.size,
+        })
+        .collect();
+    let json = EntriesJson {
+        kind: "big",
+        count: archive.entries.len(),
+        entries,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn chunks_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut limit = 200usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                limit = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::W3d(file) = resource else {
+        return fail("chunks requires a W3D container");
+    };
+    let chunks = file
+        .chunks
+        .iter()
+        .take(limit)
+        .map(|chunk| ChunkJson {
+            type_id: chunk.type_id,
+            name: kres::w3d::chunk_name(chunk.type_id),
+            depth: chunk.depth,
+            offset: chunk.offset,
+            size: chunk.size,
+            has_subchunks: chunk.has_subchunks,
+        })
+        .collect();
+    let json = ChunksJson {
+        kind: "w3d",
+        count: file.chunks.len(),
+        chunks,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn mesh_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::W3d(file) = resource else {
+        return fail("mesh requires a W3D container");
+    };
+    let Some(header) = file.mesh_header() else {
+        return fail("W3D mesh_header3 not found or malformed");
+    };
+    let vertices = file.vertices();
+    let normals = file.normals();
+    let triangles = file.triangles();
+    let json = MeshJson {
+        version: header.version,
+        attributes: header.attributes,
+        mesh_name: header.mesh_name,
+        container_name: header.container_name,
+        num_tris: header.num_tris,
+        num_vertices: header.num_vertices,
+        num_materials: header.num_materials,
+        num_damage_stages: header.num_damage_stages,
+        sort_level: header.sort_level,
+        prelit_version: header.prelit_version,
+        future_counts: header.future_counts,
+        vertex_channels: header.vertex_channels,
+        face_channels: header.face_channels,
+        min: vec![header.min.x, header.min.y, header.min.z],
+        max: vec![header.max.x, header.max.y, header.max.z],
+        sphere_center: vec![
+            header.sphere_center.x,
+            header.sphere_center.y,
+            header.sphere_center.z,
+        ],
+        sphere_radius: header.sphere_radius,
+        vertex_count: vertices.len(),
+        normal_count: normals.len(),
+        triangle_count: triangles.len(),
+        material_info: file.material_info().map(|values| values.to_vec()),
+        vertex_material_names: file.vertex_material_names(),
+        texture_names: file.texture_names(),
+        user_text: file.user_text(),
+        material_pass_count: file.material_pass_count(),
+        texture_stage_count: file.texture_stage_count(),
+        texture_ids: file.texture_ids(),
+        stage_texcoord_count: file.stage_texcoord_count(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn apt_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AptConst(file) = resource else {
+        return fail("apt requires an APT constant file");
+    };
+    let entries = file
+        .entries
+        .iter()
+        .map(|entry| AptConstantJson {
+            type_id: entry.type_id,
+            type_name: entry.type_name(),
+            value: match &entry.value {
+                kres::apt::AptValue::None => serde_json::Value::Null,
+                kres::apt::AptValue::String(value) => serde_json::Value::String(value.clone()),
+                kres::apt::AptValue::Register(value)
+                | kres::apt::AptValue::Lookup(value)
+                | kres::apt::AptValue::Property(value) => serde_json::json!(value),
+                kres::apt::AptValue::Boolean(value) => serde_json::json!(value),
+                kres::apt::AptValue::Float(value) => serde_json::json!(value),
+                kres::apt::AptValue::Integer(value) => serde_json::json!(value),
+            },
+        })
+        .collect();
+    let json = AptJson {
+        kind: "apt-const",
+        apt_data_entry_offset: file.apt_data_entry_offset,
+        count: file.entries.len(),
+        entries,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn csf_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut limit = 200usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                limit = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Csf(file) = resource else {
+        return fail("csf requires a CSF string table");
+    };
+    let json = CsfJson {
+        kind: "csf",
+        version: file.version,
+        label_count: file.label_count,
+        string_count: file.string_count,
+        language: file.language,
+        labels: file
+            .labels
+            .iter()
+            .take(limit)
+            .map(|label| CsfLabelJson {
+                name: label.name.clone(),
+                values: label
+                    .strings
+                    .iter()
+                    .map(|value| value.value.clone())
+                    .collect(),
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn geometry_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AptGeometry(geometry) = resource else {
+        return fail("geometry requires an APT .ru text file");
+    };
+    let json = GeometryJson {
+        kind: "apt-geometry",
+        styles: geometry
+            .styles
+            .iter()
+            .map(|style| GeometryStyleJson {
+                kind: style.kind.clone(),
+                color: style.color.to_vec(),
+            })
+            .collect(),
+        triangle_count: geometry.triangles.len(),
+        line_count: geometry.lines,
+        bounds: geometry.bounds().map(|value| value.to_vec()),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn vp6_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Vp6(info) = resource else {
+        return fail("vp6 requires a VP6 movie");
+    };
+    let json = Vp6Json {
+        kind: "vp6",
+        header_size: info.header_size,
+        codec: info.codec,
+        width: info.width,
+        height: info.height,
+        frame_count: info.frame_count,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn manifest_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AssetManifest(info) = resource else {
+        return fail("manifest requires an asset manifest header");
+    };
+    let json = AssetManifestJson {
+        kind: "asset-manifest",
+        big_endian: info.big_endian,
+        linked: info.linked,
+        version: info.version,
+        stream_checksum: info.stream_checksum,
+        all_types_hash: info.all_types_hash,
+        asset_count: info.asset_count,
+        total_instance_data_size: info.total_instance_data_size,
+        max_instance_chunk_size: info.max_instance_chunk_size,
+        max_relocation_chunk_size: info.max_relocation_chunk_size,
+        max_imports_chunk_size: info.max_imports_chunk_size,
+        asset_reference_buffer_size: info.asset_reference_buffer_size,
+        referenced_manifest_name_buffer_size: info.referenced_manifest_name_buffer_size,
+        asset_name_buffer_size: info.asset_name_buffer_size,
+        source_file_name_buffer_size: info.source_file_name_buffer_size,
+        names: info.names,
+        entries: info
+            .entries
+            .into_iter()
+            .map(|entry| AssetManifestEntryJson {
+                type_id: entry.type_id,
+                instance_id: entry.instance_id,
+                type_hash: entry.type_hash,
+                instance_hash: entry.instance_hash,
+                instance_size: entry.instance_size,
+                relocation_size: entry.relocation_size,
+                imports_size: entry.imports_size,
+                name: entry.name,
+                source_name: entry.source_name,
+                references: entry
+                    .references
+                    .into_iter()
+                    .map(|reference| AssetReferenceJson {
+                        type_id: reference.type_id,
+                        instance_id: reference.instance_id,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn parse_asset_options(
+    args: &[String],
+) -> Result<(PathBuf, Option<ResourceKind>, Option<PathBuf>), ExitCode> {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return Err(usage());
+    };
+    let mut kind = None;
+    let mut hash_map = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => kind = kind_arg(args, &mut index)?,
+            "--hash-map" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(usage());
+                };
+                hash_map = Some(PathBuf::from(value));
+                index += 1;
+            }
+            _ => return Err(usage()),
+        }
+        index += 1;
+    }
+    Ok((PathBuf::from(path), kind, hash_map))
+}
+
+fn read_hash_map(path: &Path) -> Result<HashMap<u32, String>, ExitCode> {
+    let text = fs::read_to_string(path).map_err(fail)?;
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let Some((hash, text)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Ok(hash) = hash.parse::<u32>() {
+            map.insert(hash, text.to_string());
+        }
+    }
+    Ok(map)
+}
+
+fn parse_string_list(bytes: &[u8], table_offset: usize, raw: u32) -> Option<serde_json::Value> {
+    let mut cursor = table_offset.checked_add(raw as usize)?;
+    let mut strings = Vec::new();
+    for _ in 0..64 {
+        let Some(record) = bytes.get(cursor..cursor.checked_add(12)?) else {
+            break;
+        };
+        let name = u32::from_le_bytes(record[0..4].try_into().ok()?);
+        let kind = u32::from_le_bytes(record[4..8].try_into().ok()?);
+        let value = u32::from_le_bytes(record[8..12].try_into().ok()?);
+        if name == 0x6c82_7073 && kind == 0x5d44_8fd8 {
+            cursor += 12;
+            continue;
+        }
+        if name != 0xb151_a0eb || kind != 0 {
+            break;
+        }
+        let pointer = value as usize;
+        let Some(pointer_bytes) = bytes.get(pointer..pointer.checked_add(4)?) else {
+            break;
+        };
+        let string_offset = u32::from_le_bytes(pointer_bytes.try_into().ok()?) as usize;
+        if string_offset >= bytes.len() {
+            break;
+        }
+        if bytes
+            .get(string_offset..string_offset.checked_add(4)?)
+            .and_then(|raw| raw.try_into().ok())
+            .is_some_and(|raw| u32::from_le_bytes(raw) == 0x0001_0100)
+        {
+            let mut text_cursor = string_offset + 28;
+            while text_cursor < bytes.len() {
+                let Some(end) = bytes[text_cursor..].iter().position(|byte| *byte == 0) else {
+                    break;
+                };
+                let end = text_cursor + end;
+                let text = &bytes[text_cursor..end];
+                if text.is_empty() {
+                    text_cursor = end + 1;
+                    continue;
+                }
+                if !text
+                    .iter()
+                    .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+                {
+                    break;
+                }
+                strings.push(String::from_utf8_lossy(text).to_string());
+                text_cursor = end + 1;
+            }
+            if !strings.is_empty() {
+                return Some(serde_json::json!(strings));
+            }
+        }
+        let Some(end) = bytes[string_offset..].iter().position(|byte| *byte == 0) else {
+            break;
+        };
+        let end = end + string_offset;
+        let text = &bytes[string_offset..end];
+        if text.is_empty()
+            || !text
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        {
+            break;
+        }
+        strings.push(String::from_utf8_lossy(text).to_string());
+        cursor += 12;
+    }
+    if strings.is_empty() {
+        let mut cursor = table_offset;
+        while let Some(raw) = bytes.get(cursor..cursor.checked_add(4)?) {
+            let Ok(raw) = raw.try_into() else {
+                break;
+            };
+            if u32::from_le_bytes(raw) == 0x0001_0100 {
+                let mut text_cursor = cursor + 28;
+                while text_cursor < bytes.len() {
+                    let Some(end) = bytes[text_cursor..].iter().position(|byte| *byte == 0) else {
+                        break;
+                    };
+                    let end = text_cursor + end;
+                    let text = &bytes[text_cursor..end];
+                    if text.is_empty() {
+                        text_cursor = end + 1;
+                        continue;
+                    }
+                    if !text
+                        .iter()
+                        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+                    {
+                        break;
+                    }
+                    strings.push(String::from_utf8_lossy(text).to_string());
+                    text_cursor = end + 1;
+                }
+                if !strings.is_empty() {
+                    return Some(serde_json::json!(strings));
+                }
+            }
+            cursor += 1;
+        }
+    }
+    (!strings.is_empty()).then(|| serde_json::json!(strings))
+}
+
+fn asset_property_value(
+    bytes: &[u8],
+    table_offset: usize,
+    property_type: Option<&str>,
+    raw: u32,
+) -> Option<serde_json::Value> {
+    let value_at = |size: usize| -> Option<&[u8]> {
+        let start = table_offset.checked_add(raw as usize)?;
+        bytes.get(start..start.checked_add(size)?)
+    };
+    match property_type {
+        Some("float_t") => {
+            let value = f32::from_le_bytes(value_at(4)?.try_into().ok()?);
+            (value.is_finite()).then(|| serde_json::json!(value))
+        }
+        Some(
+            "size_t" | "uint32_t" | "KindOfBitFlags" | "RadarPriorityType" | "EditorSortingType",
+        ) => {
+            let value = u32::from_le_bytes(value_at(4)?.try_into().ok()?);
+            Some(serde_json::json!(value))
+        }
+        Some("Vector2" | "vector2" | "VECTOR2") => {
+            let raw = value_at(8)?;
+            let x = f32::from_le_bytes(raw[0..4].try_into().ok()?);
+            let y = f32::from_le_bytes(raw[4..8].try_into().ok()?);
+            (x.is_finite() && y.is_finite()).then(|| serde_json::json!([x, y]))
+        }
+        Some("Vector3" | "vector3" | "Vector" | "vector") => {
+            let raw = value_at(12)?;
+            let x = f32::from_le_bytes(raw[0..4].try_into().ok()?);
+            let y = f32::from_le_bytes(raw[4..8].try_into().ok()?);
+            let z = f32::from_le_bytes(raw[8..12].try_into().ok()?);
+            (x.is_finite() && y.is_finite() && z.is_finite()).then(|| serde_json::json!([x, y, z]))
+        }
+        Some("bool") => Some(serde_json::json!(value_at(1)?[0] != 0)),
+        Some("StringList") => parse_string_list(bytes, table_offset, raw),
+        Some(kind)
+            if kind.ends_with("WeakRef") || kind.ends_with("Ref") || kind.ends_with("Nugget") =>
+        {
+            let raw = value_at(8)?;
+            let type_id = u32::from_le_bytes(raw[0..4].try_into().ok()?);
+            let instance_id = u32::from_le_bytes(raw[4..8].try_into().ok()?);
+            if type_id == 0 && instance_id == 0 {
+                Some(serde_json::Value::Null)
+            } else {
+                Some(serde_json::json!({ "type_id": type_id, "instance_id": instance_id }))
+            }
+        }
+        _ => Some(serde_json::json!(raw)),
+    }
+}
+
+fn asset_command(args: &[String]) -> ExitCode {
+    let (path, kind, hash_map_path) = match parse_asset_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let hash_map = match hash_map_path {
+        Some(path) => match read_hash_map(&path) {
+            Ok(map) => Some(map),
+            Err(code) => return code,
+        },
+        None => None,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::Asset(info) = resource else {
+        return fail("asset requires an asset header");
+    };
+    let json = AssetJson {
+        kind: "asset",
+        id: info
+            .id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(""),
+        version: info.version,
+        type_hash: info.type_hash,
+        instance_hash: info.instance_hash,
+        data_size: info.data_size,
+        property_count: info.property_count,
+        unknown_28: info.unknown_28,
+        type_name: info.type_name,
+        data_path: info.data_path,
+        property_table_offset: info.property_table_offset,
+        properties: info
+            .properties
+            .iter()
+            .map(|property| {
+                let property_type = hash_map
+                    .as_ref()
+                    .and_then(|map| map.get(&property.type_hash).cloned());
+                let value = asset_property_value(
+                    &bytes,
+                    info.property_table_offset,
+                    property_type.as_deref(),
+                    property.value_or_offset,
+                );
+                AssetPropertyJson {
+                    name_hash: property.name_hash,
+                    type_hash: property.type_hash,
+                    value_or_offset: property.value_or_offset,
+                    name: hash_map
+                        .as_ref()
+                        .and_then(|map| map.get(&property.name_hash).cloned()),
+                    property_type,
+                    value,
+                }
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn relocation_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AssetRelocation(info) = resource else {
+        return fail("relocation requires a relocation table");
+    };
+    let json = RelocationJson {
+        kind: "asset-relocation",
+        checksum: info.checksum,
+        entries: info
+            .entries
+            .iter()
+            .map(|entry| RelocationEntryJson {
+                kind: entry.kind,
+                offset: entry.offset,
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn apt_movie_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut entry_offset = 16usize;
+    let mut const_path: Option<PathBuf> = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--entry-offset" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                entry_offset = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return usage(),
+                };
+                index += 1;
+            }
+            "--const" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                const_path = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "apt-movie" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    if let Some(path) = const_path {
+        let const_bytes = match read_file(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => return fail(error),
+        };
+        match parse_apt_const(&const_bytes) {
+            Some((main_character, _, _)) => entry_offset = main_character as usize + 16,
+            None => return fail("APT constant file is invalid"),
+        }
+    }
+    let info = match kres::apt_movie::parse(&bytes, entry_offset) {
+        Ok(info) => info,
+        Err(error) => return fail_kind(&error),
+    };
+    let json = AptMovieJson {
+        kind: "apt-movie",
+        entry_offset: info.entry_offset,
+        frame_count: info.frame_count,
+        character_count: info.character_count,
+        screen_width: info.screen_width,
+        screen_height: info.screen_height,
+        milliseconds_per_frame: info.milliseconds_per_frame,
+        import_count: info.import_count,
+        export_count: info.export_count,
+        characters: info
+            .characters
+            .iter()
+            .map(|character| AptCharacterJson {
+                offset: character.offset,
+                type_id: character.type_id,
+                type_name: character.type_name,
+                bounds: character.bounds.map(|values| values.to_vec()),
+                geometry: character.geometry,
+            })
+            .collect(),
+        imports: info
+            .imports
+            .iter()
+            .map(|import| AptImportJson {
+                movie: import.movie.clone(),
+                name: import.name.clone(),
+                character: import.character,
+                pointer: import.pointer,
+            })
+            .collect(),
+        character_names: info
+            .imports
+            .iter()
+            .filter(|import| import.character > 0 && !import.name.is_empty())
+            .map(|import| (import.character.to_string(), import.name.clone()))
+            .collect(),
+        exports: info
+            .exports
+            .iter()
+            .map(|export| AptExportJson {
+                name: export.name.clone(),
+                character: export.character,
+            })
+            .collect(),
+        texture_ids: info.texture_ids.clone(),
+        animation_file: info.animation_file,
+        animation_version: info.animation_version,
+        animation_size: info.animation_size,
+        animation_entries: info
+            .animation_entries
+            .iter()
+            .map(|entry| AptAnimationEntryJson {
+                offset: entry.offset,
+                count: entry.count,
+            })
+            .collect(),
+        frames: info
+            .frames
+            .iter()
+            .map(|frame| AptFrameJson {
+                index: frame.index,
+                controls: frame
+                    .controls
+                    .iter()
+                    .map(|control| AptFrameControlJson {
+                        control_type: control.control_type,
+                        offset: control.offset,
+                        end: control.end,
+                        placement: control.placement.map(|placement| AptPlacementJson {
+                            flags: placement.flags,
+                            depth: placement.depth,
+                            character: placement.character,
+                            matrix: placement.matrix,
+                            colour: placement.colour,
+                            colour_add: placement.colour_add,
+                        }),
+                        frame_label: control.frame_label.as_ref().map(|label| AptFrameLabelJson {
+                            name: label.name.clone(),
+                            frame: label.frame,
+                        }),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        imported_character_count: info.imported_character_count,
+        anonymous_character_count: info.anonymous_character_count,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn apt_image_map_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let Resource::AptImageMap(map) = resource else {
+        return fail("apt-image-map requires an APT image map");
+    };
+    let json = AptImageMapJson {
+        kind: "apt-image-map",
+        assignments: map
+            .assignments
+            .iter()
+            .map(|assignment| AptImageAssignmentJson {
+                image_id: assignment.image_id,
+                texture_id: assignment.texture_id,
+                rectangle: assignment.rectangle.map(|values| values.to_vec()),
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn imp_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "imp" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let info = match kres::imp::parse(&bytes) {
+        Ok(info) => info,
+        Err(error) => return fail_kind(&error),
+    };
+    let json = ImpJson {
+        kind: "imp",
+        hash: info.hash,
+        groups: info.groups,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn imp_extract_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut bin: Option<PathBuf> = None;
+    let mut group: Option<usize> = None;
+    let mut entry: Option<usize> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bin" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                bin = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--group" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                group = value.parse::<usize>().ok();
+                index += 1;
+            }
+            "--entry" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                entry = value.parse::<usize>().ok();
+                index += 1;
+            }
+            "--output" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                output = Some(PathBuf::from(value));
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let (Some(bin), Some(group), Some(entry), Some(output)) = (bin, group, entry, output) else {
+        return usage();
+    };
+    if output.exists() {
+        return fail("refusing to overwrite existing output");
+    }
+    let imp_bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let imp = match kres::imp::parse(&imp_bytes) {
+        Ok(imp) => imp,
+        Err(error) => return fail_kind(&error),
+    };
+    let Some(offsets) = imp.groups.get(group) else {
+        return fail("IMP group not found");
+    };
+    let Some(start) = offsets.get(entry).copied() else {
+        return fail("IMP entry not found");
+    };
+    let end = offsets.get(entry + 1).copied().map(|value| value as usize);
+    let payload = match read_file(&bin) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let start = start as usize;
+    let end = end.unwrap_or(payload.len());
+    if start >= end || end > payload.len() {
+        return fail("IMP payload range is invalid");
+    }
+    let body = &payload[start..end];
+    if let Some(parent) = output.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            return fail(error);
+        }
+    }
+    if let Err(error) = fs::write(&output, body) {
+        return fail(error);
+    }
+    let json = ImpExtractJson {
+        kind: "imp-extract",
+        group,
+        entry,
+        offset: start,
+        length: body.len(),
+        output: output.display().to_string(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn parse_apt_const(bytes: &[u8]) -> Option<(u32, u32, u32)> {
+    let magic = b"Apt constant file\x1a\x00\x00";
+    let offset = bytes
+        .windows(magic.len())
+        .position(|window| window == magic)?;
+    let base = offset + magic.len();
+    let u32_at = |at: usize| {
+        bytes
+            .get(at..at.checked_add(4)?)
+            .and_then(|raw| raw.try_into().ok())
+            .map(u32::from_le_bytes)
+    };
+    Some((u32_at(base)?, u32_at(base + 4)?, u32_at(base + 8)?))
+}
+
+fn apt_data_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "apt-data" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let info = match kres::apt_data::parse(&bytes) {
+        Ok(info) => info,
+        Err(error) => return fail_kind(&error),
+    };
+    let json = AptDataJson {
+        kind: "apt-data",
+        tag: info.tag,
+        imports: info
+            .imports
+            .iter()
+            .map(|import| AptDataImportJson {
+                movie: import.movie.clone(),
+                name: import.name.clone(),
+                character: import.character,
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn apt_bin_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut const_path: Option<PathBuf> = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--const" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                const_path = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "apt-bin" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let info = match kres::apt_bin::parse(&bytes) {
+        Ok(info) => info,
+        Err(error) => return fail_kind(&error),
+    };
+    let const_fields = match const_path {
+        Some(path) => {
+            let bytes = match read_file(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => return fail(error),
+            };
+            match parse_apt_const(&bytes) {
+                Some(fields) => Some(fields),
+                None => return fail("APT constant file is invalid"),
+            }
+        }
+        None => None,
+    };
+    let json = AptBinJson {
+        kind: "apt-bin",
+        prefix_length: info.prefix_length,
+        type_id: info.type_id,
+        strings: info.strings,
+        main_character: const_fields.map(|fields| fields.0),
+        constant_count: const_fields.map(|fields| fields.1),
+        constant_table: const_fields.map(|fields| fields.2),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn usage() -> ExitCode {
+    eprintln!(
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource strings <path> [--min-len <count>] [--limit <count>]\n  kotama resource imp <path> [--kind imp]\n  kotama resource imp-extract <path> --bin <payload> --group <n> --entry <n> --output <path>\n  kotama resource apt-bin <path> [--kind apt-bin] [--const <path>]
+  kotama resource apt-data <path> [--kind apt-data]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+    );
+    ExitCode::from(2)
+}
+
+fn fail(error: impl std::fmt::Display) -> ExitCode {
+    eprintln!("kotama: resource: {error}");
+    ExitCode::FAILURE
+}
+
+fn fail_kind(error: &ResourceError) -> ExitCode {
+    match error {
+        ResourceError::FeatureDisabled { .. } => {
+            eprintln!("kotama: resource: {error}");
+            ExitCode::from(3)
+        }
+        _ => fail(error),
+    }
+}
+
+fn extension(path: &Path) -> Option<&str> {
+    path.extension().and_then(|value| value.to_str())
+}
+
+fn kind_arg(args: &[String], index: &mut usize) -> Result<Option<ResourceKind>, ExitCode> {
+    let Some(raw) = args.get(*index + 1) else {
+        return Err(usage());
+    };
+    let Some(kind) = ResourceKind::parse(raw) else {
+        return Err(usage());
+    };
+    *index += 1;
+    Ok(Some(kind))
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))
+}
+
+fn parse_requested<'a>(
+    bytes: &'a [u8],
+    path: &Path,
+    explicit: Option<ResourceKind>,
+) -> Result<Resource<'a>, ResourceError> {
+    match explicit {
+        Some(kind) => parse_as(bytes, kind),
+        None => parse(bytes, extension(path)),
+    }
+}
+
+fn info_for(resource: &Resource<'_>) -> InfoJson {
+    match resource {
+        Resource::Big(archive) => InfoJson {
+            kind: "big",
+            compression: None,
+            version: None,
+            declared_length: Some(archive.archive_size),
+            stored_length: Some(archive.data.len()),
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: Some(archive.version.short()),
+            entries: Some(archive.entries.len()),
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::W3d(file) => InfoJson {
+            kind: "w3d",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: Some(file.data.len()),
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: Some(file.chunks.len()),
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptConst(file) => InfoJson {
+            kind: "apt-const",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: Some(file.apt_data_entry_offset),
+            constants: Some(file.entries.len()),
+        },
+        Resource::Csf(file) => InfoJson {
+            kind: "csf",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: Some(file.labels.len()),
+            chunks: None,
+            apt_entry_offset: None,
+            constants: Some(file.string_count as usize),
+        },
+        Resource::AptGeometry(_) => InfoJson {
+            kind: "apt-geometry",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::Vp6(_) => InfoJson {
+            kind: "vp6",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AssetManifest(_) => InfoJson {
+            kind: "asset-manifest",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::Asset(_) => InfoJson {
+            kind: "asset",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AssetRelocation(_) => InfoJson {
+            kind: "asset-relocation",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptMovie(_) => InfoJson {
+            kind: "apt-movie",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptImageMap(_) => InfoJson {
+            kind: "apt-image-map",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptData(_) => InfoJson {
+            kind: "apt-data",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptBin(_) => InfoJson {
+            kind: "apt-bin",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::Imp(_) => InfoJson {
+            kind: "imp",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+    }
+}
+
+fn parse_info_options(args: &[String]) -> Result<(PathBuf, Option<ResourceKind>), ExitCode> {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return Err(usage());
+    };
+    let mut kind = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => kind = kind_arg(args, &mut index)?,
+            _ => return Err(usage()),
+        }
+        index += 1;
+    }
+    Ok((PathBuf::from(path), kind))
+}
+
+fn info_command(args: &[String]) -> ExitCode {
+    let (path, kind) = match parse_info_options(args) {
+        Ok(values) => values,
+        Err(code) => return code,
+    };
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    match serde_json::to_string_pretty(&info_for(&resource)) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn identify_command(args: &[String]) -> ExitCode {
+    if args.len() != 1 {
+        return usage();
+    }
+    let path = PathBuf::from(&args[0]);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let Some(found) = identify(&bytes, extension(&path)) else {
+        return fail("unknown resource format");
+    };
+    let json = IdentifyJson {
+        kind: found.kind.short(),
+        basis: match found.basis {
+            DetectionBasis::Magic => "magic",
+            DetectionBasis::Extension => "extension",
+        },
+        enabled: found.enabled,
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+/// Dispatch an engine-format resource subcommand.
+pub fn run(args: &[String]) -> ExitCode {
+    let Some(command) = args.first().map(String::as_str) else {
+        return usage();
+    };
+    match command {
+        "identify" => identify_command(&args[1..]),
+        "imp" => imp_command(&args[1..]),
+        "imp-extract" => imp_extract_command(&args[1..]),
+        "apt-bin" => apt_bin_command(&args[1..]),
+        "apt-data" => apt_data_command(&args[1..]),
+        "info" => info_command(&args[1..]),
+        "entries" => entries_command(&args[1..]),
+        "chunks" => chunks_command(&args[1..]),
+        "mesh" => mesh_command(&args[1..]),
+        "apt" => apt_command(&args[1..]),
+        "csf" => csf_command(&args[1..]),
+        "vp6" => vp6_command(&args[1..]),
+        "manifest" => manifest_command(&args[1..]),
+        "asset" => asset_command(&args[1..]),
+        "relocation" => relocation_command(&args[1..]),
+        "apt-movie" => apt_movie_command(&args[1..]),
+        "apt-image-map" => apt_image_map_command(&args[1..]),
+        "geometry" => geometry_command(&args[1..]),
+        "extract" => extract_command(&args[1..]),
+        _ => usage(),
+    }
+}
+
+fn extract_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut kind = None;
+    let mut output: Option<PathBuf> = None;
+    let mut entry = None;
+    let mut max_output = DEFAULT_MAX_OUTPUT;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                kind = match kind_arg(args, &mut index) {
+                    Ok(kind) => kind,
+                    Err(code) => return code,
+                }
+            }
+            "--output" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                output = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--entry" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                entry = Some(value.clone());
+                index += 1;
+            }
+            "--max-output" => {
+                let Some(value) = args.get(index + 1) else {
+                    return usage();
+                };
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return usage();
+                };
+                max_output = parsed;
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let Some(output) = output else {
+        return usage();
+    };
+    if output.exists() {
+        return fail(format!("refusing to overwrite {}", output.display()));
+    }
+    let path = PathBuf::from(path);
+    let bytes = match read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let resource = match parse_requested(&bytes, &path, kind) {
+        Ok(resource) => resource,
+        Err(error) => return fail_kind(&error),
+    };
+    let payload = if let Some(entry) = entry {
+        let Resource::Big(archive) = &resource else {
+            return fail("--entry requires a BIG archive");
+        };
+        match archive.extract(&entry) {
+            Some(bytes) => bytes.to_vec(),
+            None => return fail(format!("BIG entry not found: {entry}")),
+        }
+    } else {
+        match resource.extract(max_output) {
+            Ok(Extracted::Bytes(bytes)) => bytes.into_owned(),
+            Ok(Extracted::Text(text)) => text.as_bytes().to_vec(),
+            Err(error) => return fail_kind(&error),
+        }
+    };
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output)
+    {
+        Ok(file) => file,
+        Err(error) => return fail(format!("create {}: {error}", output.display())),
+    };
+    use std::io::Write;
+    if let Err(error) = file.write_all(&payload) {
+        return fail(format!("write {}: {error}", output.display()));
+    }
+    let json = ExtractJson {
+        kind: resource.kind().short(),
+        output: output.display().to_string(),
+        bytes_written: payload.len(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn main() -> ExitCode {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Accept the same leading "resource" word the published CLI uses, so the
+    // invocation shape is identical and tests can be shared verbatim.
+    if args.first().is_some_and(|first| first == "resource") {
+        args.remove(0);
+    }
+    run(&args)
+}

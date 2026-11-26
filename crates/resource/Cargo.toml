@@ -1,6 +1,6 @@
 [package]
 name = "kotama-resource"
-description = "Deterministic identification, parsing and extraction for non-image resources."
+description = "Deterministic identification, parsing and extraction for vendor-neutral container and image formats."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,24 +14,8 @@ default = []
 swf = ["dep:flate2"]
 vbs = []
 dos-com = []
-big = []
-w3d = []
-apt-const = []
-csf = []
 dds = []
 tga = []
-vp6 = []
-asset-manifest = []
-asset = []
-asset-relocation = []
-apt-movie = []
-apt-image-map = []
-imp = []
-apt-bin = []
-apt-data = []
-apt-doaction = []
-apt-geometry = []
-fesl = []
 
 [dependencies]
 flate2 = { version = "^1", optional = true, default-features = false, features = ["rust_backend"] }
