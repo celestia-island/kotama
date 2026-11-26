@@ -390,6 +390,20 @@ struct PakRepackJson {
 }
 
 #[derive(Serialize)]
+struct AptDataImportJson {
+    movie: String,
+    name: String,
+    character: u32,
+}
+
+#[derive(Serialize)]
+struct AptDataJson {
+    kind: &'static str,
+    tag: String,
+    imports: Vec<AptDataImportJson>,
+}
+
+#[derive(Serialize)]
 struct AptBinJson {
     kind: &'static str,
     prefix_length: usize,
@@ -439,7 +453,8 @@ struct ExtractJson {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource strings <path> [--min-len <count>] [--limit <count>]\n  kotama resource imp <path> [--kind imp]\n  kotama resource imp-extract <path> --bin <payload> --group <n> --entry <n> --output <path>\n  kotama resource apt-bin <path> [--kind apt-bin] [--const <path>]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
+        "usage:\n  kotama resource identify <path>\n  kotama resource info <path> [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf]\n  kotama resource entries <path> [--kind big] [--limit <count>]\n  kotama resource chunks <path> [--kind w3d] [--limit <count>]\n  kotama resource mesh <path> [--kind w3d]\n  kotama resource apt <path> [--kind apt-const]\n  kotama resource geometry <path> [--kind apt-geometry]\n  kotama resource csf <path> [--kind csf] [--limit <count>]\n  kotama resource dds <path> [--kind dds]\n  kotama resource tga <path> [--kind tga]\n  kotama resource vp6 <path> [--kind vp6]\n  kotama resource manifest <path> [--kind asset-manifest]\n  kotama resource asset <path> [--kind asset] [--hash-map <tsv>]\n  kotama resource relocation <path> [--kind asset-relocation]\n  kotama resource apt-movie <path> [--entry-offset <N>] [--kind apt-movie]\n  kotama resource apt-image-map <path> [--kind apt-image-map]\n  kotama resource pvz-reanim <path> [--kind pvz-reanim]\n  kotama resource pak <path> [--kind pak] [--limit <count>] [--filter <text>]\n  kotama resource pak-extract <path> --entry <name> --output <path>\n  kotama resource pak-extract-all <path> --output-dir <dir> [--limit <count>] [--filter <text>]\n  kotama resource pak-repack <path> --input-dir <dir> --output <path>\n  kotama resource strings <path> [--min-len <count>] [--limit <count>]\n  kotama resource imp <path> [--kind imp]\n  kotama resource imp-extract <path> --bin <payload> --group <n> --entry <n> --output <path>\n  kotama resource apt-bin <path> [--kind apt-bin] [--const <path>]
+  kotama resource apt-data <path> [--kind apt-data]\n  kotama resource extract <path> --output <path> [--entry <name>] [--kind swf|vbs|dos-com|big|w3d|apt-const|apt-geometry|csf] [--max-output <bytes>]"
     );
     ExitCode::from(2)
 }
@@ -484,6 +499,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "imp" => imp_command(&args[1..]),
         "imp-extract" => imp_extract_command(&args[1..]),
         "apt-bin" => apt_bin_command(&args[1..]),
+        "apt-data" => apt_data_command(&args[1..]),
         "info" => info_command(&args[1..]),
         "entries" => entries_command(&args[1..]),
         "chunks" => chunks_command(&args[1..]),
@@ -817,6 +833,22 @@ fn info_for(resource: &Resource<'_>) -> InfoJson {
         },
         Resource::PvzReanim(_) => InfoJson {
             kind: "pvz-reanim",
+            compression: None,
+            version: None,
+            declared_length: None,
+            stored_length: None,
+            encoding: None,
+            size: None,
+            load_address: None,
+            entry: None,
+            archive_version: None,
+            entries: None,
+            chunks: None,
+            apt_entry_offset: None,
+            constants: None,
+        },
+        Resource::AptData(_) => InfoJson {
+            kind: "apt-data",
             compression: None,
             version: None,
             declared_length: None,
@@ -2600,6 +2632,56 @@ fn parse_apt_const(bytes: &[u8]) -> Option<(u32, u32, u32)> {
             .map(u32::from_le_bytes)
     };
     Some((u32_at(base)?, u32_at(base + 4)?, u32_at(base + 8)?))
+}
+
+fn apt_data_command(args: &[String]) -> ExitCode {
+    let Some(path) = args.first().filter(|value| !value.starts_with('-')) else {
+        return usage();
+    };
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" => {
+                let Some(kind) = args.get(index + 1) else {
+                    return usage();
+                };
+                if kind != "apt-data" {
+                    return usage();
+                }
+                index += 1;
+            }
+            _ => return usage(),
+        }
+        index += 1;
+    }
+    let bytes = match read_file(&PathBuf::from(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => return fail(error),
+    };
+    let info = match kotama_resource::apt_data::parse(&bytes) {
+        Ok(info) => info,
+        Err(error) => return fail_kind(&error),
+    };
+    let json = AptDataJson {
+        kind: "apt-data",
+        tag: info.tag,
+        imports: info
+            .imports
+            .iter()
+            .map(|import| AptDataImportJson {
+                movie: import.movie.clone(),
+                name: import.name.clone(),
+                character: import.character,
+            })
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&json) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
 }
 
 fn apt_bin_command(args: &[String]) -> ExitCode {

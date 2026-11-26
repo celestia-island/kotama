@@ -1220,6 +1220,40 @@ fn imp_payload_is_extracted() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+#[cfg(feature = "resource-apt-data")]
+#[test]
+fn apt_data_imports_are_inspected() {
+    let root = temp_dir("apt-data");
+    let source = root.join("sample.bin");
+    let mut bytes = vec![0u8; 16];
+    bytes.extend_from_slice(b"Apt Data:74\x1a\x00\x00\x00\x00");
+    bytes.extend_from_slice(&0x30u32.to_le_bytes());
+    bytes.extend_from_slice(&0x40u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.resize(0x40, 0);
+    bytes.extend_from_slice(b"movie\x00");
+    bytes.resize(0x50, 0);
+    bytes.extend_from_slice(b"name\x00");
+    fs::write(&source, &bytes).unwrap();
+    let output = kotama()
+        .args(["resource", "apt-data"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let facts: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(facts["tag"], "Apt Data:74");
+    assert_eq!(facts["imports"][0]["movie"], "movie");
+    assert_eq!(facts["imports"][0]["name"], "name");
+    assert_eq!(facts["imports"][0]["character"], 1);
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[cfg(not(feature = "resource-vbs"))]
 #[test]
 fn disabled_vbs_feature_is_reported_with_exit_code_three() {

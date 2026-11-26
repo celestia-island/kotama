@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod apt;
 pub mod apt_bin;
+pub mod apt_data;
 pub mod apt_geometry;
 pub mod apt_image_map;
 pub mod apt_movie;
@@ -70,6 +71,8 @@ pub enum ResourceKind {
     Imp,
     /// RA3 .bin aggregate prefix.
     AptBin,
+    /// RA3 APT data import table.
+    AptData,
 }
 
 impl ResourceKind {
@@ -97,6 +100,7 @@ impl ResourceKind {
             Self::Pak => "pak",
             Self::Imp => "imp",
             Self::AptBin => "apt-bin",
+            Self::AptData => "apt-data",
         }
     }
 
@@ -124,6 +128,7 @@ impl ResourceKind {
             "pak" => Some(Self::Pak),
             "imp" => Some(Self::Imp),
             "apt-bin" => Some(Self::AptBin),
+            "apt-data" => Some(Self::AptData),
             _ => None,
         }
     }
@@ -152,6 +157,7 @@ impl ResourceKind {
             Self::Pak => "pak",
             Self::Imp => "imp",
             Self::AptBin => "apt-bin",
+            Self::AptData => "apt-data",
         }
     }
 
@@ -179,6 +185,7 @@ impl ResourceKind {
             Self::Pak => cfg!(feature = "pak"),
             Self::Imp => cfg!(feature = "imp"),
             Self::AptBin => cfg!(feature = "apt-bin"),
+            Self::AptData => cfg!(feature = "apt-data"),
         }
     }
 }
@@ -246,6 +253,8 @@ pub enum Resource<'a> {
     Imp(imp::ImpInfo),
     /// RA3 .bin aggregate prefix.
     AptBin(apt_bin::AptBinInfo),
+    /// RA3 APT data import table.
+    AptData(apt_data::AptDataInfo),
 }
 
 impl Resource<'_> {
@@ -273,6 +282,7 @@ impl Resource<'_> {
             Self::Pak(_) => ResourceKind::Pak,
             Self::Imp(_) => ResourceKind::Imp,
             Self::AptBin(_) => ResourceKind::AptBin,
+            Self::AptData(_) => ResourceKind::AptData,
         }
     }
 }
@@ -346,6 +356,9 @@ impl Resource<'_> {
             )),
             Self::AptBin(_) => Err(ResourceError::Unsupported(
                 "BIN aggregate payload is opaque".to_string(),
+            )),
+            Self::AptData(_) => Err(ResourceError::Unsupported(
+                "APT data payload is opaque".to_string(),
             )),
         }
     }
@@ -502,6 +515,13 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> Option<Identification>
             enabled: ResourceKind::Imp.enabled(),
         });
     }
+    if apt_data::has_marker(bytes) {
+        return Some(Identification {
+            kind: ResourceKind::AptData,
+            basis: DetectionBasis::Magic,
+            enabled: ResourceKind::AptData.enabled(),
+        });
+    }
     if extension_matches(extension, "bin") && apt_bin::has_marker(bytes) {
         return Some(Identification {
             kind: ResourceKind::AptBin,
@@ -597,6 +617,7 @@ pub fn parse_as<'a>(bytes: &'a [u8], kind: ResourceKind) -> Result<Resource<'a>,
         ResourceKind::Pak => pak::parse(bytes).map(Resource::Pak),
         ResourceKind::Imp => imp::parse(bytes).map(Resource::Imp),
         ResourceKind::AptBin => apt_bin::parse(bytes).map(Resource::AptBin),
+        ResourceKind::AptData => apt_data::parse(bytes).map(Resource::AptData),
     }
 }
 
