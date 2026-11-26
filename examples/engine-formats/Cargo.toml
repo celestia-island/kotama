@@ -1,0 +1,44 @@
+[package]
+name = "kotama-engine-formats"
+description = "EXAMPLE ONLY: parsers for engine- and studio-specific resource formats."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish = false
+
+[features]
+default = []
+big = []
+w3d = []
+apt-const = []
+csf = []
+apt-geometry = []
+vp6 = []
+asset-manifest = []
+asset = []
+asset-relocation = []
+apt-movie = []
+apt-image-map = []
+imp = []
+apt-bin = []
+apt-data = []
+apt-doaction = []
+fesl = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+flate2 = { version = "^1", default-features = false, features = ["rust_backend"] }
+
+[[bin]]
+name = "engine-formats-cli"
+path = "src/bin/engine-formats-cli.rs"
+required-features = ["big", "w3d", "apt-const", "apt-geometry", "csf", "vp6", "asset-manifest", "asset", "asset-relocation", "apt-movie", "apt-image-map", "imp", "apt-bin", "apt-data"]
+
+[lints]
+workspace = true

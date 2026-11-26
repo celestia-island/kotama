@@ -15,7 +15,7 @@ workspace = true
 [workspace]
 resolver = "2"
 exclude = ["ui"]
-members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay"]
+members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay", "examples/engine-formats"]
 
 [workspace.package]
 version = "0.1.0"
