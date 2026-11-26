@@ -183,6 +183,8 @@ struct AptPlacementJson {
     depth: u32,
     character: u32,
     matrix: [f32; 6],
+    colour: [u8; 4],
+    colour_add: [i8; 4],
 }
 
 #[derive(Serialize)]
@@ -1967,6 +1969,8 @@ fn apt_movie_command(args: &[String]) -> ExitCode {
                             depth: placement.depth,
                             character: placement.character,
                             matrix: placement.matrix,
+                            colour: placement.colour,
+                            colour_add: placement.colour_add,
                         }),
                     })
                     .collect(),
