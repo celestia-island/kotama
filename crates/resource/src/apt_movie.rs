@@ -324,45 +324,52 @@ pub fn parse(bytes: &[u8], entry_offset: usize) -> Result<AptMovieInfo, Resource
             })?,
         });
     }
+    // `aFrames` is an array of `AptFrame` records, 8 bytes each:
+    // `{ nControls, apControls }` where `apControls` points at an array of
+    // control offsets. Layout confirmed against the SDK `apt2xml` oracle.
     let mut frames = Vec::new();
     for index in 0..frame_count.min(4096) {
-        let slot = base
+        let frame_record = base
             .checked_add(frame_list)
-            .and_then(|offset| offset.checked_add(4 + index as usize * 4))
+            .and_then(|offset| offset.checked_add(index as usize * 8))
             .ok_or_else(|| ResourceError::Invalid("APT frame list is too large".to_string()))?;
-        let Some(frame_offset) = u32_at(bytes, slot) else {
+        let Some(control_count) = u32_at(bytes, frame_record) else {
             break;
         };
-        let frame_offset = frame_offset as usize;
-        if frame_offset == 0 || frame_offset >= bytes.len() {
+        let Some(control_array) = u32_at(bytes, frame_record + 4) else {
+            break;
+        };
+        let control_array = control_array as usize;
+        if control_array >= bytes.len() {
             frames.push(AptFrame {
                 index,
                 controls: Vec::new(),
             });
             continue;
         }
-        let Some(control_count) = u32_at(bytes, frame_offset) else {
-            break;
-        };
         let mut controls = Vec::new();
         for control_index in 0..control_count.min(4096) as usize {
-            let pair = frame_offset
-                .checked_add(4 + control_index * 8)
+            let slot = control_array
+                .checked_add(control_index * 4)
                 .ok_or_else(|| {
                     ResourceError::Invalid("APT frame controls are too large".to_string())
                 })?;
-            let Some(control_offset) = u32_at(bytes, pair) else {
-                break;
-            };
-            let Some(control_end) = u32_at(bytes, pair + 4) else {
+            let Some(control_offset) = u32_at(bytes, slot) else {
                 break;
             };
             let control_offset_usize = control_offset as usize;
-            if control_offset_usize >= bytes.len() || control_offset >= control_end {
+            if control_offset_usize >= bytes.len() {
                 continue;
             }
             let Some(control_type) = u32_at(bytes, control_offset_usize) else {
                 continue;
+            };
+            // Control payloads have no stored length; the next entry in the offset
+            // array (or the end of the file) bounds this one.
+            let control_end = if control_index + 1 < control_count as usize {
+                u32_at(bytes, slot + 4).unwrap_or(u32::try_from(bytes.len()).unwrap_or(u32::MAX))
+            } else {
+                u32::try_from(bytes.len()).unwrap_or(u32::MAX)
             };
             // PlaceObject2 is the only fixed-size payload decoded so far:
             // type, flags, depth, character, then the six matrix floats.
@@ -507,6 +514,53 @@ mod tests {
         assert_eq!(info.imports[0].movie, "movie");
         assert_eq!(info.imports[0].name, "name");
         assert_eq!(info.imports[0].character, 5);
+    }
+
+    #[test]
+    fn parses_frame_control_array() {
+        // Layout: AptFrame is {nControls, apControls}; apControls points at an
+        // array of control offsets. Regression guard for the earlier mistake of
+        // treating the frame as {count, (offset, end)*}.
+        // tag occupies [0,16), the movie header [16,72), so the frame record
+        // must sit at 72 and every pointer below is relative to the tag.
+        let mut bytes = b"Apt Data:74\x1a\x00\x00\x00\x00".to_vec();
+        bytes.extend_from_slice(&9u32.to_le_bytes()); // type: sprite
+        bytes.extend_from_slice(&CHARACTER_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // nFrames
+        bytes.extend_from_slice(&72u32.to_le_bytes()); // aFrames at tag+72
+        bytes.resize(72, 0);
+        // AptFrame { nControls = 2, apControls = 80 }
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&80u32.to_le_bytes());
+        bytes.resize(80, 0);
+        // control offset array: 88, 96
+        bytes.extend_from_slice(&88u32.to_le_bytes());
+        bytes.extend_from_slice(&96u32.to_le_bytes());
+        bytes.resize(88, 0);
+        // control 0: type 1 (DoAction)
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.resize(96, 0);
+        // control 1: type 3 (PlaceObject2), flags/depth/character/matrix/colour
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&38u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&23u32.to_le_bytes());
+        for value in [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0] {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        bytes.extend_from_slice(&[255, 255, 255, 255, 0, 0, 0, 0]);
+        let info = parse(&bytes, 16).unwrap();
+        assert_eq!(info.frames.len(), 1);
+        assert_eq!(info.frames[0].controls.len(), 2);
+        assert_eq!(info.frames[0].controls[0].control_type, 1);
+        assert!(info.frames[0].controls[0].placement.is_none());
+        let placement = info.frames[0].controls[1].placement.unwrap();
+        assert_eq!(placement.flags, 38);
+        assert_eq!(placement.depth, 1);
+        assert_eq!(placement.character, 23);
+        assert_eq!(placement.matrix, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(placement.colour, [255, 255, 255, 255]);
     }
 
     #[test]
