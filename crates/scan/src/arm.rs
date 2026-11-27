@@ -3,7 +3,7 @@
 //! ARM is the one architecture here whose instruction set switches per function:
 //! bit 0 of a function's address selects Thumb, and a clear bit selects A32. The
 //! entry point, every symbol value and every `blx` target carry that bit, so the
-//! mode is not a property of the binary but of each address. This module reads it
+//! mode is not a property of the binary but of each address. This view reads it
 //! off each seed and decodes each function in its own mode.
 //!
 //! ARM has no dedicated return instruction and no frame section in a typical
@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::ScanView;
 use kotama::{AddressSpace, Evidence, FunctionEntry};
-use kotama_image::LoadedModule;
 use kotama_lift_arm::{lift, Flow, Mode};
 
 use crate::{CallEdge, StringXref};
@@ -45,22 +45,22 @@ fn seed_symbol(
     }
 }
 
-/// Discover functions in a 32-bit ARM module.
+/// Discover functions in a 32-bit ARM view.
 ///
-/// Determinism: the same module yields the same entries in the same order.
+/// Determinism: the same view yields the same entries in the same order.
 #[must_use]
-pub fn discover_arm(module: &LoadedModule) -> Vec<FunctionEntry> {
+pub fn discover_arm(view: &ScanView, space: &dyn AddressSpace) -> Vec<FunctionEntry> {
     let mut table: BTreeMap<u64, Candidate> = BTreeMap::new();
-    for symbol in module.symbols.iter().chain(&module.dynamic_symbols) {
+    for symbol in view.symbols.iter().chain(view.dynamic_symbols) {
         seed_symbol(&mut table, symbol, Evidence::Symtab);
     }
-    for symbol in &module.debug_functions {
+    for symbol in view.debug_functions {
         seed_symbol(&mut table, symbol, Evidence::Dwarf);
     }
-    for symbol in &module.eh_frame_functions {
+    for symbol in view.eh_frame_functions {
         seed_symbol(&mut table, symbol, Evidence::EhFrame);
     }
-    if let Some(entry) = module.entry_rva {
+    if let Some(entry) = view.entry_rva {
         table
             .entry(entry & !1)
             .or_default()
@@ -70,8 +70,7 @@ pub fn discover_arm(module: &LoadedModule) -> Vec<FunctionEntry> {
 
     // Every direct call seeds its target. A `bl` carries the target plus the mode
     // bit, which is exactly what the callee needs to be decoded correctly.
-    let space = module.address_space();
-    for section in module.sections.iter().filter(|section| section.executable) {
+    for section in view.sections.iter().filter(|section| section.executable) {
         let Some(bytes) = space.read(section.rva, section.size as usize) else {
             continue;
         };
@@ -95,7 +94,7 @@ pub fn discover_arm(module: &LoadedModule) -> Vec<FunctionEntry> {
 
     // Keep only entries that land inside an executable section.
     let is_code = |rva: u64| {
-        module.sections.iter().any(|section| {
+        view.sections.iter().any(|section| {
             section.executable
                 && rva >= section.rva
                 && rva < section.rva.saturating_add(section.size)
@@ -109,7 +108,7 @@ pub fn discover_arm(module: &LoadedModule) -> Vec<FunctionEntry> {
             Some(size) => (size, false),
             None => {
                 let next = keys.get(index + 1).copied().unwrap_or(u64::MAX);
-                let section_end = module
+                let section_end = view
                     .sections
                     .iter()
                     .filter(|section| section.executable)
@@ -132,13 +131,16 @@ pub fn discover_arm(module: &LoadedModule) -> Vec<FunctionEntry> {
     out
 }
 
-/// Function-level call graph for a 32-bit ARM module.
+/// Function-level call graph for a 32-bit ARM view.
 ///
 /// Each function is decoded in the mode its address selects. Only direct `bl` and
 /// `blx <imm>` targets become edges; register `blx` has no static target.
 #[must_use]
-pub fn call_graph_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<CallEdge> {
-    let space = module.address_space();
+pub fn call_graph_arm(
+    _view: &ScanView,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<CallEdge> {
     let mut edges = BTreeSet::new();
     for function in functions {
         if function.size == 0 {
@@ -176,17 +178,20 @@ pub fn call_graph_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec
     edges.into_iter().collect()
 }
 
-/// String references for a 32-bit ARM module.
+/// String references for a 32-bit ARM view.
 ///
 /// ARM materialises a literal's address with `movw` + `movt`; the pairing lives in the
 /// architecture crate. Both modes are swept because the mode bit is lost on
 /// normalisation, and an address is kept only when it lands in a non-executable section
 /// and reads as a printable C string.
 #[must_use]
-pub fn string_xrefs_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
-    let space = module.address_space();
-    let image_base = module.image_base;
-    let data_sections: Vec<(u64, u64)> = module
+pub fn string_xrefs_arm(
+    view: &ScanView,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<StringXref> {
+    let image_base = view.image_base;
+    let data_sections: Vec<(u64, u64)> = view
         .sections
         .iter()
         .filter(|section| !section.executable && section.size > 0 && section.rva > 0)
@@ -216,7 +221,7 @@ pub fn string_xrefs_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> V
                 if !in_data(rva) {
                     continue;
                 }
-                if let Some(text) = crate::read_cstring(&space, rva) {
+                if let Some(text) = crate::read_cstring(space, rva) {
                     out.insert((function.rva, rva, text));
                 }
             }
@@ -234,12 +239,13 @@ pub fn string_xrefs_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kotama_image::LoadedModule;
 
     /// Build a minimal ELF32 for ARM with a `.text` blob and a symbol table.
     ///
     /// `LoadedModule` can only be built by parsing bytes, so the fixture is assembled
     /// here. Section order: null, `.text`, `.symtab`, `.strtab`, `.shstrtab`.
-    fn module(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
+    fn view(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
         const TEXT_RVA: u64 = 0x1000;
         let mut b: Vec<u8> = Vec::new();
         let p32 = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
@@ -374,7 +380,7 @@ mod tests {
 
     #[test]
     fn the_fixture_is_recognised_as_arm() {
-        let m = module(&[0xC0, 0x03, 0x5F, 0xD6], &[]);
+        let m = view(&[0xC0, 0x03, 0x5F, 0xD6], &[]);
         assert!(m.arch.is_arm32());
         assert_eq!(m.container, kotama_image::Container::Elf32);
     }
@@ -382,8 +388,8 @@ mod tests {
     #[test]
     fn a_thumb_symbol_address_loses_its_mode_bit() {
         // A Thumb symbol value carries bit 0; the entry RVA must not.
-        let m = module(&[0x70, 0x47], &[("f", 0x1001, 2)]);
-        let found = discover_arm(&m);
+        let m = view(&[0x70, 0x47], &[("f", 0x1001, 2)]);
+        let found = crate::discover(&m);
         assert_eq!(found[0].rva, 0x1000);
         assert_eq!(found[0].name.as_deref(), Some("f"));
     }
@@ -396,14 +402,14 @@ mod tests {
             0x02, 0x00, 0x00, 0xeb, 0xC0, 0x03, 0x5F, 0xD6, 0xC0, 0x03, 0x5F, 0xD6, 0xC0, 0x03,
             0x5F, 0xD6, 0xC0, 0x03, 0x5F, 0xD6,
         ];
-        let m = module(&code, &[("caller", 0x1000, 4)]);
-        let found = discover_arm(&m);
+        let m = view(&code, &[("caller", 0x1000, 4)]);
+        let found = crate::discover(&m);
         let callee = found
             .iter()
             .find(|f| f.rva == 0x1010)
             .expect("the bl target must be seeded");
         assert!(callee.evidence.contains(&Evidence::CallTarget));
-        let edges = call_graph_arm(&m, &found);
+        let edges = crate::call_graph(&m, &found);
         assert_eq!(edges.len(), 1);
         assert_eq!((edges[0].from, edges[0].to), (0x1000, 0x1010));
     }
@@ -414,8 +420,8 @@ mod tests {
         let code = [
             0x00, 0xf0, 0x02, 0xf8, 0x70, 0x47, 0x70, 0x47, 0x70, 0x47, 0x70, 0x47,
         ];
-        let m = module(&code, &[("caller", 0x1001, 4)]);
-        let found = discover_arm(&m);
+        let m = view(&code, &[("caller", 0x1001, 4)]);
+        let found = crate::discover(&m);
         assert!(
             found
                 .iter()
@@ -426,8 +432,8 @@ mod tests {
 
     #[test]
     fn the_entry_point_is_seeded_with_its_bit_cleared() {
-        let m = module(&[0xC0, 0x03, 0x5F, 0xD6], &[]);
-        let found = discover_arm(&m);
+        let m = view(&[0xC0, 0x03, 0x5F, 0xD6], &[]);
+        let found = crate::discover(&m);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rva, 0x1000);
         assert!(found[0].evidence.contains(&Evidence::Entry));
@@ -440,9 +446,9 @@ mod tests {
         let code = [
             0x00, 0xf0, 0x02, 0xf8, 0x70, 0x47, 0x70, 0x47, 0x70, 0x47, 0x70, 0x47,
         ];
-        let m = module(&code, &[("caller", 0x1001, 4), ("callee", 0x1009, 2)]);
-        let found = discover_arm(&m);
-        let edges = call_graph_arm(&m, &found);
+        let m = view(&code, &[("caller", 0x1001, 4), ("callee", 0x1009, 2)]);
+        let found = crate::discover(&m);
+        let edges = crate::call_graph(&m, &found);
         assert!(
             edges.iter().any(|e| e.from == 0x1000 && e.to == 0x1008),
             "thumb edge missing: {edges:?}"
@@ -453,10 +459,10 @@ mod tests {
     fn a_self_call_is_not_an_edge() {
         // bl with offset 0 lands on the caller itself (pc + 0 - 8 = address).
         let code = [0xfe, 0xff, 0xff, 0xeb, 0xC0, 0x03, 0x5F, 0xD6];
-        let m = module(&code, &[("rec", 0x1000, 4)]);
-        let found = discover_arm(&m);
+        let m = view(&code, &[("rec", 0x1000, 4)]);
+        let found = crate::discover(&m);
         assert!(
-            call_graph_arm(&m, &found).is_empty(),
+            crate::call_graph(&m, &found).is_empty(),
             "self edge must be dropped"
         );
     }
@@ -465,16 +471,16 @@ mod tests {
     fn the_entry_point_loses_its_thumb_bit() {
         // Build a fixture, then set bit 0 of e_entry (file offset 24) by hand so the
         // entry is a Thumb address. Discovery must still produce an even RVA.
-        let raw = module(&[0x70, 0x47], &[]);
+        let raw = view(&[0x70, 0x47], &[]);
         let _ = raw;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[0u8; 0x80]);
         // Reproduce the builder's header: easier to re-parse a known-good fixture and
-        // patch the copy the builder would have made. The builder returns a module,
+        // patch the copy the builder would have made. The builder returns a view,
         // not bytes, so the entry bit is pinned through a Thumb symbol instead: the
         // symbol path exercises the same `& !1` normalisation.
-        let m = module(&[0x70, 0x47], &[("thumb_fn", 0x1001, 2)]);
-        let found = discover_arm(&m);
+        let m = view(&[0x70, 0x47], &[("thumb_fn", 0x1001, 2)]);
+        let found = crate::discover(&m);
         assert!(
             found.iter().all(|f| f.rva & 1 == 0),
             "every RVA must be even: {found:?}"
@@ -484,8 +490,8 @@ mod tests {
 
     #[test]
     fn symbols_outside_the_code_section_are_dropped() {
-        let m = module(&[0xC0, 0x03, 0x5F, 0xD6], &[("data", 0x5000, 4)]);
-        let found = discover_arm(&m);
+        let m = view(&[0xC0, 0x03, 0x5F, 0xD6], &[("data", 0x5000, 4)]);
+        let found = crate::discover(&m);
         assert!(
             found.iter().all(|f| f.rva != 0x5000),
             "out-of-section symbol must be dropped: {found:?}"

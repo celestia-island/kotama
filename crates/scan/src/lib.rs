@@ -151,22 +151,6 @@ pub struct ScanView<'a> {
 /// 确定性：同一 [`LoadedModule`] 两次调用返回逐字段相同的结果。
 #[must_use]
 pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
-    // Aarch64 has its own decoder and its own evidence set; keep it off the
-    // iced-x86 path entirely.
-    if module.arch.is_aarch64() {
-        return a64::discover_a64(module);
-    }
-    if module.arch.is_riscv64() {
-        return riscv::discover_riscv(module);
-    }
-    if module.arch.is_arm32() {
-        return arm::discover_arm(module);
-    }
-    // Instruction-level discovery needs an x86 decoder. A recognised but
-    // non-disassemblable architecture yields no functions rather than a panic.
-    if !module.arch.is_disassemblable() {
-        return Vec::new();
-    }
     let view = ScanView {
         container: module.container,
         arch: module.arch,
@@ -178,7 +162,14 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
         debug_functions: &module.debug_functions,
         eh_frame_functions: &module.eh_frame_functions,
     };
-    discover_impl(view, &module.address_space(), module.exception_directory)
+    // Static and live discovery share one router: the lifters are reached from
+    // `discover_with`, and the PE exception directory is a static-only extra that
+    // `discover_impl` adds for the x86 path.
+    let space = module.address_space();
+    if module.arch.is_aarch64() || module.arch.is_riscv64() || module.arch.is_arm32() {
+        return discover_with(view, &space);
+    }
+    discover_impl(view, &space, module.exception_directory)
 }
 
 /// 提取静态 PE64 的完整异常目录与 `.xdata` 事实，供反编译 sidecar 使用。
@@ -218,7 +209,19 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
 ///
 /// 结论：剩余漏召回是「无引用、无填充的叶子函数」，只有符号信息能分辨，静态侧不再猜。
 pub fn discover_with(view: ScanView<'_>, space: &dyn AddressSpace) -> Vec<FunctionEntry> {
-    // Same gate as `discover`: never hand a non-x86 architecture to the decoder.
+    // Each architecture with a lifter is routed before the x86 gate, so a live
+    // process and a static file run the same decoder for the same module.
+    if view.arch.is_aarch64() {
+        return a64::discover_a64(&view, space);
+    }
+    if view.arch.is_riscv64() {
+        return riscv::discover_riscv(&view, space);
+    }
+    if view.arch.is_arm32() {
+        return arm::discover_arm(&view, space);
+    }
+    // The x86 decoder is the only one behind this gate; every architecture with a
+    // lifter has already been routed above.
     if !view.arch.is_disassemblable() {
         return Vec::new();
     }
@@ -687,19 +690,42 @@ pub struct CallEdge {
 /// 确定性：按 `(from, to)` 排序去重。
 #[must_use]
 pub fn call_graph(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<CallEdge> {
-    if module.arch.is_aarch64() {
-        return a64_xrefs::call_graph_a64(module, functions);
+    let space = module.address_space();
+    let view = ScanView {
+        container: module.container,
+        arch: module.arch,
+        image_base: module.image_base,
+        entry_rva: module.entry_rva,
+        sections: &module.sections,
+        symbols: &module.symbols,
+        dynamic_symbols: &module.dynamic_symbols,
+        debug_functions: &module.debug_functions,
+        eh_frame_functions: &module.eh_frame_functions,
+    };
+    call_graph_with(view, &space, functions)
+}
+
+/// The same call graph for any [`ScanView`] and address space (the live path).
+///
+/// Routes each architecture with a lifter before the x86 decoder, exactly as
+/// [`discover_with`] does, so a live module and a static file agree.
+#[must_use]
+pub fn call_graph_with(
+    view: ScanView<'_>,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<CallEdge> {
+    if view.arch.is_aarch64() {
+        return a64_xrefs::call_graph_a64(&view, space, functions);
     }
-    if module.arch.is_riscv64() {
-        return riscv::call_graph_riscv(module, functions);
+    if view.arch.is_riscv64() {
+        return riscv::call_graph_riscv(&view, space, functions);
     }
-    if module.arch.is_arm32() {
-        return arm::call_graph_arm(module, functions);
+    if view.arch.is_arm32() {
+        return arm::call_graph_arm(&view, space, functions);
     }
     use std::collections::BTreeSet;
-
-    let space = module.address_space();
-    let bitness = module.arch.bitness();
+    let bitness = view.arch.bitness();
     let mut edges: BTreeSet<(u64, u64)> = BTreeSet::new();
 
     for function in functions {
@@ -761,23 +787,47 @@ pub struct StringXref {
 /// 确定性：按 `(func_rva, string_rva)` 排序去重。
 #[must_use]
 pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
-    if module.arch.is_aarch64() {
-        return a64_xrefs::string_xrefs_a64(module, functions);
+    let space = module.address_space();
+    let view = ScanView {
+        container: module.container,
+        arch: module.arch,
+        image_base: module.image_base,
+        entry_rva: module.entry_rva,
+        sections: &module.sections,
+        symbols: &module.symbols,
+        dynamic_symbols: &module.dynamic_symbols,
+        debug_functions: &module.debug_functions,
+        eh_frame_functions: &module.eh_frame_functions,
+    };
+    string_xrefs_with(view, &space, functions)
+}
+
+/// The same string references for any [`ScanView`] and address space (the live path).
+///
+/// Routes each architecture with a lifter before the x86 decoder, exactly as
+/// [`discover_with`] does, so a live module and a static file agree.
+#[must_use]
+pub fn string_xrefs_with(
+    view: ScanView<'_>,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<StringXref> {
+    if view.arch.is_aarch64() {
+        return a64_xrefs::string_xrefs_a64(&view, space, functions);
     }
-    if module.arch.is_riscv64() {
-        return riscv::string_xrefs_riscv(module, functions);
+    if view.arch.is_riscv64() {
+        return riscv::string_xrefs_riscv(&view, space, functions);
     }
-    if module.arch.is_arm32() {
-        return arm::string_xrefs_arm(module, functions);
+    if view.arch.is_arm32() {
+        return arm::string_xrefs_arm(&view, space, functions);
     }
     use std::collections::BTreeSet;
 
     // x86 非 PIE 用绝对地址立即数引用字符串（`push offset str` / `mov reg, imm32`）。
-    let image_base = module.image_base;
+    let image_base = view.image_base;
 
-    let space = module.address_space();
-    let bitness = module.arch.bitness();
-    let data_sections: Vec<(u64, u64)> = module
+    let bitness = view.arch.bitness();
+    let data_sections: Vec<(u64, u64)> = view
         .sections
         .iter()
         // 地址为 0 的节（.comment / .symtab 一类）不参与装载映像，是文件级元数据。
@@ -809,7 +859,7 @@ pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<S
             if buffer.is_ip_rel_memory_operand() {
                 let target = buffer.ip_rel_memory_address();
                 if in_data(target) {
-                    if let Some(text) = read_cstring(&space, target) {
+                    if let Some(text) = read_cstring(space, target) {
                         out.insert((function.rva, target, text));
                     }
                 }
@@ -824,7 +874,7 @@ pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<S
                     continue;
                 };
                 if in_data(target) {
-                    if let Some(text) = read_cstring(&space, target) {
+                    if let Some(text) = read_cstring(space, target) {
                         out.insert((function.rva, target, text));
                     }
                 }
@@ -4132,5 +4182,100 @@ mod tests {
             functions.iter().all(|function| function.rva != 0x5000),
             "out-of-section frame range must be dropped: {functions:?}"
         );
+    }
+
+    #[test]
+    fn lifter_architectures_route_through_the_live_path_too() {
+        // Before this test `discover_with` gated every non-x86 architecture out, so a
+        // live process and a static file disagreed for A64, RISC-V and ARM. A view with
+        // no symbols and one byte of code must still take the lifter route: the point is
+        // that the gate no longer refuses, not what the one byte decodes to.
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        for arch in [
+            Arch::Other("aarch64"),
+            Arch::Other("riscv64"),
+            Arch::Other("arm"),
+        ] {
+            let mut space = SyntheticSpace {
+                base: 0x1000,
+                bytes: vec![0u8; 0x100],
+                segments: vec![segment(0x1000, 0x100, true)],
+            };
+            // A `ret` in each encoding so the sweep has something valid to decode.
+            space.write(0x1000, &[0xC0, 0x03, 0x5F, 0xD6]);
+            let sections = vec![SectionInfo {
+                rva: 0x1000,
+                size: 0x100,
+                name: ".text".into(),
+                executable: true,
+            }];
+            let view = ScanView {
+                container: Container::Elf64,
+                arch,
+                image_base: 0x1000,
+                entry_rva: Some(0x1000),
+                sections: &sections,
+                symbols: &[],
+                dynamic_symbols: &[],
+                debug_functions: &[],
+                eh_frame_functions: &[],
+            };
+            assert!(
+                arch.is_disassemblable(),
+                "{arch:?} has a lifter and must be disassemblable"
+            );
+            let functions = discover_with(view, &space);
+            assert!(
+                functions
+                    .iter()
+                    .any(|f| f.evidence.contains(&Evidence::Entry)),
+                "{arch:?}: the live path must reach the lifter, got {functions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_architecture_without_a_lifter_is_still_refused() {
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x100],
+            segments: vec![segment(0x1000, 0x100, true)],
+        };
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x100,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let view = ScanView {
+            container: Container::Elf64,
+            arch: Arch::Other("mips"),
+            image_base: 0x1000,
+            entry_rva: Some(0x1000),
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+            eh_frame_functions: &[],
+        };
+        assert!(!view.arch.is_disassemblable());
+        assert!(discover_with(view, &space).is_empty());
     }
 }
