@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kotama::{AddressSpace, Evidence, FunctionEntry};
 use kotama_image::{LoadedModule, SymbolInfo};
-use kotama_lift_riscv::{call_targets, lift, Flow};
+use kotama_lift_riscv::{address_forms, call_targets, lift, Flow};
 
 use crate::{CallEdge, StringXref};
 
@@ -178,13 +178,58 @@ pub fn call_graph_riscv(module: &LoadedModule, functions: &[FunctionEntry]) -> V
 
 /// String references for a RISC-V module.
 ///
-/// RISC-V cannot load a 64-bit address in one instruction: the compiler emits
-/// `auipc x, hi` to form a page base and then `addi x, x, lo` to complete it. The
-/// pairing lives in the architecture crate; this module consumes the addresses.
+/// RISC-V cannot load a 64-bit address in one instruction, so the compiler forms a data
+/// address with a two-instruction pair: `auipc`/`lui` for the high part and `addi` for the
+/// low part. The pairing lives in the architecture crate; this module consumes the
+/// addresses and keeps the ones that point at a printable C string in a data section.
 #[must_use]
 pub fn string_xrefs_riscv(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
-    let _ = (module, functions);
-    Vec::new()
+    let space = module.address_space();
+    let image_base = module.image_base;
+    let data_sections: Vec<(u64, u64)> = module
+        .sections
+        .iter()
+        // A section at address 0 is file-level metadata, not part of the loaded image.
+        .filter(|section| !section.executable && section.size > 0 && section.rva > 0)
+        .map(|section| (section.rva, section.size))
+        .collect();
+    let in_data = |rva: u64| {
+        data_sections
+            .iter()
+            .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+    };
+    let mut out: BTreeSet<(u64, u64, String)> = BTreeSet::new();
+    for function in functions {
+        if function.size == 0 {
+            continue;
+        }
+        let Some(bytes) = space.read(
+            function.rva,
+            usize::try_from(function.size).unwrap_or(usize::MAX),
+        ) else {
+            continue;
+        };
+        for form in address_forms(bytes, function.rva) {
+            // address_forms reports the value the code computes, which is a virtual
+            // address; section ranges are relative to the image base.
+            let Some(rva) = form.target.checked_sub(image_base) else {
+                continue;
+            };
+            if !in_data(rva) {
+                continue;
+            }
+            if let Some(text) = crate::read_cstring(&space, rva) {
+                out.insert((function.rva, rva, text));
+            }
+        }
+    }
+    out.into_iter()
+        .map(|(func_rva, string_rva, text)| StringXref {
+            func_rva,
+            string_rva,
+            text,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -196,9 +241,29 @@ mod tests {
     /// `LoadedModule` can only be built by parsing bytes, so the fixture is assembled
     /// here. Section header order: null, `.text`, `.symtab`, `.strtab`, `.shstrtab`.
     fn module(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
-        // rva and vaddr coincide in this layout, so the symbol maths stays simple.
+        module_with_rodata(code, symbols, &[])
+    }
+
+    /// Same layout plus a `.rodata` section at RVA 0x2000, for string-reference tests.
+    fn module_with_rodata(
+        code: &[u8],
+        symbols: &[(&str, u64, u64)],
+        rodata: &[u8],
+    ) -> LoadedModule {
+        module_at(0, code, symbols, rodata)
+    }
+
+    /// The builder behind the two helpers. `base` is the link-time address of RVA 0
+    /// and is also emitted as a `PT_LOAD`, so `image_base` comes out as `base` —
+    /// which is what lets the rebasing path be tested.
+    fn module_at(
+        base: u64,
+        code: &[u8],
+        symbols: &[(&str, u64, u64)],
+        rodata: &[u8],
+    ) -> LoadedModule {
         const TEXT_RVA: u64 = 0x1000;
-        const BASE: u64 = 0;
+        const RODATA_RVA: u64 = 0x2000;
         let mut b: Vec<u8> = Vec::new();
         let p64 = |b: &mut Vec<u8>, v: u64| b.extend_from_slice(&v.to_le_bytes());
         let p32 = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
@@ -209,21 +274,37 @@ mod tests {
         p16(&mut b, 2); // e_type = ET_EXEC
         p16(&mut b, 243); // e_machine = EM_RISCV
         p32(&mut b, 1); // e_version
-        p64(&mut b, BASE + TEXT_RVA); // e_entry
-        p64(&mut b, 0); // e_phoff
+        p64(&mut b, base + TEXT_RVA); // e_entry
+        p64(&mut b, 64); // e_phoff
         p64(&mut b, 0); // e_shoff (patched below)
         p32(&mut b, 0); // e_flags
         p16(&mut b, 64); // e_ehsize
         p16(&mut b, 56); // e_phentsize
-        p16(&mut b, 0); // e_phnum
+        p16(&mut b, 1); // e_phnum
         p16(&mut b, 64); // e_shentsize
-        p16(&mut b, 5); // e_shnum
-        p16(&mut b, 4); // e_shstrndx
+        p16(&mut b, 6); // e_shnum
+        p16(&mut b, 5); // e_shstrndx
         assert_eq!(b.len(), 64);
+        // PT_LOAD covering the whole image at `BASE`: this is what makes image_base
+        // equal `base` instead of defaulting to zero.
+        p32(&mut b, 1); // p_type = PT_LOAD
+        p32(&mut b, 5); // p_flags = PF_R | PF_X
+        p64(&mut b, 0); // p_offset
+        p64(&mut b, base); // p_vaddr
+        p64(&mut b, base); // p_paddr
+        p64(&mut b, 0); // p_filesz (patched below)
+        p64(&mut b, 0); // p_memsz (patched below)
+        p64(&mut b, 0x1000); // p_align
+        assert_eq!(b.len(), 120);
         // .text payload at 0x100 (so its vaddr 0x1000 maps to file offset 0x100).
         b.resize(0x100, 0);
         let text_off = b.len() as u64;
         b.extend_from_slice(code);
+        while !b.len().is_multiple_of(8) {
+            b.push(0);
+        }
+        let rodata_off = b.len() as u64;
+        b.extend_from_slice(rodata);
         while !b.len().is_multiple_of(8) {
             b.push(0);
         }
@@ -248,7 +329,7 @@ mod tests {
             b.push(0x12); // STB_GLOBAL | STT_FUNC
             b.push(0);
             p16(&mut b, 1); // st_shndx = .text
-            p64(&mut b, BASE + rva);
+            p64(&mut b, base + rva);
             p64(&mut b, *size);
         }
         let sym_count = symbols.len() as u64 + 1;
@@ -256,7 +337,7 @@ mod tests {
         let shstrtab_off = b.len() as u64;
         let mut shstr: Vec<u8> = vec![0];
         let mut sh_name = Vec::new();
-        for name in [".text", ".symtab", ".strtab", ".shstrtab"] {
+        for name in [".text", ".rodata", ".symtab", ".strtab", ".shstrtab"] {
             sh_name.push(shstr.len() as u32);
             shstr.extend_from_slice(name.as_bytes());
             shstr.push(0);
@@ -292,26 +373,39 @@ mod tests {
             sh_name[0],
             1,
             6,
-            BASE + TEXT_RVA,
+            base + TEXT_RVA,
             text_off,
             code.len() as u64,
             0,
             0,
         ); // .text
+           // .rodata: allocated but not executable, at RVA 0x2000, so a formed address
+           // can be checked against a section that is genuinely data.
         section(
             &mut b,
             sh_name[1],
+            1,
+            2, // SHF_ALLOC
+            base + RODATA_RVA,
+            rodata_off,
+            rodata.len() as u64,
+            0,
+            0,
+        ); // .rodata
+        section(
+            &mut b,
+            sh_name[2],
             2,
             0,
             0,
             symtab_off,
             sym_count * 24,
-            3,
+            4,
             24,
         ); // .symtab
         section(
             &mut b,
-            sh_name[2],
+            sh_name[3],
             3,
             0,
             0,
@@ -322,7 +416,7 @@ mod tests {
         ); // .strtab
         section(
             &mut b,
-            sh_name[3],
+            sh_name[4],
             3,
             0,
             0,
@@ -428,5 +522,68 @@ mod tests {
         assert_eq!(found[0].rva, 0x1000);
         assert!(found[0].evidence.contains(&Evidence::Symtab));
         assert!(found[0].evidence.contains(&Evidence::Entry));
+    }
+
+    #[test]
+    fn a_lui_addi_pair_pointing_at_rodata_becomes_a_string_xref() {
+        // lui x10, 0x2000 ; addi x10, x10, 0  ->  address 0x2000, which is .rodata.
+        let code = words(&[0x0000_2537, 0x0005_0513, 0x0000_8067]);
+        let m = module_with_rodata(&code, &[("f", 0x1000, 12)], b"a_literal\0");
+        let fns = discover_riscv(&m);
+        let xrefs = string_xrefs_riscv(&m, &fns);
+        assert_eq!(xrefs.len(), 1);
+        assert_eq!(xrefs[0].func_rva, 0x1000);
+        assert_eq!(xrefs[0].string_rva, 0x2000);
+        assert_eq!(xrefs[0].text, "a_literal");
+    }
+
+    #[test]
+    fn an_address_outside_any_data_section_is_not_a_string_xref() {
+        // The pair forms 0x9000, which no section covers, so nothing is recorded.
+        let code = words(&[0x0000_9537, 0x0005_0513, 0x0000_8067]);
+        let m = module_with_rodata(&code, &[("f", 0x1000, 12)], b"a_literal\0");
+        let fns = discover_riscv(&m);
+        assert!(string_xrefs_riscv(&m, &fns).is_empty());
+    }
+
+    #[test]
+    fn a_data_address_holding_non_printable_bytes_is_not_a_string_xref() {
+        // 0x2000 is inside .rodata, but its contents are not a printable C string.
+        let code = words(&[0x0000_2537, 0x0005_0513, 0x0000_8067]);
+        let m = module_with_rodata(&code, &[("f", 0x1000, 12)], &[0x00, 0x01, 0x02, 0x00]);
+        let fns = discover_riscv(&m);
+        assert!(string_xrefs_riscv(&m, &fns).is_empty());
+    }
+
+    #[test]
+    fn a_formed_address_is_rebased_by_the_image_base() {
+        // The same code with the image linked at 0x400000: the pair computes the
+        // absolute virtual address 0x402000, and only subtracting the image base
+        // yields the .rodata RVA of 0x2000. A reader that skipped the subtraction
+        // would look for a string at 0x402000 and find nothing.
+        let code = words(&[0x0040_2537, 0x0005_0513, 0x0000_8067]);
+        let m = module_at(0x40_0000, &code, &[("f", 0x1000, 12)], b"rebased\0");
+        assert_eq!(m.image_base, 0x40_0000, "fixture assumption");
+        let fns = discover_riscv(&m);
+        let xrefs = string_xrefs_riscv(&m, &fns);
+        assert_eq!(xrefs.len(), 1, "rebased xref must be found: {xrefs:?}");
+        assert_eq!(xrefs[0].string_rva, 0x2000);
+        assert_eq!(xrefs[0].text, "rebased");
+    }
+
+    #[test]
+    fn an_address_inside_executable_code_is_not_a_string_xref() {
+        // lui x10, 1 ; addi x10, x10, 8  ->  0x1008, which is inside .text. The bytes
+        // there are printable, so only the data-section filter keeps this out; a reader
+        // that skipped the filter would report a string out of executable memory.
+        let mut code = words(&[0x0000_1537, 0x0085_0513]);
+        code.extend_from_slice(b"HELLO\0\0\0");
+        let m = module_with_rodata(&code, &[("f", 0x1000, 16)], b"data_literal\0");
+        let fns = discover_riscv(&m);
+        let xrefs = string_xrefs_riscv(&m, &fns);
+        assert!(
+            xrefs.iter().all(|x| x.string_rva != 0x1008),
+            "an executable address must not be reported as a string: {xrefs:?}"
+        );
     }
 }

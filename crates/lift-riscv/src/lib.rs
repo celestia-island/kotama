@@ -518,6 +518,85 @@ pub fn call_targets(bytes: &[u8], address: u64) -> Vec<CallTarget> {
     out
 }
 
+/// One resolved data address: a two-instruction pair that computes an absolute value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AddressForm {
+    /// Address of the instruction that completes the address (the `addi`).
+    pub at: u64,
+    /// The absolute value the pair computes.
+    pub target: u64,
+}
+
+/// Every two-instruction data address formed in `bytes` starting at `address`.
+///
+/// RISC-V cannot materialise a 64-bit address in one instruction, and it uses two
+/// different pairs depending on the code model:
+///
+/// - `auipc xd, hi` + `addi xd, xd, lo` for position-independent code: the base is
+///   `PC + (hi << 12)`, so the result moves with the load address;
+/// - `lui xd, hi` + `addi xd, xd, lo` for absolute code: the base is `hi << 12`
+///   sign-extended through its 32-bit form, so the result is a fixed address.
+///
+/// Both are tracked per register and paired with the `addi` that reads that register.
+/// Any instruction that writes a register ends the base it held, so a stale value can
+/// never be paired with a later `addi`.
+#[must_use]
+pub fn address_forms(bytes: &[u8], address: u64) -> Vec<AddressForm> {
+    let mut bases: Vec<(u32, u64)> = Vec::new();
+    let mut out = Vec::new();
+    let mut pc = address;
+    let mut i = 0usize;
+    while i + 2 <= bytes.len() {
+        let low = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        let width = instruction_width(low);
+        if i + width > bytes.len() {
+            break;
+        }
+        if width == 4 {
+            let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+            let opcode = word & 0x7f;
+            let rd = (word >> 7) & 0x1f;
+            let rs1 = (word >> 15) & 0x1f;
+            match opcode {
+                // auipc: base = PC + (hi << 12).
+                0x17 => {
+                    let hi = (word & 0xffff_f000) as i32 as i64;
+                    bases.retain(|(reg, _)| *reg != rd);
+                    bases.push((rd, pc.wrapping_add(hi as u64)));
+                }
+                // lui: base = (hi << 12) sign-extended through its 32-bit form.
+                0x37 => {
+                    let hi = (word & 0xffff_f000) as i64;
+                    let value = (hi as i32) as i64;
+                    bases.retain(|(reg, _)| *reg != rd);
+                    bases.push((rd, value as u64));
+                }
+                // addi rd, rs1, imm12 completes a base formed just above.
+                0x13 if (word >> 12) & 0x7 == 0 => {
+                    let lo = i_imm(word);
+                    if let Some((_, base)) = bases.iter().find(|(reg, _)| *reg == rs1) {
+                        out.push(AddressForm {
+                            at: pc,
+                            target: base.wrapping_add(lo as u64),
+                        });
+                    }
+                    // The addi consumed rs1 and wrote rd; drop rd's stale base last,
+                    // because rd == rs1 here is the normal case.
+                    bases.retain(|(reg, _)| *reg != rd);
+                }
+                // Every other instruction that writes rd ends the base it held.
+                0x67 | 0x03 | 0x23 | 0x33 | 0x1b | 0x3b => {
+                    bases.retain(|(reg, _)| *reg != rd);
+                }
+                _ => {}
+            }
+        }
+        i += width;
+        pc += width as u64;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +907,90 @@ mod tests {
         // indirect jump even though an auipc did write the base register ra.
         let code = words32(&[0x0000_0097, 0x0000_8567]);
         assert!(call_targets(&code, 0x1000).is_empty());
+    }
+
+    #[test]
+    fn an_auipc_addi_pair_forms_a_pc_relative_address() {
+        // auipc x10, 0 ; addi x10, x10, 0x1c8  ->  0x2000 + 0x1c8 = 0x21c8
+        let code = words32(&[0x0000_0517, 0x1c85_0513]);
+        let forms = address_forms(&code, 0x2000);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].at, 0x2004);
+        assert_eq!(forms[0].target, 0x21c8);
+    }
+
+    #[test]
+    fn a_lui_addi_pair_forms_an_absolute_address() {
+        // lui x10, 0x1000000 ; addi x10, x10, 0x1c8  ->  0x10001c8. A non-PIC build
+        // uses this shape, and it must not be read as PC-relative.
+        let code = words32(&[0x0100_0537, 0x1c85_0513]);
+        let forms = address_forms(&code, 0x2000);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].target, 0x100_01c8);
+    }
+
+    #[test]
+    fn a_lui_high_part_is_sign_extended_from_32_bits() {
+        // lui x10, 0xfff00000 sign-extends to 0xffff_ffff_fff0_0000, not 0xfff0_0000.
+        let code = words32(&[0xfff0_0537, 0x0005_0513]);
+        let forms = address_forms(&code, 0);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].target, 0xffff_ffff_fff0_0000);
+    }
+
+    #[test]
+    fn an_addi_without_a_base_register_is_not_an_address() {
+        // addi x10, x0, 0x1c8 alone: no base was ever formed.
+        let code = words32(&[0x1c80_0513]);
+        assert!(address_forms(&code, 0x2000).is_empty());
+    }
+
+    #[test]
+    fn a_stale_base_is_invalidated_by_another_write() {
+        // auipc x10, 0 ; addi x10, x0, 0x40 (overwrites x10) ; addi x10, x10, 0x1c8
+        let code = words32(&[0x0000_0517, 0x0400_0513, 0x1c85_0513]);
+        let forms = address_forms(&code, 0x2000);
+        assert!(forms.is_empty(), "stale base must not pair: {forms:?}");
+    }
+
+    #[test]
+    fn a_shift_with_the_same_opcode_is_not_an_addi() {
+        // slli x10, x10, 4 = 0x0045_1513 has opcode 0x13 but funct3 = 1, so it must not
+        // be paired with a base the way addi (funct3 = 0) is.
+        let code = words32(&[0x0000_0517, 0x0045_1513]);
+        assert!(
+            address_forms(&code, 0x2000).is_empty(),
+            "a shift must not complete an address"
+        );
+    }
+
+    #[test]
+    fn the_last_lui_for_a_register_wins() {
+        // lui x10, 1 ; lui x10, 2 ; addi x10, x10, 0  ->  0x2000, not 0x1000.
+        let code = words32(&[0x0000_1537, 0x0000_2537, 0x0005_0513]);
+        let forms = address_forms(&code, 0);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms.first().map(|form| form.target), Some(0x2000));
+    }
+
+    #[test]
+    fn the_last_auipc_for_a_register_wins() {
+        // auipc x10, 0 ; auipc x10, 2 ; addi x10, x10, 0  ->  base of the second auipc
+        // (0x1004 + 0x2000), not the first. Two live bases for one register would let
+        // the stale one be picked.
+        let code = words32(&[0x0000_0517, 0x0000_2517, 0x0005_0513]);
+        let forms = address_forms(&code, 0x1000);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms.first().map(|form| form.target), Some(0x1004 + 0x2000));
+    }
+
+    #[test]
+    fn a_negative_auipc_high_part_reaches_lower_addresses_in_an_address_form() {
+        // auipc x10, 0xfffff -> hi = -4096, so the base is 0x8000 - 0x1000 = 0x7000.
+        // Without sign extension the base would be a huge positive number.
+        let code = words32(&[0xffff_f517, 0x0005_0513]);
+        let forms = address_forms(&code, 0x8000);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms.first().map(|form| form.target), Some(0x7000));
     }
 }
