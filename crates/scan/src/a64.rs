@@ -12,7 +12,9 @@
 use std::collections::BTreeMap;
 
 use kotama::{AddressSpace, Evidence};
-use kotama_image::{LoadedModule, SymbolInfo};
+use kotama_image::SymbolInfo;
+
+use crate::ScanView;
 use kotama_lift_a64::{lift, Flow};
 
 /// A function candidate under construction.
@@ -35,24 +37,24 @@ fn seed_symbol(table: &mut BTreeMap<u64, Candidate>, symbol: &SymbolInfo, eviden
     }
 }
 
-/// Discover functions in an Aarch64 module.
+/// Discover functions in an Aarch64 view.
 ///
-/// Determinism: the same module yields the same entries in the same order.
+/// Determinism: the same view yields the same entries in the same order.
 #[must_use]
-pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
+pub fn discover_a64(view: &ScanView, space: &dyn AddressSpace) -> Vec<kotama::FunctionEntry> {
     let mut table: BTreeMap<u64, Candidate> = BTreeMap::new();
-    for symbol in module.symbols.iter().chain(&module.dynamic_symbols) {
+    for symbol in view.symbols.iter().chain(view.dynamic_symbols) {
         seed_symbol(&mut table, symbol, Evidence::Symtab);
     }
-    for symbol in &module.debug_functions {
+    for symbol in view.debug_functions {
         seed_symbol(&mut table, symbol, Evidence::Dwarf);
     }
     // Frame-section FDEs: one entry per function the compiler emitted CFI for.
     // This is what still names boundaries in a fully stripped A64 ELF.
-    for symbol in &module.eh_frame_functions {
+    for symbol in view.eh_frame_functions {
         seed_symbol(&mut table, symbol, Evidence::EhFrame);
     }
-    if let Some(entry) = module.entry_rva {
+    if let Some(entry) = view.entry_rva {
         table
             .entry(entry)
             .or_default()
@@ -61,8 +63,7 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
     }
 
     // Every BL target is a function entry. Sweep each executable section once.
-    let space = module.address_space();
-    for section in module.sections.iter().filter(|section| section.executable) {
+    for section in view.sections.iter().filter(|section| section.executable) {
         let Some(bytes) = space.read(section.rva, section.size as usize) else {
             continue;
         };
@@ -83,7 +84,7 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
     // Compact unwind names every function that has a stack frame. It is the
     // Mach-O counterpart of the PE exception directory: exhaustive for non-leaf
     // functions and present in a stripped binary, where symbols are not.
-    if let Some(section) = module
+    if let Some(section) = view
         .sections
         .iter()
         .find(|section| section.name == "__unwind_info")
@@ -103,7 +104,7 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
 
     // Keep only entries that land inside an executable section.
     let is_code = |rva: u64| {
-        module.sections.iter().any(|section| {
+        view.sections.iter().any(|section| {
             section.executable
                 && rva >= section.rva
                 && rva < section.rva.saturating_add(section.size)
@@ -118,7 +119,7 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
             None => {
                 // Distance to the next entry, capped at the end of this section.
                 let next = keys.get(index + 1).copied().unwrap_or(u64::MAX);
-                let section_end = module
+                let section_end = view
                     .sections
                     .iter()
                     .filter(|section| section.executable)
@@ -144,13 +145,14 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
 mod tests {
     use super::*;
     use kotama_image::Arch;
+    use kotama_image::LoadedModule;
 
     /// Build a minimal Mach-O 64 carrying an A64 `__text` section, a symbol table
     /// with the given (name, rva, size) entries, and an entry point at the first symbol.
     ///
     /// Same layout the image crate's own Mach-O tests use; assembled here because
     /// `LoadedModule` can only be built by parsing bytes.
-    fn module(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
+    fn view(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
         const BASE: u64 = 0x1_0000_0000;
         let mut b = Vec::new();
         let p64 = |b: &mut Vec<u8>, v: u64| b.extend_from_slice(&v.to_le_bytes());
@@ -266,8 +268,8 @@ mod tests {
         // main @0x1000: bl .+12 -> 0x100c ; bl .+8 -> 0x100c ; ret
         // callee @0x100c: ret
         let code = words(&[0x9400_0003, 0x9400_0002, 0xd65f_03c0, 0xd65f_03c0]);
-        let module = module(&code, &[("_main", 0x1000, 0)]);
-        let found = discover_a64(&module);
+        let view = view(&code, &[("_main", 0x1000, 0)]);
+        let found = crate::discover(&view);
         // Two entries: main, and the single callee both calls reach.
         assert_eq!(found.len(), 2);
         let main = &found[0];
@@ -290,8 +292,8 @@ mod tests {
         // Mach-O symbols never carry a size, so every bound is inferred: the
         // first entry reaches the second, and the last reaches the section end.
         let code = words(&[0xd65f_03c0, 0xd65f_03c0, 0xd65f_03c0]);
-        let module = module(&code, &[("_a", 0x1000, 0), ("_b", 0x1004, 0)]);
-        let found = discover_a64(&module);
+        let view = view(&code, &[("_a", 0x1000, 0), ("_b", 0x1004, 0)]);
+        let found = crate::discover(&view);
         assert_eq!(found.len(), 2);
         assert_eq!((found[0].size, found[0].size_inferred), (4, true));
         // The last entry is bounded by the end of the executable section.
@@ -302,8 +304,8 @@ mod tests {
     fn seeds_outside_executable_sections_are_dropped() {
         // A data symbol must not become a function.
         let code = words(&[0xd65f_03c0]);
-        let module = module(&code, &[("_data", 0x5000, 8), ("_main", 0x1000, 4)]);
-        let found = discover_a64(&module);
+        let view = view(&code, &[("_data", 0x5000, 8), ("_main", 0x1000, 4)]);
+        let found = crate::discover(&view);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name.as_deref(), Some("_main"));
     }
@@ -312,11 +314,11 @@ mod tests {
     fn the_result_is_sorted_by_address() {
         // Symbols given out of order still come back sorted.
         let code = words(&[0xd65f_03c0, 0xd65f_03c0, 0xd65f_03c0]);
-        let module = module(
+        let view = view(
             &code,
             &[("_c", 0x1008, 4), ("_a", 0x1000, 4), ("_b", 0x1004, 4)],
         );
-        let found = discover_a64(&module);
+        let found = crate::discover(&view);
         let rvas: Vec<u64> = found.iter().map(|f| f.rva).collect();
         assert_eq!(rvas, vec![0x1000, 0x1004, 0x1008]);
     }

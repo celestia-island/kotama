@@ -14,7 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kotama::{AddressSpace, Evidence, FunctionEntry};
-use kotama_image::{LoadedModule, SymbolInfo};
+use kotama_image::SymbolInfo;
+
+use crate::ScanView;
 use kotama_lift_riscv::{address_forms, call_targets, lift, Flow};
 
 use crate::{CallEdge, StringXref};
@@ -39,19 +41,19 @@ fn seed_symbol(table: &mut BTreeMap<u64, Candidate>, symbol: &SymbolInfo, eviden
     }
 }
 
-/// Discover functions in a RISC-V module.
+/// Discover functions in a RISC-V view.
 ///
-/// Determinism: the same module yields the same entries in the same order.
+/// Determinism: the same view yields the same entries in the same order.
 #[must_use]
-pub fn discover_riscv(module: &LoadedModule) -> Vec<FunctionEntry> {
+pub fn discover_riscv(view: &ScanView, space: &dyn AddressSpace) -> Vec<FunctionEntry> {
     let mut table: BTreeMap<u64, Candidate> = BTreeMap::new();
-    for symbol in module.symbols.iter().chain(&module.dynamic_symbols) {
+    for symbol in view.symbols.iter().chain(view.dynamic_symbols) {
         seed_symbol(&mut table, symbol, Evidence::Symtab);
     }
-    for symbol in &module.debug_functions {
+    for symbol in view.debug_functions {
         seed_symbol(&mut table, symbol, Evidence::Dwarf);
     }
-    if let Some(entry) = module.entry_rva {
+    if let Some(entry) = view.entry_rva {
         table
             .entry(entry)
             .or_default()
@@ -62,8 +64,7 @@ pub fn discover_riscv(module: &LoadedModule) -> Vec<FunctionEntry> {
     // Every call seeds its target. Under the medany code model that is an
     // `auipc` + `jalr` pair, so the target only exists after pairing; a `jal ra`
     // carries it directly. Both shapes are collected here.
-    let space = module.address_space();
-    for section in module.sections.iter().filter(|section| section.executable) {
+    for section in view.sections.iter().filter(|section| section.executable) {
         let Some(bytes) = space.read(section.rva, section.size as usize) else {
             continue;
         };
@@ -89,7 +90,7 @@ pub fn discover_riscv(module: &LoadedModule) -> Vec<FunctionEntry> {
 
     // Keep only entries that land inside an executable section.
     let is_code = |rva: u64| {
-        module.sections.iter().any(|section| {
+        view.sections.iter().any(|section| {
             section.executable
                 && rva >= section.rva
                 && rva < section.rva.saturating_add(section.size)
@@ -105,7 +106,7 @@ pub fn discover_riscv(module: &LoadedModule) -> Vec<FunctionEntry> {
             None => {
                 // Distance to the next entry, capped at the end of this section.
                 let next = keys.get(index + 1).copied().unwrap_or(u64::MAX);
-                let section_end = module
+                let section_end = view
                     .sections
                     .iter()
                     .filter(|section| section.executable)
@@ -128,14 +129,17 @@ pub fn discover_riscv(module: &LoadedModule) -> Vec<FunctionEntry> {
     out
 }
 
-/// Function-level call graph for a RISC-V module.
+/// Function-level call graph for a RISC-V view.
 ///
 /// Every `jal` with a direct target that lands inside a known function is an edge.
 /// Indirect calls (`jalr`, `c.jalr`) have no static target and are skipped, as are
 /// self-edges and targets outside the table.
 #[must_use]
-pub fn call_graph_riscv(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<CallEdge> {
-    let space = module.address_space();
+pub fn call_graph_riscv(
+    _view: &ScanView,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<CallEdge> {
     let mut edges = BTreeSet::new();
     for function in functions {
         if function.size == 0 {
@@ -176,17 +180,20 @@ pub fn call_graph_riscv(module: &LoadedModule, functions: &[FunctionEntry]) -> V
     edges.into_iter().collect()
 }
 
-/// String references for a RISC-V module.
+/// String references for a RISC-V view.
 ///
 /// RISC-V cannot load a 64-bit address in one instruction, so the compiler forms a data
 /// address with a two-instruction pair: `auipc`/`lui` for the high part and `addi` for the
-/// low part. The pairing lives in the architecture crate; this module consumes the
+/// low part. The pairing lives in the architecture crate; this view consumes the
 /// addresses and keeps the ones that point at a printable C string in a data section.
 #[must_use]
-pub fn string_xrefs_riscv(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
-    let space = module.address_space();
-    let image_base = module.image_base;
-    let data_sections: Vec<(u64, u64)> = module
+pub fn string_xrefs_riscv(
+    view: &ScanView,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<StringXref> {
+    let image_base = view.image_base;
+    let data_sections: Vec<(u64, u64)> = view
         .sections
         .iter()
         // A section at address 0 is file-level metadata, not part of the loaded image.
@@ -218,7 +225,7 @@ pub fn string_xrefs_riscv(module: &LoadedModule, functions: &[FunctionEntry]) ->
             if !in_data(rva) {
                 continue;
             }
-            if let Some(text) = crate::read_cstring(&space, rva) {
+            if let Some(text) = crate::read_cstring(space, rva) {
                 out.insert((function.rva, rva, text));
             }
         }
@@ -235,12 +242,13 @@ pub fn string_xrefs_riscv(module: &LoadedModule, functions: &[FunctionEntry]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kotama_image::LoadedModule;
 
     /// Build a minimal RISC-V ELF64 with a `.text` blob and a symbol table.
     ///
     /// `LoadedModule` can only be built by parsing bytes, so the fixture is assembled
     /// here. Section header order: null, `.text`, `.symtab`, `.strtab`, `.shstrtab`.
-    fn module(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
+    fn view(code: &[u8], symbols: &[(&str, u64, u64)]) -> LoadedModule {
         module_with_rodata(code, symbols, &[])
     }
 
@@ -437,8 +445,8 @@ mod tests {
     #[test]
     fn a_symbol_size_is_an_exact_boundary_not_an_inference() {
         let code = words(&[0x0000_0013, 0x0000_0013, 0x0000_8067]);
-        let m = module(&code, &[("f", 0x1000, 8)]);
-        let found = discover_riscv(&m);
+        let m = view(&code, &[("f", 0x1000, 8)]);
+        let found = crate::discover(&m);
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].size, found[0].size_inferred), (8, false));
     }
@@ -446,8 +454,8 @@ mod tests {
     #[test]
     fn the_entry_point_is_seeded_with_entry_evidence() {
         let code = words(&[0x0000_8067]);
-        let m = module(&code, &[]);
-        let found = discover_riscv(&m);
+        let m = view(&code, &[]);
+        let found = crate::discover(&m);
         assert_eq!(found.len(), 1);
         assert!(found[0].evidence.contains(&Evidence::Entry));
     }
@@ -457,8 +465,8 @@ mod tests {
         // 0x1000: auipc x1, 0 ; 0x1004: jalr x1, x1, 0  -> calls 0x1000. Use a
         // forward call instead: jalr offset 8 lands on the ret at 0x100c.
         let code = words(&[0x0000_0097, 0x0080_80e7, 0x0000_0013, 0x0000_8067]);
-        let m = module(&code, &[("caller", 0x1000, 12)]);
-        let found = discover_riscv(&m);
+        let m = view(&code, &[("caller", 0x1000, 12)]);
+        let found = crate::discover(&m);
         let target = found
             .iter()
             .find(|f| f.rva == 0x1008)
@@ -469,9 +477,9 @@ mod tests {
     #[test]
     fn a_call_edge_is_recorded_and_self_edges_are_not() {
         let code = words(&[0x0000_0097, 0x0080_80e7, 0x0000_0013, 0x0000_8067]);
-        let m = module(&code, &[("caller", 0x1000, 12), ("callee", 0x1008, 4)]);
-        let found = discover_riscv(&m);
-        let edges = call_graph_riscv(&m, &found);
+        let m = view(&code, &[("caller", 0x1000, 12), ("callee", 0x1008, 4)]);
+        let found = crate::discover(&m);
+        let edges = crate::call_graph(&m, &found);
         assert_eq!(edges.len(), 1);
         assert_eq!((edges[0].from, edges[0].to), (0x1000, 0x1008));
     }
@@ -480,17 +488,17 @@ mod tests {
     fn a_self_call_is_not_an_edge() {
         // jalr offset 0 on a base of 0x1000 calls the function itself.
         let code = words(&[0x0000_0097, 0x0000_80e7]);
-        let m = module(&code, &[("rec", 0x1000, 8)]);
-        let found = discover_riscv(&m);
-        assert!(call_graph_riscv(&m, &found).is_empty());
+        let m = view(&code, &[("rec", 0x1000, 8)]);
+        let found = crate::discover(&m);
+        assert!(crate::call_graph(&m, &found).is_empty());
     }
 
     #[test]
     fn seeds_outside_executable_sections_are_dropped() {
         let code = words(&[0x0000_8067]);
-        let m = module(&code, &[("data", 0x5000, 8)]);
+        let m = view(&code, &[("data", 0x5000, 8)]);
         // The entry point is inside .text, so exactly one function survives.
-        let found = discover_riscv(&m);
+        let found = crate::discover(&m);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rva, 0x1000);
     }
@@ -498,11 +506,11 @@ mod tests {
     #[test]
     fn the_result_is_sorted_by_address() {
         let code = words(&[0x0000_0013, 0x0000_0013, 0x0000_0013, 0x0000_8067]);
-        let m = module(
+        let m = view(
             &code,
             &[("c", 0x1008, 4), ("a", 0x1000, 4), ("b", 0x1004, 4)],
         );
-        let found = discover_riscv(&m);
+        let found = crate::discover(&m);
         let rvas: Vec<u64> = found.iter().map(|f| f.rva).collect();
         assert_eq!(rvas, vec![0x1000, 0x1004, 0x1008]);
     }
@@ -513,7 +521,7 @@ mod tests {
         // if the architecture gate stopped recognising RISC-V. This goes through the
         // public entry point, so the routing itself is covered.
         let code = words(&[0x0000_0013, 0x0000_8067]);
-        let m = module(&code, &[("f", 0x1000, 4)]);
+        let m = view(&code, &[("f", 0x1000, 4)]);
         assert!(m.arch.is_riscv64());
         let found = crate::discover(&m);
         // The file's entry point and the symbol share 0x1000, so they merge into one
@@ -529,8 +537,8 @@ mod tests {
         // lui x10, 0x2000 ; addi x10, x10, 0  ->  address 0x2000, which is .rodata.
         let code = words(&[0x0000_2537, 0x0005_0513, 0x0000_8067]);
         let m = module_with_rodata(&code, &[("f", 0x1000, 12)], b"a_literal\0");
-        let fns = discover_riscv(&m);
-        let xrefs = string_xrefs_riscv(&m, &fns);
+        let fns = crate::discover(&m);
+        let xrefs = crate::string_xrefs(&m, &fns);
         assert_eq!(xrefs.len(), 1);
         assert_eq!(xrefs[0].func_rva, 0x1000);
         assert_eq!(xrefs[0].string_rva, 0x2000);
@@ -542,8 +550,8 @@ mod tests {
         // The pair forms 0x9000, which no section covers, so nothing is recorded.
         let code = words(&[0x0000_9537, 0x0005_0513, 0x0000_8067]);
         let m = module_with_rodata(&code, &[("f", 0x1000, 12)], b"a_literal\0");
-        let fns = discover_riscv(&m);
-        assert!(string_xrefs_riscv(&m, &fns).is_empty());
+        let fns = crate::discover(&m);
+        assert!(crate::string_xrefs(&m, &fns).is_empty());
     }
 
     #[test]
@@ -551,8 +559,8 @@ mod tests {
         // 0x2000 is inside .rodata, but its contents are not a printable C string.
         let code = words(&[0x0000_2537, 0x0005_0513, 0x0000_8067]);
         let m = module_with_rodata(&code, &[("f", 0x1000, 12)], &[0x00, 0x01, 0x02, 0x00]);
-        let fns = discover_riscv(&m);
-        assert!(string_xrefs_riscv(&m, &fns).is_empty());
+        let fns = crate::discover(&m);
+        assert!(crate::string_xrefs(&m, &fns).is_empty());
     }
 
     #[test]
@@ -564,8 +572,8 @@ mod tests {
         let code = words(&[0x0040_2537, 0x0005_0513, 0x0000_8067]);
         let m = module_at(0x40_0000, &code, &[("f", 0x1000, 12)], b"rebased\0");
         assert_eq!(m.image_base, 0x40_0000, "fixture assumption");
-        let fns = discover_riscv(&m);
-        let xrefs = string_xrefs_riscv(&m, &fns);
+        let fns = crate::discover(&m);
+        let xrefs = crate::string_xrefs(&m, &fns);
         assert_eq!(xrefs.len(), 1, "rebased xref must be found: {xrefs:?}");
         assert_eq!(xrefs[0].string_rva, 0x2000);
         assert_eq!(xrefs[0].text, "rebased");
@@ -579,8 +587,8 @@ mod tests {
         let mut code = words(&[0x0000_1537, 0x0085_0513]);
         code.extend_from_slice(b"HELLO\0\0\0");
         let m = module_with_rodata(&code, &[("f", 0x1000, 16)], b"data_literal\0");
-        let fns = discover_riscv(&m);
-        let xrefs = string_xrefs_riscv(&m, &fns);
+        let fns = crate::discover(&m);
+        let xrefs = crate::string_xrefs(&m, &fns);
         assert!(
             xrefs.iter().all(|x| x.string_rva != 0x1008),
             "an executable address must not be reported as a string: {xrefs:?}"

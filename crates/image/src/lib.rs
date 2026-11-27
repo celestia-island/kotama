@@ -219,12 +219,19 @@ impl Arch {
     }
 
     /// True when instruction-level analysis is possible for this architecture.
-    /// True when instruction-level analysis is possible for this architecture.
+    ///
+    /// True for x86 through the iced decoder and for every architecture that has a
+    /// lifter crate. The named architectures are the same ones `is_aarch64`,
+    /// `is_riscv64` and `is_arm32` recognise, so this predicate cannot drift from them.
+    /// `bitness` is a separate question: it reports the x86 decoder's operand width
+    /// and is 0 for the lifter architectures.
     #[must_use]
-    pub const fn is_disassemblable(self) -> bool {
-        !matches!(self, Self::Other(_))
+    pub fn is_disassemblable(self) -> bool {
+        matches!(self, Self::X86_64 | Self::X86)
+            || self.is_aarch64()
+            || self.is_riscv64()
+            || self.is_arm32()
     }
-
     /// True for the 64-bit ARM architecture (Aarch64 / A64 instructions).
     ///
     /// Identified by its canonical name rather than a product or vendor, so any
@@ -1982,13 +1989,29 @@ mod tests {
     }
 
     #[test]
-    fn other_arch_is_recognised_but_not_disassemblable() {
-        let arch = Arch::Other("aarch64");
-        assert!(!arch.is_disassemblable());
-        assert_eq!(arch.bitness(), 0);
-        assert_eq!(arch.short(), "aarch64");
+    fn lifter_architectures_are_disassemblable_with_zero_x86_bitness() {
+        // A64, RISC-V and ARM have lifters, so they are disassemblable — but not
+        // through the x86 decoder, which is what `bitness` describes. Keeping the
+        // two facts apart is the point of this test.
+        for arch in [
+            Arch::Other("aarch64"),
+            Arch::Other("riscv64"),
+            Arch::Other("arm"),
+        ] {
+            assert!(arch.is_disassemblable(), "{arch:?}");
+            assert_eq!(arch.bitness(), 0, "{arch:?}");
+        }
+        assert_eq!(Arch::Other("aarch64").short(), "aarch64");
         assert!(Arch::X86_64.is_disassemblable());
         assert!(Arch::X86.is_disassemblable());
+    }
+
+    #[test]
+    fn an_architecture_without_a_lifter_is_recognised_but_not_disassemblable() {
+        let arch = Arch::Other("mips");
+        assert!(!arch.is_disassemblable());
+        assert_eq!(arch.bitness(), 0);
+        assert_eq!(arch.short(), "mips");
     }
 
     #[test]

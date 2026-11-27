@@ -2,25 +2,28 @@
 //!
 //! The x86 paths rely on two x86-only shapes: RIP-relative memory operands and
 //! absolute `imm32` addresses. A64 forms a data address with an `ADRP` + `ADD` pair
-//! instead, so the pairing lives in the architecture crate and this module only
+//! instead, so the pairing lives in the architecture crate and this view only
 //! consumes the resulting addresses. Both functions are deterministic and I/O-free.
 
 use std::collections::BTreeSet;
 
+use crate::ScanView;
 use kotama::{AddressSpace, FunctionEntry};
-use kotama_image::LoadedModule;
 use kotama_lift_a64::{address_forms, lift, Flow};
 
 use crate::{read_cstring, CallEdge, StringXref};
 
-/// Function-level call graph for an Aarch64 module.
+/// Function-level call graph for an Aarch64 view.
 ///
 /// Every `BL` with a direct target that lands inside a known function is an edge.
 /// Indirect calls (`BLR`) have no static target and are skipped, as are
 /// self-edges and targets outside the table.
 #[must_use]
-pub fn call_graph_a64(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<CallEdge> {
-    let space = module.address_space();
+pub fn call_graph_a64(
+    _view: &ScanView,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<CallEdge> {
     let mut edges = BTreeSet::new();
     for function in functions {
         if function.size == 0 {
@@ -53,14 +56,17 @@ pub fn call_graph_a64(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec
     edges.into_iter().collect()
 }
 
-/// String references for an Aarch64 module.
+/// String references for an Aarch64 view.
 ///
 /// An `ADRP` + `ADD` pair is a reference only when the address lands in a data
 /// section and a printable NUL-terminated string can be read there.
 #[must_use]
-pub fn string_xrefs_a64(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
-    let space = module.address_space();
-    let data_sections: Vec<(u64, u64)> = module
+pub fn string_xrefs_a64(
+    view: &ScanView,
+    space: &dyn AddressSpace,
+    functions: &[FunctionEntry],
+) -> Vec<StringXref> {
+    let data_sections: Vec<(u64, u64)> = view
         .sections
         .iter()
         .filter(|section| !section.executable && section.size > 0 && section.rva > 0)
@@ -86,7 +92,7 @@ pub fn string_xrefs_a64(module: &LoadedModule, functions: &[FunctionEntry]) -> V
             if !in_data(form.target) {
                 continue;
             }
-            if let Some(text) = read_cstring(&space, form.target) {
+            if let Some(text) = read_cstring(space, form.target) {
                 out.insert((function.rva, form.target, text));
             }
         }
@@ -102,13 +108,13 @@ pub fn string_xrefs_a64(module: &LoadedModule, functions: &[FunctionEntry]) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use kotama_image::LoadedModule;
 
     /// Build a minimal Mach-O 64 with an A64 `__text` and a `__cstring` section.
     ///
     /// `LoadedModule` can only be built by parsing bytes, so the fixture is assembled
     /// here. Layout mirrors the image crate's own Mach-O tests.
-    fn module(code: &[u8], cstrings: &[u8], symbols: &[(&str, u64)]) -> LoadedModule {
+    fn view(code: &[u8], cstrings: &[u8], symbols: &[(&str, u64)]) -> LoadedModule {
         const BASE: u64 = 0x1_0000_0000;
         const TEXT_RVA: u64 = 0x1000;
         const CSTR_RVA: u64 = 0x2000;
@@ -235,9 +241,9 @@ mod tests {
     fn bl_edges_become_call_edges() {
         // 0x1000: bl .+8 -> 0x1008 ; 0x1004: ret ; 0x1008: ret
         let code = words(&[0x9400_0002, 0xd65f_03c0, 0xd65f_03c0]);
-        let module = module(&code, &[], &[("_main", 0x1000)]);
-        let fns = crate::a64::discover_a64(&module);
-        let edges = call_graph_a64(&module, &fns);
+        let view = view(&code, &[], &[("_main", 0x1000)]);
+        let fns = crate::discover(&view);
+        let edges = crate::call_graph(&view, &fns);
         assert_eq!(edges.len(), 1);
         assert_eq!((edges[0].from, edges[0].to), (0x1000, 0x1008));
     }
@@ -246,9 +252,9 @@ mod tests {
     fn a_self_call_is_not_an_edge() {
         // 0x1000: bl .-4 -> 0x1000 (recursive) ; 0x1004: ret
         let code = words(&[0x97ff_ffff, 0xd65f_03c0]);
-        let module = module(&code, &[], &[("_rec", 0x1000)]);
-        let fns = crate::a64::discover_a64(&module);
-        assert!(call_graph_a64(&module, &fns).is_empty());
+        let view = view(&code, &[], &[("_rec", 0x1000)]);
+        let fns = crate::discover(&view);
+        assert!(crate::call_graph(&view, &fns).is_empty());
     }
 
     #[test]
@@ -257,9 +263,9 @@ mod tests {
         // At 0x1000 the page of 0x2000 is one page ahead: offset = 0x1000.
         let code = words(&[0xb000_0000, 0x9100_0000, 0xd65f_03c0]);
         let cstrings = b"hello_a64\0";
-        let module = module(&code, cstrings, &[("_main", 0x1000)]);
-        let fns = crate::a64::discover_a64(&module);
-        let xrefs = string_xrefs_a64(&module, &fns);
+        let view = view(&code, cstrings, &[("_main", 0x1000)]);
+        let fns = crate::discover(&view);
+        let xrefs = crate::string_xrefs(&view, &fns);
         assert_eq!(xrefs.len(), 1);
         assert_eq!(xrefs[0].func_rva, 0x1000);
         assert_eq!(xrefs[0].string_rva, 0x2000);
@@ -271,9 +277,9 @@ mod tests {
         // adrp x0, page(0x2000) ; ldr w1, [x0, #0] ; ret
         let code = words(&[0xb000_0000, 0xb940_0001, 0xd65f_03c0]);
         let cstrings = b"via_ldr\0";
-        let module = module(&code, cstrings, &[("_main", 0x1000)]);
-        let fns = crate::a64::discover_a64(&module);
-        let xrefs = string_xrefs_a64(&module, &fns);
+        let view = view(&code, cstrings, &[("_main", 0x1000)]);
+        let fns = crate::discover(&view);
+        let xrefs = crate::string_xrefs(&view, &fns);
         assert_eq!(xrefs.len(), 1);
         assert_eq!(xrefs[0].text, "via_ldr");
     }
@@ -282,17 +288,17 @@ mod tests {
     fn a_page_without_an_adder_is_not_a_reference() {
         // adrp alone materialises a page, not an object address.
         let code = words(&[0xb000_0000, 0xd65f_03c0]);
-        let module = module(&code, b"unused\0", &[("_main", 0x1000)]);
-        let fns = crate::a64::discover_a64(&module);
-        assert!(string_xrefs_a64(&module, &fns).is_empty());
+        let view = view(&code, b"unused\0", &[("_main", 0x1000)]);
+        let fns = crate::discover(&view);
+        assert!(crate::string_xrefs(&view, &fns).is_empty());
     }
 
     #[test]
     fn a_non_string_page_is_not_a_reference() {
         // The page points at data that is not a printable C string.
         let code = words(&[0xb000_0000, 0x9100_0000, 0xd65f_03c0]);
-        let module = module(&code, &[0x00, 0x01, 0x02, 0x00], &[("_main", 0x1000)]);
-        let fns = crate::a64::discover_a64(&module);
-        assert!(string_xrefs_a64(&module, &fns).is_empty());
+        let view = view(&code, &[0x00, 0x01, 0x02, 0x00], &[("_main", 0x1000)]);
+        let fns = crate::discover(&view);
+        assert!(crate::string_xrefs(&view, &fns).is_empty());
     }
 }
