@@ -194,6 +194,38 @@ def build_all(zig: str | None, targets: list[str], opt_levels: list[str]) -> int
 
     return failures
 
+def build_shared(zig: str | None, targets: list[str], opt_levels: list[str]) -> int:
+    """Build the shared-library fixtures under fixtures/src/shared/.
+
+    These are never run. They exist so that export-table consumers (runtime
+    mounting, proxy mirrors) have a real .so/.dll to read instead of a synthetic
+    table, and so that an ELF *executable* exporting nothing is a separate,
+    pinned fact rather than an accident of which fixture was loaded.
+    """
+    shared_dir = SRC_DIR / "shared"
+    sources = sorted(shared_dir.glob("*.c")) if shared_dir.is_dir() else []
+    if not sources:
+        return 0
+    failures = 0
+    for target in targets:
+        if zig is None:
+            sys.exit("build_fixtures: zig is required for shared-library targets")
+        is_windows = is_windows_target(target)
+        for opt in opt_levels:
+            out_dir = OUT_ROOT / target / f"-{opt}"
+            out_dir.mkdir(parents = True, exist_ok = True)
+            for src in sources:
+                lib = out_dir / ("lib" + src.stem + (".dll" if is_windows else ".so"))
+                cmd = [zig, "cc", "-target", target, f"-{opt}", "-shared", "-fPIC", "-fvisibility=hidden", "-o", str(lib), str(src)]
+                proc = run(cmd)
+                if proc.returncode != 0:
+                    failures += 1
+                    print(f"FAIL {target}/-{opt}/{lib.name}\n{proc.stderr.strip()}")
+                else:
+                    print(f"ok   {target}/-{opt}/{lib.name} ({lib.stat().st_size} B)")
+    return failures
+
+
 def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> int:
     failures = 0
     native_windows = os.name == "nt"
@@ -274,6 +306,9 @@ def main() -> int:
     opt_levels = OPT_LEVELS if args.opt == "all" else [args.opt]
 
     failures = build_all(zig, args.targets, opt_levels)
+    # Shared libraries are built for every lane: they are never run, so they cost
+    # only the compile, and export-table consumers need them per target.
+    failures += build_shared(zig, args.targets, opt_levels)
 
     if args.host_samples:
         copy_host_samples()
