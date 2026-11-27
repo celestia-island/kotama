@@ -4485,4 +4485,167 @@ mod tests {
             result.functions
         );
     }
+
+    /// A lifter must tile the whole executable section: every byte consumed, no
+    /// remainder, no width drift. Hand-built test bytes cannot show this — only a real
+    /// section with literal pools, padding and mixed-width instructions can.
+    #[test]
+    fn every_lifter_tiles_the_text_section_of_its_cross_fixtures() {
+        use kotama::AddressSpace as _;
+        // (lane, stem, which lifter)
+        let samples = [
+            ("riscv64-norvc", "norvc", "riscv"),
+            ("riscv64-rvc", "rvc", "riscv"),
+            ("riscv64-strings", "strings", "riscv"),
+            ("arm-a32", "a32", "arm"),
+            ("arm-thumb", "thumb", "arm"),
+            ("arm-strings", "a32", "arm"),
+            ("arm-strings-thumb", "thumb", "arm"),
+            ("aarch64-elf", "elf", "a64"),
+            ("aarch64-macho", "macho", "a64"),
+        ];
+        let mut checked = 0;
+        for (lane, stem, lifter) in samples {
+            let Some(path) = cross(lane, stem) else {
+                continue;
+            };
+            let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+            let space = module.address_space();
+            for section in module.sections.iter().filter(|s| s.executable) {
+                let bytes = space.read(section.rva, section.size as usize).unwrap();
+                let (consumed, error) = match lifter {
+                    "riscv" => {
+                        let lifted = kotama_lift_riscv::lift(bytes, section.rva);
+                        (lifted.iter().map(|l| usize::from(l.width)).sum(), None)
+                    }
+                    "arm" => {
+                        // The mode is read off the entry point: odd = Thumb.
+                        let mode = if module.entry_rva.unwrap_or(0) & 1 == 1 {
+                            kotama_lift_arm::Mode::Thumb
+                        } else {
+                            kotama_lift_arm::Mode::Arm
+                        };
+                        let lifted = kotama_lift_arm::lift(bytes, section.rva, mode);
+                        (lifted.iter().map(|l| l.width).sum(), None)
+                    }
+                    _ => {
+                        let (lifted, err) = kotama_lift_a64::lift(bytes, section.rva);
+                        let msg = err.map(|e| format!("{e:?}"));
+                        (lifted.len() * 4, msg)
+                    }
+                };
+                assert!(
+                    error.is_none(),
+                    "{lane}: the {lifter} lifter rejected a word in {}: {error:?}",
+                    section.name
+                );
+                assert_eq!(
+                    consumed,
+                    bytes.len(),
+                    "{lane}: the {lifter} lifter consumed {consumed} of {} bytes in {}",
+                    bytes.len(),
+                    section.name,
+                );
+            }
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("skip: cross fixtures not built");
+        }
+    }
+
+    /// A tiling that consumes every byte can still be misaligned internally if a
+    /// width is wrong. Cross-check: the A64 lifter is fixed-width, so its instruction
+    /// count must be exactly the section size over four.
+    #[test]
+    fn the_fixed_width_lifter_yields_exactly_size_over_four() {
+        use kotama::AddressSpace as _;
+        let Some(path) = cross("aarch64-elf", "elf") else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let space = module.address_space();
+        let section = module.sections.iter().find(|s| s.executable).unwrap();
+        let bytes = space.read(section.rva, section.size as usize).unwrap();
+        let (lifted, err) = kotama_lift_a64::lift(bytes, section.rva);
+        assert!(err.is_none());
+        assert_eq!(lifted.len(), bytes.len() / 4);
+        assert!(bytes.len().is_multiple_of(4));
+    }
+
+    /// The Thumb lifter must switch widths inside one section: the sample mixes 16-bit
+    /// and 32-bit instructions, so both widths appearing is the proof the rule works.
+    #[test]
+    fn the_thumb_lifter_sees_both_widths_in_a_real_section() {
+        use kotama::AddressSpace as _;
+        let Some(path) = cross("arm-thumb", "thumb") else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let space = module.address_space();
+        let section = module.sections.iter().find(|s| s.executable).unwrap();
+        let bytes = space.read(section.rva, section.size as usize).unwrap();
+        let lifted = kotama_lift_arm::lift(bytes, section.rva, kotama_lift_arm::Mode::Thumb);
+        let narrow = lifted.iter().filter(|l| l.width == 2).count();
+        let wide = lifted.iter().filter(|l| l.width == 4).count();
+        assert!(narrow > 0 && wide > 0, "narrow={narrow} wide={wide}");
+        // Tiling alone is blind to a wrong width rule: a 4-byte instruction read as two
+        // 2-byte ones still consumes the same bytes. The count is what pins the rule.
+        // 664 is what a reference decoder produces for this section; a rule that treats
+        // the 11101 prefix as narrow yields 707 instead.
+        assert_eq!(
+            lifted.len(),
+            664,
+            "instruction count must match the reference"
+        );
+    }
+
+    /// The RISC-V compressed build must contain 2-byte instructions the plain build does
+    /// not: that is what the C extension is, and the widths prove the sample is
+    /// really a different encoding and not the same bytes relabelled.
+    #[test]
+    fn the_compressed_riscv_build_has_narrow_instructions_the_plain_one_lacks() {
+        use kotama::AddressSpace as _;
+        let (Some(a), Some(b)) = (cross("riscv64-norvc", "norvc"), cross("riscv64-rvc", "rvc"))
+        else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let widths = |path: &std::path::Path| {
+            let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+            let space = module.address_space();
+            let section = module.sections.iter().find(|s| s.executable).unwrap();
+            let bytes = space.read(section.rva, section.size as usize).unwrap();
+            let lifted = kotama_lift_riscv::lift(bytes, section.rva);
+            (
+                lifted.iter().filter(|l| l.width == 2).count(),
+                lifted.iter().filter(|l| l.width == 4).count(),
+            )
+        };
+        let (plain_narrow, _) = widths(&a);
+        let (compressed_narrow, _) = widths(&b);
+        assert_eq!(
+            plain_narrow, 0,
+            "the plain build has no 2-byte instructions"
+        );
+        assert!(
+            compressed_narrow > 0,
+            "the +c build must have 2-byte instructions"
+        );
+
+        // Tiling is blind to a wrong width rule (a 4-byte read as two 2-byte ones
+        // consumes the same bytes), so the count is what pins it. Both builds decode to
+        // 60 instructions on their .text: 0xf0/4, and 0x8c with the C extension mixed in.
+        let count = |path: &std::path::Path| {
+            let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+            let space = module.address_space();
+            let section = module.sections.iter().find(|s| s.executable).unwrap();
+            let bytes = space.read(section.rva, section.size as usize).unwrap();
+            kotama_lift_riscv::lift(bytes, section.rva).len()
+        };
+        assert_eq!(count(&a), 60, "plain build instruction count");
+        assert_eq!(count(&b), 60, "compressed build instruction count");
+    }
 }
