@@ -389,7 +389,12 @@ dependencies = [
  "kotama-proxy",
  "kotama-runtime-jni",
  "kotama-runtime-lua",
+ "kotama-runtime-quickjs",
 ]
+
+[[package]]
+name = "kotama-runtime-quickjs"
+version = "0.1.0"
 
 [[package]]
 name = "kotama-scan"

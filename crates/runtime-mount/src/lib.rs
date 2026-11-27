@@ -21,6 +21,7 @@
 use kotama_proxy::hook_plan::{plan_hooks, HookPlan, HookPlanError, HookSelection, HookableSymbol};
 use kotama_runtime_jni::JniCategory;
 use kotama_runtime_lua::LuaCategory;
+use kotama_runtime_quickjs::QuickJsCategory;
 
 /// Which runtime a mount point belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,6 +30,8 @@ pub enum Runtime {
     Jni,
     /// The Lua C API.
     Lua,
+    /// The QuickJS-ng C ABI, as re-implemented in Rust by `quickrs-capi`.
+    QuickJs,
 }
 
 /// Semantic grouping shared by both runtimes, for selecting by role rather than name.
@@ -108,6 +111,42 @@ const fn lua_role(category: LuaCategory) -> Role {
 /// the number. The base keeps the two key spaces disjoint.
 pub const LUA_GROUP_BASE: u32 = 0x1_0000;
 
+/// First group key used for QuickJS mount points.
+///
+/// Placed above both the JNI slot range and the Lua base so the three key spaces stay
+/// disjoint; see [`LUA_GROUP_BASE`] for why an index must not start at zero.
+pub const QUICKJS_GROUP_BASE: u32 = 0x2_0000;
+
+/// Map a QuickJS category onto the shared roles.
+const fn quickjs_role(category: QuickJsCategory) -> Role {
+    match category {
+        QuickJsCategory::Runtime => Role::State,
+        QuickJsCategory::Call => Role::Call,
+        QuickJsCategory::Error => Role::Error,
+        QuickJsCategory::Memory => Role::Memory,
+        QuickJsCategory::Data | QuickJsCategory::Value => Role::Data,
+        QuickJsCategory::Module | QuickJsCategory::Class | QuickJsCategory::Property => {
+            Role::Lookup
+        }
+        QuickJsCategory::Other => Role::Other,
+    }
+}
+
+/// Every QuickJS C ABI entry as a mount point, one group per function.
+#[must_use]
+pub fn quickjs_points() -> Vec<MountPoint> {
+    kotama_runtime_quickjs::QUICKJS_ENTRIES
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| MountPoint {
+            runtime: Runtime::QuickJs,
+            group: QUICKJS_GROUP_BASE + u32::try_from(index).unwrap_or(u32::MAX),
+            name: entry.name.to_string(),
+            role: quickjs_role(entry.category),
+        })
+        .collect()
+}
+
 /// Every JNI slot as a mount point, grouped by slot.
 #[must_use]
 pub fn jni_points() -> Vec<MountPoint> {
@@ -142,6 +181,7 @@ pub fn lua_points() -> Vec<MountPoint> {
 pub fn all_points() -> Vec<MountPoint> {
     let mut out = jni_points();
     out.extend(lua_points());
+    out.extend(quickjs_points());
     out
 }
 
@@ -250,23 +290,54 @@ mod tests {
     }
 
     #[test]
-    fn the_two_runtables_do_not_share_group_keys() {
-        // JNI slots start at 4; Lua groups are offset past the slot range so a plan
-        // over both runtimes never merges a Lua function with a JNI slot.
+    fn the_three_runtimes_do_not_share_group_keys() {
+        // JNI slots start at 4; Lua and QuickJS groups are offset past that range so a
+        // plan over all three never merges two different call sites into one hook.
         let all = all_points();
-        let jni_groups: std::collections::BTreeSet<u32> = all
-            .iter()
-            .filter(|p| p.runtime == Runtime::Jni)
-            .map(|p| p.group)
-            .collect();
-        let lua_groups: std::collections::BTreeSet<u32> = all
-            .iter()
-            .filter(|p| p.runtime == Runtime::Lua)
-            .map(|p| p.group)
-            .collect();
+        let groups_of = |runtime: Runtime| -> std::collections::BTreeSet<u32> {
+            all.iter()
+                .filter(|p| p.runtime == runtime)
+                .map(|p| p.group)
+                .collect()
+        };
+        let (jni, lua, quickjs) = (
+            groups_of(Runtime::Jni),
+            groups_of(Runtime::Lua),
+            groups_of(Runtime::QuickJs),
+        );
+        assert!(jni.intersection(&lua).next().is_none(), "jni/lua collide");
         assert!(
-            jni_groups.intersection(&lua_groups).next().is_none(),
-            "groups collide across runtimes"
+            jni.intersection(&quickjs).next().is_none(),
+            "jni/quickjs collide"
+        );
+        assert!(
+            lua.intersection(&quickjs).next().is_none(),
+            "lua/quickjs collide"
+        );
+    }
+
+    #[test]
+    fn quickjs_entry_points_plan_through_the_shared_selector() {
+        // The point of the survey: a Rust-implemented engine that speaks the QuickJS
+        // C ABI is planned exactly like a C engine, because its hooks are extern symbols.
+        let plan = plan_runtime(
+            &quickjs_points(),
+            &HookSelection {
+                names: vec!["JS_Eval".to_string(), "JS_Call".to_string()],
+                ..HookSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.hooks().len(), 2);
+        assert!(quickjs_points()
+            .iter()
+            .all(|p| p.runtime == Runtime::QuickJs));
+        assert_eq!(
+            names_with_role(&quickjs_points(), Role::Call)
+                .iter()
+                .filter(|n| n.as_str() == "JS_Eval")
+                .count(),
+            1
         );
     }
 
@@ -349,5 +420,44 @@ mod tests {
     fn each_table_carries_its_own_runtime_tag() {
         assert!(lua_points().iter().all(|p| p.runtime == Runtime::Lua));
         assert!(jni_points().iter().all(|p| p.runtime == Runtime::Jni));
+    }
+
+    #[test]
+    fn quickjs_state_role_and_all_points_coverage() {
+        let state = names_with_role(&quickjs_points(), Role::State);
+        assert!(state.contains(&"JS_NewRuntime".to_string()), "{state:?}");
+        // Every runtime must be represented in the combined table; a dropped one would
+        // otherwise pass the pairwise-disjointness check as an empty set.
+        let all = all_points();
+        for runtime in [Runtime::Jni, Runtime::Lua, Runtime::QuickJs] {
+            assert!(
+                all.iter().any(|p| p.runtime == runtime),
+                "{runtime:?} missing from all_points"
+            );
+        }
+    }
+
+    #[test]
+    fn each_quickjs_role_is_pinned_by_a_named_entry() {
+        let points = quickjs_points();
+        let has =
+            |role: Role, name: &str| names_with_role(&points, role).contains(&name.to_string());
+        assert!(has(Role::State, "JS_NewRuntime"));
+        assert!(has(Role::Call, "JS_Eval"));
+        assert!(has(Role::Error, "JS_GetException"));
+        assert!(has(Role::Memory, "JS_NewArrayBuffer"));
+        assert!(has(Role::Data, "JS_NewStringLen"));
+        assert!(has(Role::Lookup, "JS_LoadModule"));
+        assert!(has(Role::Lookup, "JS_GetProperty"));
+    }
+
+    #[test]
+    fn other_role_stays_other() {
+        // The catch-all must not absorb a mapped category, and must still resolve to
+        // something: JS_AddIntrinsicBaseObjects is deliberately Other.
+        let points = quickjs_points();
+        assert!(names_with_role(&points, Role::Other)
+            .contains(&"JS_AddIntrinsicBaseObjects".to_string()));
+        assert!(!names_with_role(&points, Role::Other).contains(&"JS_NewRuntime".to_string()));
     }
 }
