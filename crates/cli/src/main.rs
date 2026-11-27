@@ -24,6 +24,7 @@ use serde::Serialize;
 mod hook;
 mod proxy;
 mod resource;
+mod runtime;
 
 const USAGE: &str = "\
 kotama — static dissection and live instrumentation for binaries
@@ -94,6 +95,7 @@ fn main() -> ExitCode {
         Some("pack") => pack(&args.collect::<Vec<_>>()),
         Some("hook") => hook::run(&args.collect::<Vec<_>>()),
         Some("proxy") => proxy::run(&args.collect::<Vec<_>>()),
+        Some("runtime") => runtime::run(&args.collect::<Vec<_>>()),
         Some("resource") => resource::run(&args.collect::<Vec<_>>()),
         Some(command) => {
             eprintln!("kotama: unknown command `{command}`\n\n{USAGE}");
