@@ -83,6 +83,8 @@ mod field_xref_tests {
 
 pub mod msvc_rtti;
 
+pub mod a64;
+
 pub use kotama::Evidence;
 pub use kotama::FunctionEntry;
 
@@ -143,6 +145,11 @@ pub struct ScanView<'a> {
 /// 确定性：同一 [`LoadedModule`] 两次调用返回逐字段相同的结果。
 #[must_use]
 pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
+    // Aarch64 has its own decoder and its own evidence set; keep it off the
+    // iced-x86 path entirely.
+    if module.arch.is_aarch64() {
+        return a64::discover_a64(module);
+    }
     // Instruction-level discovery needs an x86 decoder. A recognised but
     // non-disassemblable architecture yields no functions rather than a panic.
     if !module.arch.is_disassemblable() {
