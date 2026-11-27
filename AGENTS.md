@@ -111,9 +111,19 @@
     IDA 就找不到伴生 PDB。同一份 `x86_64-windows-msvc/-O2/loops.exe` 上，无 PDB 的 kotama 覆盖
     PDB 真值 0.845、无 PDB 的 IDA 9.1 只有 0.751（x86 上 0.820 对 0.796）。所以「无 PDB 夹具
     recall 0.845」是符号信息上限，不是欠采样；不要再为它加无引用的 `ret` 之后起点规则。
-  - ⚠️ 各 worktree 的 `fixtures/generated` 是指向 `_worktree/kotama/windows-phase/fixtures/generated` 的 junction（2026-11-25 实踩）：
-    `git worktree remove` 会**穿过 junction** 把共享夹具删空。移除 worktree 前先 `cmd /c rmdir <wt>\fixtures\generated`
-    （只删链接），再 remove；被删空后用 `tools/build_fixtures.py --run` 与 `--targets x86_64-windows-msvc x86-windows-msvc --run` 重建。
+  - ⚠️ 各 worktree 的 `fixtures/generated` 是指向 `_worktree/kotama/windows-phase/fixtures/generated` 的 junction
+    （2026-11-25 实踩；2026-11-27 再踩一次）：`git worktree remove` 会**穿过 junction** 把共享夹具删空。
+    移除 worktree 前**必须**先只删链接，用 PowerShell 原生删除：
+
+    ```powershell
+    Remove-Item -LiteralPath '<wt>/fixtures/generated' -Force
+    ```
+
+    ⚠️ **不要用 `cmd /c rmdir`**：本工作区路径含中文（`D:\源代码\...`），`cmd` 收到后会报
+    `Invalid switch - "源代码"` 而**静默失败**，junction 仍在，紧接着的 `git worktree remove` 就把共享
+    夹具删空——2026-11-27 因此两次清空（256 → 0 文件）。删完先数一下：
+    `(Get-ChildItem <shared> -Recurse -File).Count` 前后应一致。
+    被删空后用 `tools/build_fixtures.py --run` 与 `--targets x86_64-windows-msvc x86-windows-msvc --run` 重建。
 
 
 ## 版本声明
