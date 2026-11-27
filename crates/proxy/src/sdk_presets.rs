@@ -29,6 +29,19 @@ pub struct Preset {
     pub names: &'static [&'static str],
 }
 
+/// The platform a preset should be selected for, read off the container.
+///
+/// PE is Windows; ELF and Mach-O are POSIX. Everything else is treated as POSIX
+/// because that is the side whose names are excused on Windows, and an excuse
+/// on a platform that has them is harmless (a present name is still hooked).
+#[must_use]
+pub fn platform_of_container(container: kotama_image::Container) -> Platform {
+    match container {
+        kotama_image::Container::Pe32 | kotama_image::Container::Pe64 => Platform::Native,
+        _ => Platform::Posix,
+    }
+}
+
 impl Preset {
     /// This preset as a hook selection for one platform.
     ///
