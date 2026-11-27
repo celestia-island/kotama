@@ -217,9 +217,19 @@ impl Arch {
     }
 
     /// True when instruction-level analysis is possible for this architecture.
+    /// True when instruction-level analysis is possible for this architecture.
     #[must_use]
     pub const fn is_disassemblable(self) -> bool {
         !matches!(self, Self::Other(_))
+    }
+
+    /// True for the 64-bit ARM architecture (Aarch64 / A64 instructions).
+    ///
+    /// Identified by its canonical name rather than a product or vendor, so any
+    /// container carrying A64 code (ELF, Mach-O, PE, raw) qualifies.
+    #[must_use]
+    pub fn is_aarch64(self) -> bool {
+        matches!(self, Self::Other("aarch64") | Self::Other("aarch64_ilp32"))
     }
 
     /// 短名（进 JSON 报告）。

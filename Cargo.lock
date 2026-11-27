@@ -381,6 +381,7 @@ dependencies = [
  "iced-x86",
  "kotama",
  "kotama-image",
+ "kotama-lift-a64",
 ]
 
 [[package]]
