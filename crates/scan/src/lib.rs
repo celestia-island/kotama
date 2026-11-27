@@ -4278,4 +4278,211 @@ mod tests {
         assert!(!view.arch.is_disassemblable());
         assert!(discover_with(view, &space).is_empty());
     }
+
+    /// Cross-compiled fixtures live under `fixtures/generated/cross/<lane>/`.
+    fn cross(lane: &str, stem: &str) -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/cross")
+            .join(lane)
+            .join(stem);
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required cross fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            );
+        } else {
+            None
+        }
+    }
+
+    /// Run the full static pipeline and the live-path discovery on a cross sample.
+    struct CrossResult {
+        arch: &'static str,
+        functions: usize,
+        edges: usize,
+        xrefs: usize,
+        exact: usize,
+        live: usize,
+    }
+
+    fn survey(bytes: &[u8]) -> CrossResult {
+        let module = LoadedModule::parse(bytes).expect("cross fixture must parse");
+        let functions = crate::discover(&module);
+        let edges = crate::call_graph(&module, &functions).len();
+        let xrefs = crate::string_xrefs(&module, &functions).len();
+        let exact = functions.iter().filter(|f| !f.size_inferred).count();
+        let space = module.address_space();
+        let view = ScanView {
+            container: module.container,
+            arch: module.arch,
+            image_base: module.image_base,
+            entry_rva: module.entry_rva,
+            sections: &module.sections,
+            symbols: &module.symbols,
+            dynamic_symbols: &module.dynamic_symbols,
+            debug_functions: &module.debug_functions,
+            eh_frame_functions: &module.eh_frame_functions,
+        };
+        let live = discover_with(view, &space).len();
+        let arch = match module.arch {
+            Arch::Other("aarch64") => "aarch64",
+            Arch::Other("riscv64") => "riscv64",
+            Arch::Other("arm") => "arm",
+            other => panic!("unexpected arch {other:?}"),
+        };
+        CrossResult {
+            arch,
+            functions: functions.len(),
+            edges,
+            xrefs,
+            exact,
+            live,
+        }
+    }
+
+    /// The live path and the static path must agree on every cross sample. This is the
+    /// regression test for the bug where `discover_with` gated every lifter
+    /// architecture out and returned nothing for A64, RISC-V and ARM.
+    #[test]
+    fn every_cross_sample_agrees_between_static_and_live_discovery() {
+        let lanes = [
+            ("riscv64-norvc", "norvc"),
+            ("riscv64-rvc", "rvc"),
+            ("riscv64-strings", "strings"),
+            ("arm-a32", "a32"),
+            ("arm-thumb", "thumb"),
+            ("arm-strings", "a32"),
+            ("arm-strings-thumb", "thumb"),
+            ("aarch64-elf", "elf"),
+            ("aarch64-macho", "macho"),
+        ];
+        let mut checked = 0;
+        for (lane, stem) in lanes {
+            let Some(path) = cross(lane, stem) else {
+                continue;
+            };
+            let result = survey(&std::fs::read(path).unwrap());
+            assert!(
+                result.live == result.functions,
+                "{lane}: static found {} but live found {}",
+                result.functions,
+                result.live
+            );
+            assert!(result.functions > 0, "{lane}: no functions found");
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("skip: cross fixtures not built");
+        }
+    }
+
+    /// Each lifter recovers the structure its sample was written to contain.
+    #[test]
+    fn each_lifter_recovers_the_structure_of_its_sample() {
+        // (lane, stem, arch, functions, edges, xrefs)
+        let expected = [
+            ("riscv64-norvc", "norvc", "riscv64", 4, 3, 0),
+            ("riscv64-rvc", "rvc", "riscv64", 4, 3, 0),
+            ("riscv64-strings", "strings", "riscv64", 3, 2, 3),
+            ("arm-a32", "a32", "arm", 20, 18, 0),
+            ("arm-thumb", "thumb", "arm", 20, 18, 0),
+            ("arm-strings", "a32", "arm", 18, 16, 3),
+            ("arm-strings-thumb", "thumb", "arm", 18, 16, 3),
+            ("aarch64-elf", "elf", "aarch64", 22, 17, 0),
+            ("aarch64-macho", "macho", "aarch64", 4, 3, 0),
+        ];
+        let mut checked = 0;
+        for (lane, stem, arch, functions, edges, xrefs) in expected {
+            let Some(path) = cross(lane, stem) else {
+                continue;
+            };
+            let result = survey(&std::fs::read(path).unwrap());
+            assert_eq!(result.arch, arch, "{lane}");
+            assert_eq!(result.functions, functions, "{lane}: function count");
+            assert_eq!(result.edges, edges, "{lane}: call edges");
+            assert!(
+                result.xrefs >= xrefs,
+                "{lane}: expected at least {xrefs} string xrefs, got {}",
+                result.xrefs
+            );
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("skip: cross fixtures not built");
+        }
+    }
+
+    /// The compressed and plain RISC-V builds of the same source must yield the same
+    /// call graph: the C extension changes encoding, not structure.
+    #[test]
+    fn compressed_and_plain_riscv_builds_share_a_call_graph() {
+        let (Some(a), Some(b)) = (cross("riscv64-norvc", "norvc"), cross("riscv64-rvc", "rvc"))
+        else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let plain = survey(&std::fs::read(a).unwrap());
+        let compressed = survey(&std::fs::read(b).unwrap());
+        assert_eq!(plain.functions, compressed.functions);
+        assert_eq!(plain.edges, compressed.edges);
+    }
+
+    /// Same for ARM versus Thumb.
+    #[test]
+    fn arm_and_thumb_builds_share_a_call_graph() {
+        let (Some(a), Some(b)) = (cross("arm-a32", "a32"), cross("arm-thumb", "thumb")) else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let a32 = survey(&std::fs::read(a).unwrap());
+        let thumb = survey(&std::fs::read(b).unwrap());
+        assert_eq!(a32.functions, thumb.functions);
+        assert_eq!(a32.edges, thumb.edges);
+    }
+
+    /// The string samples must find their three literals in both encodings of each
+    /// architecture; the literal count is the whole point of those samples.
+    #[test]
+    fn string_samples_find_their_literals_in_both_encodings() {
+        for (lane, stem) in [
+            ("riscv64-strings", "strings"),
+            ("arm-strings", "a32"),
+            ("arm-strings-thumb", "thumb"),
+        ] {
+            let Some(path) = cross(lane, stem) else {
+                continue;
+            };
+            let result = survey(&std::fs::read(path).unwrap());
+            assert!(
+                result.xrefs >= 3,
+                "{lane}: the sample has three literals, found {}",
+                result.xrefs
+            );
+        }
+    }
+
+    /// A stripped A64 ELF has no symbols; its function boundaries come from the frame
+    /// section, and most of them must be exact rather than inferred.
+    #[test]
+    fn a_stripped_a64_elf_gets_exact_boundaries_from_its_frame_section() {
+        let Some(path) = cross("aarch64-elf", "elf") else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let module = LoadedModule::parse(&bytes).unwrap();
+        assert!(
+            module.symbols.is_empty(),
+            "the cross lane links with -s; symbols should be gone"
+        );
+        let result = survey(&bytes);
+        assert!(
+            result.exact >= result.functions / 2,
+            "most boundaries should be exact, got {} of {}",
+            result.exact,
+            result.functions
+        );
+    }
 }
