@@ -4,6 +4,7 @@
 //! guesses function ABIs, or claims to install hooks.
 
 pub mod hook_plan;
+pub mod sdk_presets;
 
 use std::collections::BTreeMap;
 
