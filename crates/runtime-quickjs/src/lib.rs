@@ -6,8 +6,11 @@
 //! same means as the C engine, because the hooks are extern symbols rather than Rust
 //! trait methods, so the existing runtime-mount planner applies to it unchanged.
 //!
-//! The list was extracted from the published crate source (0.16.2), not typed by
-//! hand, and the extraction is asserted by the test against the count.
+//! The list was extracted from the published crate source (0.16.2), then completed
+//! against the crate built as a shared library with its `capi` feature: 251
+//! `JS_*` exports, every one of them in this table. The source read alone had missed
+//! 36 — the intrinsics, the type predicates, the error constructors and two numeric
+//! conversions — which is why the table is checked against the binary, not the text.
 
 /// Semantic category of a QuickJS entry point.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,10 +57,23 @@ pub const EXTRACTED_FROM: &str = "quickrs-capi 0.16.2";
 
 /// The C ABI entry points, sorted by name.
 pub const QUICKJS_ENTRIES: &[QuickJsEntry] = &[
+    QuickJsEntry::new("JS_AddIntrinsicAToB", QuickJsCategory::Other),
     QuickJsEntry::new("JS_AddIntrinsicBaseObjects", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicBigInt", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicDOMException", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicDate", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicEval", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicJSON", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicMapSet", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicPromise", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicProxy", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicRegExp", QuickJsCategory::Other),
     QuickJsEntry::new("JS_AddIntrinsicRegExpCompiler", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicTypedArrays", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_AddIntrinsicWeakRef", QuickJsCategory::Other),
     QuickJsEntry::new("JS_AddModuleExport", QuickJsCategory::Module),
     QuickJsEntry::new("JS_AddModuleExportList", QuickJsCategory::Module),
+    QuickJsEntry::new("JS_AddPerformance", QuickJsCategory::Other),
     QuickJsEntry::new("JS_AddRuntimeFinalizer", QuickJsCategory::Runtime),
     QuickJsEntry::new("JS_AtomToCStringLen", QuickJsCategory::Data),
     QuickJsEntry::new("JS_AtomToString", QuickJsCategory::Data),
@@ -144,6 +160,8 @@ pub const QUICKJS_ENTRIES: &[QuickJsEntry] = &[
     QuickJsEntry::new("JS_IsArrayBuffer", QuickJsCategory::Memory),
     QuickJsEntry::new("JS_IsAsyncFunction", QuickJsCategory::Value),
     QuickJsEntry::new("JS_IsConstructor", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsDataView", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsDate", QuickJsCategory::Call),
     QuickJsEntry::new("JS_IsEqual", QuickJsCategory::Value),
     QuickJsEntry::new("JS_IsError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_IsExtensible", QuickJsCategory::Property),
@@ -152,11 +170,19 @@ pub const QUICKJS_ENTRIES: &[QuickJsEntry] = &[
     QuickJsEntry::new("JS_IsInstanceOf", QuickJsCategory::Property),
     QuickJsEntry::new("JS_IsJobPending", QuickJsCategory::Runtime),
     QuickJsEntry::new("JS_IsLiveObject", QuickJsCategory::Value),
+    QuickJsEntry::new("JS_IsMap", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsPromise", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsProxy", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsRegExp", QuickJsCategory::Call),
     QuickJsEntry::new("JS_IsRegisteredClass", QuickJsCategory::Class),
     QuickJsEntry::new("JS_IsSameValue", QuickJsCategory::Value),
     QuickJsEntry::new("JS_IsSameValueZero", QuickJsCategory::Value),
+    QuickJsEntry::new("JS_IsSet", QuickJsCategory::Call),
     QuickJsEntry::new("JS_IsStrictEqual", QuickJsCategory::Value),
     QuickJsEntry::new("JS_IsUncatchableError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_IsWeakMap", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsWeakRef", QuickJsCategory::Call),
+    QuickJsEntry::new("JS_IsWeakSet", QuickJsCategory::Call),
     QuickJsEntry::new("JS_JSONStringify", QuickJsCategory::Value),
     QuickJsEntry::new("JS_LoadModule", QuickJsCategory::Module),
     QuickJsEntry::new("JS_MarkValue", QuickJsCategory::Memory),
@@ -182,6 +208,7 @@ pub const QUICKJS_ENTRIES: &[QuickJsEntry] = &[
     QuickJsEntry::new("JS_NewContextRaw", QuickJsCategory::Runtime),
     QuickJsEntry::new("JS_NewDate", QuickJsCategory::Value),
     QuickJsEntry::new("JS_NewError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_NewInternalError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_NewNumber", QuickJsCategory::Value),
     QuickJsEntry::new("JS_NewObject", QuickJsCategory::Value),
     QuickJsEntry::new("JS_NewObjectClass", QuickJsCategory::Class),
@@ -190,15 +217,20 @@ pub const QUICKJS_ENTRIES: &[QuickJsEntry] = &[
     QuickJsEntry::new("JS_NewObjectProto", QuickJsCategory::Value),
     QuickJsEntry::new("JS_NewObjectProtoClass", QuickJsCategory::Class),
     QuickJsEntry::new("JS_NewObjectProtoClassExt", QuickJsCategory::Class),
+    QuickJsEntry::new("JS_NewPlainError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_NewPrivateSymbol", QuickJsCategory::Data),
     QuickJsEntry::new("JS_NewPromiseCapability", QuickJsCategory::Value),
     QuickJsEntry::new("JS_NewProxy", QuickJsCategory::Value),
+    QuickJsEntry::new("JS_NewRangeError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_NewReferenceError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_NewRuntime", QuickJsCategory::Runtime),
     QuickJsEntry::new("JS_NewRuntime2", QuickJsCategory::Runtime),
     QuickJsEntry::new("JS_NewSettledPromise", QuickJsCategory::Value),
     QuickJsEntry::new("JS_NewStringLen", QuickJsCategory::Data),
     QuickJsEntry::new("JS_NewStringUTF16", QuickJsCategory::Data),
     QuickJsEntry::new("JS_NewSymbol", QuickJsCategory::Data),
+    QuickJsEntry::new("JS_NewSyntaxError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_NewTypeError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_NewTypedArray", QuickJsCategory::Memory),
     QuickJsEntry::new("JS_NewUint8Array", QuickJsCategory::Memory),
     QuickJsEntry::new("JS_NewUint8ArrayCopy", QuickJsCategory::Memory),
@@ -250,14 +282,21 @@ pub const QUICKJS_ENTRIES: &[QuickJsEntry] = &[
     QuickJsEntry::new("JS_SetUncatchableError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_Throw", QuickJsCategory::Error),
     QuickJsEntry::new("JS_ThrowDOMException", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_ThrowInternalError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_ThrowOutOfMemory", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_ThrowPlainError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_ThrowRangeError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_ThrowReferenceError", QuickJsCategory::Error),
+    QuickJsEntry::new("JS_ThrowSyntaxError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_ThrowTypeError", QuickJsCategory::Error),
     QuickJsEntry::new("JS_ToBigInt64", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToBigUint64", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToBool", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToCStringLen2", QuickJsCategory::Data),
     QuickJsEntry::new("JS_ToCStringLenUTF16", QuickJsCategory::Data),
+    QuickJsEntry::new("JS_ToFloat64", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToIndex", QuickJsCategory::Other),
+    QuickJsEntry::new("JS_ToInt32", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToInt64", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToInt64Ext", QuickJsCategory::Other),
     QuickJsEntry::new("JS_ToNumber", QuickJsCategory::Other),
@@ -312,9 +351,80 @@ pub fn categorised_total() -> usize {
 mod tests {
     use super::*;
 
+    /// 251 is what a real shared library exports. The crate was built as a cdylib with
+    /// its `capi` feature (which is off by default — a default build exports no JS_*
+    /// at all) and its export table read: 268 exports, 251 of them JS_*. The earlier
+    /// figure of 215 came from reading the crate source and missed 36.
     #[test]
-    fn the_table_matches_the_extracted_count() {
-        assert_eq!(QUICKJS_ENTRIES.len(), 215);
+    fn the_table_matches_a_real_library_export_count() {
+        assert_eq!(QUICKJS_ENTRIES.len(), 251);
+    }
+
+    /// The 36 names the source read missed. Pinned by family so a regression names the
+    /// family rather than just changing a count.
+    #[test]
+    fn the_families_a_source_read_missed_are_present() {
+        let intrinsics = [
+            "JS_AddIntrinsicAToB",
+            "JS_AddIntrinsicBigInt",
+            "JS_AddIntrinsicDOMException",
+            "JS_AddIntrinsicDate",
+            "JS_AddIntrinsicEval",
+            "JS_AddIntrinsicJSON",
+            "JS_AddIntrinsicMapSet",
+            "JS_AddIntrinsicPromise",
+            "JS_AddIntrinsicProxy",
+            "JS_AddIntrinsicRegExp",
+            "JS_AddIntrinsicTypedArrays",
+            "JS_AddIntrinsicWeakRef",
+        ];
+        let predicates = [
+            "JS_IsDataView",
+            "JS_IsDate",
+            "JS_IsMap",
+            "JS_IsPromise",
+            "JS_IsProxy",
+            "JS_IsRegExp",
+            "JS_IsSet",
+            "JS_IsWeakMap",
+            "JS_IsWeakRef",
+            "JS_IsWeakSet",
+        ];
+        let errors = [
+            "JS_NewInternalError",
+            "JS_NewPlainError",
+            "JS_NewRangeError",
+            "JS_NewReferenceError",
+            "JS_NewSyntaxError",
+            "JS_NewTypeError",
+            "JS_ThrowInternalError",
+            "JS_ThrowPlainError",
+            "JS_ThrowRangeError",
+            "JS_ThrowReferenceError",
+            "JS_ThrowSyntaxError",
+        ];
+        let conversions = ["JS_ToFloat64", "JS_ToInt32"];
+        for name in intrinsics
+            .iter()
+            .chain(predicates.iter())
+            .chain(errors.iter())
+            .chain(conversions.iter())
+            .chain(std::iter::once(&"JS_AddPerformance"))
+        {
+            assert!(
+                by_name(name).is_some(),
+                "{name} is exported by the real library and must be in the table"
+            );
+        }
+    }
+
+    /// Every table name is a JS_* export; the completion must not have let a stray
+    /// prefix in.
+    #[test]
+    fn every_entry_is_a_js_prefixed_name() {
+        for entry in QUICKJS_ENTRIES {
+            assert!(entry.name.starts_with("JS_"), "{}", entry.name);
+        }
     }
 
     #[test]
@@ -372,5 +482,21 @@ mod tests {
         // The table is only as trustworthy as its provenance; a silent re-extraction
         // against a different engine version must be a visible change.
         assert_eq!(EXTRACTED_FROM, "quickrs-capi 0.16.2");
+    }
+
+    /// The categories assigned to the completed families follow the convention the
+    /// table already used: intrinsics sit with `AddIntrinsicBaseObjects` in `Other`,
+    /// every `*Error` constructor and thrower is `Error`. A completion that filed them
+    /// elsewhere would be a silent semantic change.
+    #[test]
+    fn the_completed_families_follow_the_existing_category_convention() {
+        for entry in QUICKJS_ENTRIES {
+            if entry.name.starts_with("JS_AddIntrinsic") || entry.name == "JS_AddPerformance" {
+                assert_eq!(entry.category, QuickJsCategory::Other, "{}", entry.name);
+            }
+            if entry.name.ends_with("Error") {
+                assert_eq!(entry.category, QuickJsCategory::Error, "{}", entry.name);
+            }
+        }
     }
 }
