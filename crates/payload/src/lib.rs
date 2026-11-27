@@ -24,6 +24,8 @@ use kotama_proto::Handshake;
 use kotama_proto::Request;
 use kotama_proto::Response;
 
+pub mod hook_guard;
+
 #[cfg(target_os = "linux")]
 pub mod linux_agent;
 #[cfg(target_os = "windows")]
