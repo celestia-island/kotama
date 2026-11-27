@@ -43,6 +43,92 @@ impl Preset {
     }
 }
 
+/// Which platform a preset name belongs to.
+///
+/// A preset is a *family*, and a family spans platforms: the C runtime family has
+/// `malloc` everywhere and `posix_memalign` only where POSIX is. Without this, a
+/// resolver on Windows reports `posix_memalign` as missing — which reads like a
+/// broken target when it is a name that platform never had. The classification
+/// below was taken from the export tables of the real system libraries, not from
+/// the interfaces' documentation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Platform {
+    /// Exported by the platform's own runtime library.
+    Native,
+    /// A POSIX (or Itanium-ABI) spelling; absent on Windows by design.
+    Posix,
+    /// Exported by a different system library than the preset's main one
+    /// (heap calls live in the NT layer, DXGI factories in `dxgi`, and so on).
+    OtherDll,
+    /// An OpenGL extension: not in `opengl32.dll`'s export table at all, obtained
+    /// through the platform's procedure-address query.
+    Extension,
+}
+
+/// Names whose platform is not `Native`; everything else is `Native`.
+const NOT_NATIVE: &[(&str, Platform)] = &[
+    ("aligned_alloc", Platform::Posix),
+    ("posix_memalign", Platform::Posix),
+    ("snprintf", Platform::Posix),
+    ("dlclose", Platform::Posix),
+    ("dlerror", Platform::Posix),
+    ("dlopen", Platform::Posix),
+    ("dlsym", Platform::Posix),
+    ("pthread_create", Platform::Posix),
+    ("pthread_join", Platform::Posix),
+    ("pthread_mutex_lock", Platform::Posix),
+    ("pthread_mutex_unlock", Platform::Posix),
+    ("clock_gettime", Platform::Posix),
+    ("getrandom", Platform::Posix),
+    ("gettimeofday", Platform::Posix),
+    ("random", Platform::Posix),
+    ("srandom", Platform::Posix),
+    ("BCryptGenRandom", Platform::OtherDll),
+    ("CryptGenRandom", Platform::OtherDll),
+    ("RtlGenRandom", Platform::OtherDll),
+    ("CreateDXGIFactory", Platform::OtherDll),
+    ("CreateDXGIFactory1", Platform::OtherDll),
+    ("D3D12CreateDevice", Platform::OtherDll),
+    ("eglCreateContext", Platform::OtherDll),
+    ("eglMakeCurrent", Platform::OtherDll),
+    ("eglSwapBuffers", Platform::OtherDll),
+    ("glXCreateContext", Platform::OtherDll),
+    ("glXMakeCurrent", Platform::OtherDll),
+    ("glXSwapBuffers", Platform::OtherDll),
+    ("glCompileShader", Platform::Extension),
+    ("glDrawArraysInstanced", Platform::Extension),
+    ("glDrawElementsInstanced", Platform::Extension),
+    ("glLinkProgram", Platform::Extension),
+    ("glShaderSource", Platform::Extension),
+    ("glUseProgram", Platform::Extension),
+];
+
+impl Preset {
+    /// The platform a name in this preset belongs to.
+    #[must_use]
+    pub fn platform_of(&self, name: &str) -> Platform {
+        NOT_NATIVE
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(Platform::Native, |(_, platform)| *platform)
+    }
+
+    /// The names in this preset that are expected on the given platform.
+    ///
+    /// `Native` and `OtherDll` names are real exports on Windows; `Extension`
+    /// names are real but reached differently; `Posix` names are not Windows at
+    /// all. On `Posix` the Itanium and C-runtime spellings apply and the decorated
+    /// MSVC ones do not, so the decorated names are filtered out there.
+    #[must_use]
+    pub fn names_for(&self, platform: Platform) -> Vec<&'static str> {
+        self.names
+            .iter()
+            .copied()
+            .filter(|name| self.platform_of(name) == platform)
+            .collect()
+    }
+}
+
 /// C runtime allocation and C string handling.
 pub const C_RUNTIME: Preset = Preset {
     id: "c-runtime",
@@ -517,5 +603,195 @@ mod tests {
             "cpp-runtime-msvc-x86"
         );
         assert!(PRESETS.iter().any(|p| p.id == "cpp-runtime-msvc-x86"));
+    }
+
+    /// Read the export names of a system library; `None` when it is not on this
+    /// machine (the test then skips rather than fails).
+    fn system_exports(dll: &str) -> Option<std::collections::BTreeSet<String>> {
+        let path = std::path::Path::new("C:/Windows/System32").join(dll);
+        let bytes = std::fs::read(path).ok()?;
+        let module = kotama_image::LoadedModule::parse(&bytes).ok()?;
+        Some(
+            module
+                .dynamic_symbols
+                .iter()
+                .filter(|symbol| !symbol.name.is_empty() && symbol.rva != 0)
+                .map(|symbol| symbol.name.clone())
+                .collect(),
+        )
+    }
+
+    /// The real system libraries agree with every classification: Native names are
+    /// exported by the preset's home library, Posix names by none of them, OtherDll
+    /// names by a library other than the home. This is what makes a "missing" from
+    /// the resolver mean what it says.
+    #[test]
+    fn the_platform_classification_matches_the_real_system_libraries() {
+        // (preset id, libraries that make up its home, other libraries its OtherDll
+        // names live in)
+        let homes: [(&str, &[&str], &[&str]); 7] = [
+            ("c-runtime", &["msvcrt.dll"], &[]),
+            ("win32-base", &["kernel32.dll"], &[]),
+            ("winsock", &["ws2_32.dll"], &[]),
+            (
+                "graphics-device",
+                &["d3d11.dll", "gdi32.dll", "opengl32.dll"],
+                &["dxgi.dll", "d3d12.dll"],
+            ),
+            ("graphics-draw", &["opengl32.dll"], &[]),
+            ("loader", &["kernel32.dll"], &[]),
+            (
+                "time-and-random",
+                &["kernel32.dll", "msvcrt.dll"],
+                &["bcrypt.dll", "advapi32.dll"],
+            ),
+        ];
+        let lib_exports = |lib: &str| -> Option<std::collections::BTreeSet<String>> {
+            let bytes =
+                std::fs::read(std::path::Path::new("C:/Windows/System32").join(lib)).ok()?;
+            let module = kotama_image::LoadedModule::parse(&bytes).ok()?;
+            Some(
+                module
+                    .dynamic_symbols
+                    .iter()
+                    .filter(|symbol| !symbol.name.is_empty() && symbol.rva != 0)
+                    .map(|symbol| symbol.name.clone())
+                    .collect(),
+            )
+        };
+        // The union of everything any row names, for the OtherDll "somewhere" check.
+        let mut any: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (home, others) in homes.iter().map(|(_, h, o)| (h, o)) {
+            for lib in home.iter().chain(others.iter()) {
+                if let Some(names) = lib_exports(lib) {
+                    any.extend(names);
+                }
+            }
+        }
+        let mut checked = 0;
+        for (id, home, _) in homes {
+            let Some(preset) = by_id(id) else { continue };
+            let home_set: std::collections::BTreeSet<String> = home
+                .iter()
+                .filter_map(|lib| lib_exports(lib))
+                .flatten()
+                .collect();
+            if home_set.is_empty() {
+                eprintln!("skip: none of {home:?} on this machine");
+                continue;
+            }
+            for name in preset.names {
+                match preset.platform_of(name) {
+                    Platform::Native => {
+                        assert!(
+                            home_set.contains(*name),
+                            "{id}: {name} is classified Native but none of {home:?} exports it"
+                        );
+                    }
+                    Platform::Posix => {
+                        assert!(
+                            !home_set.contains(*name),
+                            "{id}: {name} is classified Posix but {home:?} exports it"
+                        );
+                    }
+                    Platform::OtherDll => {
+                        assert!(
+                            !home_set.contains(*name),
+                            "{id}: {name} is OtherDll but {home:?} exports it"
+                        );
+                        // EGL and GLX entry points live in vendor libraries this
+                        // machine may not have, and RtlGenRandom was removed from
+                        // current Windows in favour of BCryptGenRandom; everything
+                        // else must be in some system library.
+                        if name.starts_with("egl")
+                            || name.starts_with("glX")
+                            || *name == "RtlGenRandom"
+                        {
+                            continue;
+                        }
+                        assert!(
+                            any.contains(*name),
+                            "{id}: {name} is OtherDll but no system library exports it"
+                        );
+                    }
+                    Platform::Extension => {
+                        assert!(
+                            !home_set.contains(*name),
+                            "{id}: {name} is an extension but {home:?} exports it"
+                        );
+                    }
+                }
+            }
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("skip: no system libraries readable");
+        }
+    }
+
+    /// Every preset name is classified, and the Posix set is exactly what the
+    /// libraries showed absent — no more, no less.
+    #[test]
+    fn every_posix_name_is_absent_from_every_windows_library() {
+        let libs = [
+            "msvcrt.dll",
+            "ucrtbase.dll",
+            "kernel32.dll",
+            "ws2_32.dll",
+            "ntdll.dll",
+        ];
+        let mut exports = std::collections::BTreeSet::new();
+        for lib in libs {
+            if let Some(names) = system_exports(lib) {
+                exports.extend(names);
+            }
+        }
+        if exports.is_empty() {
+            eprintln!("skip: no system libraries readable");
+            return;
+        }
+        for preset in PRESETS {
+            for name in preset.names_for(Platform::Posix) {
+                assert!(
+                    !exports.contains(name),
+                    "{name} is classified Posix but a Windows library exports it"
+                );
+            }
+        }
+    }
+
+    /// On Windows, a preset's Windows-names are its Native + OtherDll names; the
+    /// Posix ones are not offered. The split must be a partition of the whole list.
+    #[test]
+    fn names_for_partitions_the_preset_by_platform() {
+        for preset in PRESETS {
+            let total = preset.names.len();
+            let native = preset.names_for(Platform::Native).len();
+            let posix = preset.names_for(Platform::Posix).len();
+            let other = preset.names_for(Platform::OtherDll).len();
+            let ext = preset.names_for(Platform::Extension).len();
+            assert_eq!(native + posix + other + ext, total, "{}", preset.id);
+        }
+    }
+
+    /// The C runtime and loader presets are the mixed ones; a Windows resolver must
+    /// not be offered dlopen or posix_memalign.
+    #[test]
+    fn the_mixed_presets_exclude_posix_names_on_windows() {
+        let c = by_id("c-runtime").unwrap();
+        assert!(c.names_for(Platform::Posix).contains(&"posix_memalign"));
+        assert!(!c.names_for(Platform::Native).contains(&"posix_memalign"));
+        let loader = by_id("loader").unwrap();
+        assert!(loader.names_for(Platform::Posix).contains(&"dlopen"));
+        assert!(loader.names_for(Platform::Native).contains(&"LoadLibraryW"));
+    }
+
+    /// The decorated MSVC names are Native on Windows and mean nothing elsewhere.
+    #[test]
+    fn the_msvc_decorations_are_native_to_windows() {
+        for id in ["cpp-runtime-msvc", "cpp-runtime-msvc-x86"] {
+            let preset = by_id(id).unwrap();
+            assert_eq!(preset.names_for(Platform::Native).len(), preset.names.len());
+        }
     }
 }

@@ -23,7 +23,6 @@ use gimli::Dwarf;
 use gimli::EndianSlice;
 use gimli::LittleEndian;
 use kotama::{AddressSpace, ModuleId, Perms, Segment};
-use object::read::ExportTarget;
 use object::read::Object;
 use object::read::ObjectSection;
 use object::read::ObjectSegment;
@@ -1139,6 +1138,93 @@ fn dwarf_functions(file: &object::File<'_>, base: u64) -> Vec<SymbolInfo> {
     out
 }
 
+/// Every named entry in a PE export directory with its address, read directly.
+///
+/// `object::File::exports` drops exports whose address is not in an executable
+/// section. That is wrong for system libraries: current Windows exports a large
+/// share of `kernel32` — the heap APIs among them — through stubs that live in
+/// read-only data, and the filter silently discards them (211 of kernel32's 1698
+/// exports on the machine this was written on). An export's address is where a
+/// caller jumps; whether the bytes there are code is the caller's question.
+///
+/// Forwarded exports are not returned: their directory slot holds a string, not
+/// an address, and the forwarder chain is a loader concern. Neither are unnamed
+/// (ordinal-only) entries: every returned pair has a non-empty name.
+///
+/// Returns `None` when the image is not a PE or has no export directory.
+#[must_use]
+pub fn pe_export_entries(data: &[u8]) -> Option<Vec<(String, u64)>> {
+    let u16_at = |offset: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(
+            data.get(offset..offset + 2)?.try_into().ok()?,
+        ))
+    };
+    let u32_at = |offset: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            data.get(offset..offset + 4)?.try_into().ok()?,
+        ))
+    };
+    if data.get(0..2)? != b"MZ" {
+        return None;
+    }
+    let pe_offset = u32_at(0x3c)? as usize;
+    if data.get(pe_offset..pe_offset + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let is_pe32 = u16_at(pe_offset + 24)? == 0x10b;
+    let optional = pe_offset + 24;
+    let directory = if is_pe32 {
+        optional + 96
+    } else {
+        optional + 112
+    };
+    let export_rva = u32_at(directory)?;
+    if export_rva == 0 {
+        return None;
+    }
+    let section_count = u16_at(pe_offset + 6)? as usize;
+    let sections = optional + u16_at(pe_offset + 20)? as usize;
+    let rva_to_offset = |rva: u32| -> Option<usize> {
+        (0..section_count).find_map(|index| {
+            let header = sections + index * 40;
+            let virtual_size = u32_at(header + 8)?;
+            let virtual_address = u32_at(header + 12)?;
+            let raw_size = u32_at(header + 16)?;
+            let raw_pointer = u32_at(header + 20)?;
+            (virtual_address <= rva && rva < virtual_address + virtual_size.max(raw_size))
+                .then(|| raw_pointer as usize + (rva - virtual_address) as usize)
+        })
+    };
+    let export_dir = rva_to_offset(export_rva)?;
+    let function_count = u32_at(export_dir + 20)? as usize;
+    let name_count = u32_at(export_dir + 24)? as usize;
+    let functions = rva_to_offset(u32_at(export_dir + 28)?)?;
+    let names = rva_to_offset(u32_at(export_dir + 32)?)?;
+    let ordinals = rva_to_offset(u32_at(export_dir + 36)?)?;
+    // The forwarder range: a function slot inside it is a string, not an address.
+    let forward_base = u32_at(export_dir + 16)?;
+    let forward_end = forward_base + u32_at(export_dir + 20 - 4)?;
+    let mut out = Vec::with_capacity(name_count);
+    for index in 0..name_count {
+        let name_offset = rva_to_offset(u32_at(names + index * 4)?)?;
+        let end = data[name_offset..].iter().position(|&b| b == 0)? + name_offset;
+        let name = String::from_utf8_lossy(&data[name_offset..end]).into_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let ordinal = u16_at(ordinals + index * 2)? as usize;
+        if ordinal >= function_count {
+            continue;
+        }
+        let rva = u32_at(functions + ordinal * 4)?;
+        if rva == 0 || (forward_base..forward_end).contains(&rva) {
+            continue;
+        }
+        out.push((name, u64::from(rva)));
+    }
+    Some(out)
+}
+
 impl LoadedModule {
     /// 载入伴生 PDB，把子程序（名字 + RVA + 精确长度）并入 [`Self::debug_functions`]。
     ///
@@ -1402,28 +1488,15 @@ impl LoadedModule {
                 name: symbol.name().unwrap_or("").to_string(),
             });
         }
-        if let Ok(exports) = file.exports() {
-            for export in exports.flatten() {
-                let ExportTarget::Address { address } = export.target() else {
-                    continue;
-                };
-                let rva = to_rva(address);
-                if !sections.iter().any(|section| {
-                    section.executable
-                        && rva >= section.rva
-                        && rva < section.rva.saturating_add(section.size)
-                }) {
-                    continue;
+        // PE: read the export directory directly. `object::File::exports` drops
+        // exports whose address is not in an executable section, which discards
+        // every stub-exported call in the system libraries (211 of kernel32's 1698
+        // here); see `pe_export_entries`.
+        if matches!(container, Container::Pe64 | Container::Pe32) {
+            if let Some(entries) = pe_export_entries(data) {
+                for (name, rva) in entries {
+                    dynamic_symbols.push(SymbolInfo { rva, size: 0, name });
                 }
-                dynamic_symbols.push(SymbolInfo {
-                    rva,
-                    size: 0,
-                    name: export
-                        .name()
-                        .name()
-                        .map(|name| String::from_utf8_lossy(name).into_owned())
-                        .unwrap_or_default(),
-                });
             }
         }
         dynamic_symbols.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
@@ -2281,5 +2354,101 @@ mod tests {
                 "{lane}: literal {literal:?} not found in data sections"
             );
         }
+    }
+
+    /// A regression that was silent: `object::File::exports` drops exports whose
+    /// address is outside an executable section, and current Windows exports the
+    /// heap APIs through stubs in read-only data. `HeapAlloc` therefore vanished
+    /// from `dynamic_symbols` while sitting in the export directory. The direct
+    /// reader keeps it. Skips where the system library is not present.
+    #[test]
+    fn pe_exports_outside_executable_sections_are_kept() {
+        let Ok(bytes) = std::fs::read("C:/Windows/System32/kernel32.dll") else {
+            eprintln!("skip: kernel32.dll not on this machine");
+            return;
+        };
+        let module = LoadedModule::parse(&bytes).unwrap();
+        for name in ["HeapAlloc", "HeapReAlloc", "HeapSize", "HeapFree"] {
+            assert!(
+                module
+                    .dynamic_symbols
+                    .iter()
+                    .any(|symbol| symbol.name == name),
+                "{name} is in kernel32's export directory and must survive"
+            );
+        }
+        let direct = pe_export_entries(&bytes).unwrap();
+        let object_count = module
+            .dynamic_symbols
+            .iter()
+            .filter(|symbol| !symbol.name.is_empty() && symbol.size == 0)
+            .count();
+        assert!(
+            direct.len() >= object_count,
+            "direct read {} must not be smaller than the symbol list {}",
+            direct.len(),
+            object_count
+        );
+    }
+
+    /// The direct reader agrees with the raw directory on a fixture it can be
+    /// checked against byte for byte: the shared-library fixture from #154.
+    #[test]
+    fn the_direct_reader_sees_the_shared_library_fixtures_exports() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/x86_64-windows-gnu/-O2/libexports.dll");
+        let Ok(bytes) = std::fs::read(&path) else {
+            if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+                panic!("required fixture missing: {}", path.display());
+            }
+            eprintln!("skip: fixture not built");
+            return;
+        };
+        let names: Vec<String> = pe_export_entries(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for wanted in ["exported_add", "exported_mul", "exported_void"] {
+            assert!(names.iter().any(|n| n == wanted), "{wanted} missing");
+        }
+        assert!(
+            !names.iter().any(|n| n == "hidden_helper"),
+            "a static must not be exported"
+        );
+    }
+
+    /// A forwarded export's directory slot holds a string ("KERNELBASE.HeapAlloc"),
+    /// not an address. The reader must return the name — a caller links against
+    /// `kernel32` — but must not hand out the string's RVA as if it were code.
+    /// This is exactly the case `object::File::exports` got wrong by dropping
+    /// them: on this machine kernel32 forwards 211 names, HeapAlloc among them.
+    #[test]
+    fn forwarded_exports_are_kept_by_name_without_a_bogus_address() {
+        let Ok(bytes) = std::fs::read("C:/Windows/System32/kernel32.dll") else {
+            eprintln!("skip: kernel32.dll not on this machine");
+            return;
+        };
+        let module = LoadedModule::parse(&bytes).unwrap();
+        let heap = module
+            .dynamic_symbols
+            .iter()
+            .find(|symbol| symbol.name == "HeapAlloc")
+            .expect("a forwarded export is still an export of this library");
+        assert_ne!(heap.rva, 0);
+        assert!(
+            module
+                .sections
+                .iter()
+                .any(|section| heap.rva >= section.rva && heap.rva < section.rva + section.size),
+            "the RVA must land inside some section, not in the export directory"
+        );
+    }
+
+    /// Not a PE: `None`, not a panic.
+    #[test]
+    fn the_direct_reader_declines_non_pe_input() {
+        assert!(pe_export_entries(b"not a binary at all").is_none());
+        assert!(pe_export_entries(&[]).is_none());
     }
 }
