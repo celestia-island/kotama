@@ -400,6 +400,7 @@ version = "0.1.0"
 name = "kotama-runtime-resolve"
 version = "0.1.0"
 dependencies = [
+ "kotama-image",
  "kotama-proxy",
  "kotama-runtime-jni",
  "kotama-runtime-lua",

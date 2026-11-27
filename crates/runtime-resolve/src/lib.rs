@@ -226,6 +226,32 @@ pub fn verify_plan(plan: &HookPlan, resolved: &[ResolvedHook]) -> PlanVerificati
     PlanVerification { addressed, missing }
 }
 
+/// Build the `(name, absolute address)` list the runtime resolvers take from a
+/// module's dynamic symbols.
+///
+/// A Lua or QuickJS shared library exposes its C ABI as ordinary exports, which the
+/// image crate already parses into `dynamic_symbols`. This turns them into what
+/// [`resolve_lua_exports`] / [`resolve_quickjs_exports`] consume, applying the load base
+/// so the addresses are absolute — the form a live process needs, and the form a static
+/// file gets by passing its own image base.
+///
+/// Aliases are kept: two names for one address yield two entries, because a hook plan
+/// keyed by either name must find it. Names are not deduplicated against each other.
+#[must_use]
+pub fn exports_from_symbols(base: u64, symbols: &[kotama_image::SymbolInfo]) -> Vec<(String, u64)> {
+    symbols
+        .iter()
+        .filter(|symbol| !symbol.name.is_empty())
+        .map(|symbol| (symbol.name.clone(), base.wrapping_add(symbol.rva)))
+        .collect()
+}
+
+/// The same list read straight off a loaded module.
+#[must_use]
+pub fn exports_from_module(module: &kotama_image::LoadedModule) -> Vec<(String, u64)> {
+    exports_from_symbols(module.image_base, &module.dynamic_symbols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +434,138 @@ mod tests {
         let (lua, _) = resolve_lua_exports(&[("lua_close".to_string(), 0x1000u64)]);
         assert!(lua[0].group >= kotama_runtime_mount::LUA_GROUP_BASE);
         assert!(lua[0].group < kotama_runtime_mount::QUICKJS_GROUP_BASE);
+    }
+
+    fn fixture(rel: &str) -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated")
+            .join(rel);
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            )
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn symbols_become_absolute_named_exports() {
+        use kotama_image::SymbolInfo;
+        let symbols = vec![
+            SymbolInfo {
+                rva: 0x1000,
+                size: 16,
+                name: "lua_callk".into(),
+            },
+            SymbolInfo {
+                rva: 0x1000,
+                size: 16,
+                name: "lua_callk_alias".into(),
+            },
+            SymbolInfo {
+                rva: 0x2000,
+                size: 0,
+                name: String::new(),
+            },
+        ];
+        let exports = exports_from_symbols(0x400000, &symbols);
+        assert_eq!(
+            exports,
+            vec![
+                ("lua_callk".to_string(), 0x401000),
+                ("lua_callk_alias".to_string(), 0x401000),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pe_fixture_yields_its_exported_names_at_absolute_addresses() {
+        let Some(path) = fixture("x86_64-windows-gnu/-O2/exports.exe") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = kotama_image::LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let exports = exports_from_module(&module);
+        assert!(
+            !exports.is_empty(),
+            "the fixture exports symbols by construction"
+        );
+        for (name, address) in &exports {
+            assert!(
+                *address >= module.image_base,
+                "{name} resolved below the image base"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            exports.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names.len(), exports.len(), "names must be unique per entry");
+    }
+
+    #[test]
+    fn an_elf_shared_library_yields_its_exports_at_absolute_addresses() {
+        // A Lua or QuickJS runtime on Linux is a .so: its C ABI is the dynamic symbol
+        // table. This fixture exports three functions by construction.
+        let Some(path) = fixture("x86_64-linux-gnu/-O2/libexports.so") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = kotama_image::LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let exports = exports_from_module(&module);
+        let names: std::collections::BTreeSet<&str> =
+            exports.iter().map(|(n, _)| n.as_str()).collect();
+        for wanted in ["exported_add", "exported_mul", "exported_void"] {
+            assert!(names.contains(wanted), "{wanted} missing: {names:?}");
+        }
+        assert!(
+            !names.contains("hidden_helper"),
+            "static must not be exported"
+        );
+        for (_, address) in &exports {
+            assert!(*address >= module.image_base);
+        }
+    }
+
+    #[test]
+    fn an_elf_executable_exports_nothing_to_the_dynamic_table() {
+        // An ET_EXEC binary does not export symbols for other modules to bind; its
+        // .dynsym holds only imports. Pinning this keeps the shared-library test honest:
+        // an empty result there would be a real failure, not the executable's nature.
+        let Some(path) = fixture("x86_64-linux-gnu/-O2/exports") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = kotama_image::LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert!(exports_from_module(&module).is_empty());
+    }
+
+    #[test]
+    fn a_pe_shared_library_yields_its_exports_too() {
+        let Some(path) = fixture("x86_64-windows-gnu/-O2/libexports.dll") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = kotama_image::LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        let exports = exports_from_module(&module);
+        let names: std::collections::BTreeSet<&str> =
+            exports.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains("exported_add"), "{names:?}");
+    }
+
+    #[test]
+    fn exports_feed_the_lua_resolver_end_to_end() {
+        use kotama_image::SymbolInfo;
+        let symbols = vec![SymbolInfo {
+            rva: 0x10,
+            size: 8,
+            name: "lua_close".into(),
+        }];
+        let exports = exports_from_symbols(0x7f0000, &symbols);
+        let (resolved, _) = resolve_lua_exports(&exports);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].address, 0x7f0010);
     }
 }
