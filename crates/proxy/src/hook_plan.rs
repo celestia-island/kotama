@@ -50,6 +50,15 @@ pub struct HookSelection {
     pub exclude_names: Vec<String>,
     /// Regular expressions never intercepted.
     pub exclude_patterns: Vec<String>,
+    /// Exact names that are not expected on this target, so their absence is not
+    /// an error.
+    ///
+    /// A preset is a family that spans platforms; `dlopen` is in the loader
+    /// family and is simply not a Windows symbol. Listing it here lets the same
+    /// selection be used on either platform without weakening the rule that an
+    /// exact name must exist: a name neither present nor excused is still an
+    /// error, so a typo still cannot narrow the surface silently.
+    pub not_on_platform: Vec<String>,
 }
 
 impl HookSelection {
@@ -135,6 +144,13 @@ pub fn plan_hooks(
     let patterns = compile(&selection.patterns, "hook")?;
     let excludes = compile(&selection.exclude_patterns, "hook exclude")?;
     for name in &selection.names {
+        if selection
+            .not_on_platform
+            .iter()
+            .any(|excused| excused == name)
+        {
+            continue;
+        }
         if !symbols
             .iter()
             .any(|symbol| std::str::from_utf8(&symbol.name).is_ok_and(|text| text == name))
@@ -329,5 +345,125 @@ mod tests {
         let symbols = syms(&[(1, "a"), (2, "b")]);
         let plan = plan_hooks(&symbols, &all).unwrap();
         assert_eq!(plan.len(), 2);
+    }
+
+    /// The loader preset on Windows: dlopen and friends are excused, every Windows
+    /// name is still strictly checked against the target's export table.
+    #[test]
+    fn a_cross_platform_preset_plans_on_windows_without_erroring_on_posix_names() {
+        let windows_names = [
+            "CreateThread",
+            "ExitThread",
+            "FreeLibrary",
+            "GetCurrentProcessId",
+            "GetCurrentThreadId",
+            "GetModuleFileNameW",
+            "GetModuleHandleA",
+            "GetModuleHandleW",
+            "GetProcAddress",
+            "LoadLibraryA",
+            "LoadLibraryExW",
+            "LoadLibraryW",
+        ];
+        let symbols: Vec<HookableSymbol> = windows_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| HookableSymbol {
+                name: name.as_bytes().to_vec(),
+                group: u32::try_from(index).unwrap() + 1,
+            })
+            .collect();
+        let selection = crate::sdk_presets::by_id("loader")
+            .unwrap()
+            .selection_for(crate::sdk_presets::Platform::Native);
+        assert!(selection.not_on_platform.contains(&"dlopen".to_string()));
+        assert_eq!(
+            selection.not_on_platform.len(),
+            8,
+            "dlopen, dlclose, dlsym, dlerror, and the four pthread calls"
+        );
+        let plan = plan_hooks(&symbols, &selection).unwrap();
+        assert_eq!(plan.hooks.len(), windows_names.len());
+    }
+
+    /// The same selection against a target that lacks one of the *Windows* names:
+    /// still an error. The excuse never reaches a Native name.
+    #[test]
+    fn a_missing_native_name_in_a_cross_platform_preset_is_still_an_error() {
+        let symbols = [HookableSymbol {
+            name: b"LoadLibraryW".to_vec(),
+            group: 1,
+        }];
+        let selection = crate::sdk_presets::by_id("loader")
+            .unwrap()
+            .selection_for(crate::sdk_presets::Platform::Native);
+        let err = plan_hooks(&symbols, &selection).unwrap_err();
+        assert!(err.0.contains("hook name not found"), "{err}");
+        assert!(
+            !err.0.contains("dlopen"),
+            "a Posix name must not be the error: {err}"
+        );
+    }
+
+    /// The same preset on a POSIX target: nothing is excused, so a Windows-only
+    /// name in the selection is an error exactly as before.
+    #[test]
+    fn on_posix_nothing_is_excused() {
+        let symbols = [HookableSymbol {
+            name: b"dlopen".to_vec(),
+            group: 1,
+        }];
+        let selection = crate::sdk_presets::by_id("loader")
+            .unwrap()
+            .selection_for(crate::sdk_presets::Platform::Posix);
+        assert!(selection.not_on_platform.is_empty());
+        assert!(plan_hooks(&symbols, &selection).is_err());
+    }
+
+    /// An excuse covers only absence. A name that is excused *and* present is
+    /// still hooked — the excuse is not an exclusion.
+    #[test]
+    fn an_excused_name_that_is_present_is_still_hooked() {
+        let symbols = [HookableSymbol {
+            name: b"snprintf".to_vec(),
+            group: 1,
+        }];
+        let selection = HookSelection {
+            names: vec!["snprintf".to_string()],
+            not_on_platform: vec!["snprintf".to_string()],
+            ..Default::default()
+        };
+        let plan = plan_hooks(&symbols, &selection).unwrap();
+        assert_eq!(plan.hooks.len(), 1);
+    }
+
+    /// The excuse is exact, like the name check: a prefix does not excuse.
+    #[test]
+    fn the_excuse_is_an_exact_match() {
+        let symbols = [HookableSymbol {
+            name: b"malloc".to_vec(),
+            group: 1,
+        }];
+        let selection = HookSelection {
+            names: vec!["mallocx".to_string()],
+            not_on_platform: vec!["malloc".to_string()],
+            ..Default::default()
+        };
+        assert!(plan_hooks(&symbols, &selection).is_err());
+    }
+
+    /// A typo in a Native name is still an error when the same selection also
+    /// carries excuses — the excuse list must not become a blanket.
+    #[test]
+    fn a_typo_among_excused_names_is_still_an_error() {
+        let symbols = [HookableSymbol {
+            name: b"LoadLibraryW".to_vec(),
+            group: 1,
+        }];
+        let mut selection = crate::sdk_presets::by_id("loader")
+            .unwrap()
+            .selection_for(crate::sdk_presets::Platform::Native);
+        selection.names.push("LoadLibraryX".to_string());
+        assert!(plan_hooks(&symbols, &selection).is_err());
     }
 }

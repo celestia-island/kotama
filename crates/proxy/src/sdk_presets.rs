@@ -30,6 +30,31 @@ pub struct Preset {
 }
 
 impl Preset {
+    /// This preset as a hook selection for one platform.
+    ///
+    /// Names the platform does not have are passed as `not_on_platform` rather than
+    /// dropped, so the planner neither errors on them nor forgets they were asked
+    /// for. Only `Posix` names are excused this way: an `OtherDll` or `Extension`
+    /// name is a real export the target's export table may or may not carry, and
+    /// that is the target's answer, not the preset's.
+    #[must_use]
+    pub fn selection_for(&self, platform: Platform) -> HookSelection {
+        HookSelection {
+            all: false,
+            names: self.names.iter().map(|name| (*name).to_string()).collect(),
+            patterns: Vec::new(),
+            exclude_names: Vec::new(),
+            exclude_patterns: Vec::new(),
+            not_on_platform: if platform == Platform::Posix {
+                Vec::new()
+            } else {
+                self.names_for(Platform::Posix)
+                    .into_iter()
+                    .map(|name| name.to_string())
+                    .collect()
+            },
+        }
+    }
     /// This preset as a hook selection.
     #[must_use]
     pub fn selection(&self) -> HookSelection {
@@ -39,6 +64,7 @@ impl Preset {
             patterns: Vec::new(),
             exclude_names: Vec::new(),
             exclude_patterns: Vec::new(),
+            not_on_platform: Vec::new(),
         }
     }
 }
@@ -422,6 +448,7 @@ pub fn merge(presets: &[&Preset]) -> HookSelection {
         patterns: Vec::new(),
         exclude_names: Vec::new(),
         exclude_patterns: Vec::new(),
+        not_on_platform: Vec::new(),
     }
 }
 #[cfg(test)]
