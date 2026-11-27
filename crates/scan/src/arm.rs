@@ -178,12 +178,57 @@ pub fn call_graph_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec
 
 /// String references for a 32-bit ARM module.
 ///
-/// Not yet decoded: ARM forms addresses with `ldr pc-relative` into a literal pool
-/// or `movw`/`movt` pairs, which needs its own pairing step.
+/// ARM materialises a literal's address with `movw` + `movt`; the pairing lives in the
+/// architecture crate. Both modes are swept because the mode bit is lost on
+/// normalisation, and an address is kept only when it lands in a non-executable section
+/// and reads as a printable C string.
 #[must_use]
 pub fn string_xrefs_arm(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
-    let _ = (module, functions);
-    Vec::new()
+    let space = module.address_space();
+    let image_base = module.image_base;
+    let data_sections: Vec<(u64, u64)> = module
+        .sections
+        .iter()
+        .filter(|section| !section.executable && section.size > 0 && section.rva > 0)
+        .map(|section| (section.rva, section.size))
+        .collect();
+    let in_data = |rva: u64| {
+        data_sections
+            .iter()
+            .any(|(start, size)| rva >= *start && rva < start.saturating_add(*size))
+    };
+    let mut out: BTreeSet<(u64, u64, String)> = BTreeSet::new();
+    for function in functions {
+        if function.size == 0 {
+            continue;
+        }
+        let Some(bytes) = space.read(
+            function.rva,
+            usize::try_from(function.size).unwrap_or(usize::MAX),
+        ) else {
+            continue;
+        };
+        for mode in [Mode::Thumb, Mode::Arm] {
+            for form in kotama_lift_arm::address_forms(bytes, function.rva, mode) {
+                let Some(rva) = form.target.checked_sub(image_base) else {
+                    continue;
+                };
+                if !in_data(rva) {
+                    continue;
+                }
+                if let Some(text) = crate::read_cstring(&space, rva) {
+                    out.insert((function.rva, rva, text));
+                }
+            }
+        }
+    }
+    out.into_iter()
+        .map(|(func_rva, string_rva, text)| StringXref {
+            func_rva,
+            string_rva,
+            text,
+        })
+        .collect()
 }
 
 #[cfg(test)]
