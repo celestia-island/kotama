@@ -15,7 +15,7 @@ workspace = true
 [workspace]
 resolver = "2"
 exclude = ["ui"]
-members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay", "examples/engine-formats", "crates/runtime-jni", "crates/runtime-lua"]
+members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay", "examples/engine-formats", "crates/runtime-jni", "crates/runtime-lua", "crates/lift-a64"]
 
 [workspace.package]
 version = "0.1.0"
@@ -41,6 +41,9 @@ kotama-resource = { path = "crates/resource", version = "^0.1" }
 
 # 静态管线（P0）
 object = { version = "^0.41", features = ["macho", "xcoff", "wasm", "archive", "coff", "pe"] }
+# Aarch64 指令解码（0BSD，no_std 核心，确定性）。关掉 serde：管线契约要事实不要序列化派生。
+yaxpeax-arm = { version = "^0.5", default-features = false, features = ["std", "fmt"] }
+yaxpeax-arch = "^0.3"
 iced-x86 = "^1"
 sha2 = "^0.11"
 gimli = "^0.34"
