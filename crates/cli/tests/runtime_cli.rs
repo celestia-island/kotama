@@ -74,6 +74,7 @@ fn lua_5_4_resolves_every_mount_point() {
 /// a test still compiles, so the count is what catches it.
 #[test]
 fn lua_5_1_reports_exactly_the_absent_names_and_fails() {
+    let Some(so) = fixture("lua/liblua-5.1.5.so") else {
         eprintln!("skip: Lua fixture not built");
         return;
     };
