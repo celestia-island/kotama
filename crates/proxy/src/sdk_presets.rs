@@ -115,6 +115,29 @@ pub const CPP_RUNTIME_MSVC: Preset = Preset {
         "__CxxFrameHandler4",
     ],
 };
+
+/// The same C++ runtime under the 32-bit MSVC ABI.
+///
+/// The 32-bit decoration encodes `size_t` as `I` (unsigned int) and every pointer as
+/// `PAX` rather than the 64-bit `PEAX` / `_K`, so none of the 64-bit names match a
+/// 32-bit binary and vice versa. These spellings were read off the exports of the
+/// system 32-bit C runtime itself (`SysWOW64/msvcrt.dll`), not derived from the
+/// mangling grammar. `__CxxFrameHandler4` is absent here because that runtime does
+/// not export it; only the first three handlers exist in 32-bit.
+pub const CPP_RUNTIME_MSVC_X86: Preset = Preset {
+    id: "cpp-runtime-msvc-x86",
+    summary: "C++ new/delete and exception runtime, MSVC ABI (32-bit)",
+    names: &[
+        "??2@YAPAXI@Z",
+        "??3@YAXPAX@Z",
+        "??_U@YAPAXI@Z",
+        "??_V@YAXPAX@Z",
+        "__CxxFrameHandler",
+        "__CxxFrameHandler2",
+        "__CxxFrameHandler3",
+    ],
+};
+
 /// Windows heap, file and console interfaces.
 pub const WIN32_BASE: Preset = Preset {
     id: "win32-base",
@@ -280,6 +303,7 @@ pub const PRESETS: &[Preset] = &[
     C_RUNTIME,
     CPP_RUNTIME_ITANIUM,
     CPP_RUNTIME_MSVC,
+    CPP_RUNTIME_MSVC_X86,
     WIN32_BASE,
     WINSOCK,
     GRAPHICS_DEVICE,
@@ -420,5 +444,78 @@ mod tests {
             "expected most C runtime names to be exported, found {}: {present:?}",
             present.len()
         );
+    }
+
+    /// The decorated names are disjoint across the two MSVC ABIs: a 32-bit binary
+    /// exports none of the 64-bit spellings, so one preset cannot serve both widths.
+    /// Undecorated C symbols such as `__CxxFrameHandler3` are width-independent and
+    /// legitimately appear in both — the dump of both runtimes shows it.
+    #[test]
+    fn the_decorated_names_of_the_two_msvc_abis_are_disjoint() {
+        for name in CPP_RUNTIME_MSVC.names {
+            if !name.starts_with('?') {
+                continue;
+            }
+            assert!(
+                !CPP_RUNTIME_MSVC_X86.names.contains(name),
+                "decorated {name} appears in both the 64-bit and 32-bit presets"
+            );
+        }
+        for name in CPP_RUNTIME_MSVC_X86.names {
+            if !name.starts_with('?') {
+                continue;
+            }
+            assert!(
+                !CPP_RUNTIME_MSVC.names.contains(name),
+                "decorated {name} appears in both the 64-bit and 32-bit presets"
+            );
+        }
+        // The shared C symbol really is in both, which is what makes the distinction
+        // above necessary rather than a tautology.
+        assert!(CPP_RUNTIME_MSVC.names.contains(&"__CxxFrameHandler3"));
+        assert!(CPP_RUNTIME_MSVC_X86.names.contains(&"__CxxFrameHandler3"));
+    }
+
+    /// Every 32-bit spelling was read off the system 32-bit C runtime's exports.
+    /// The size_t slot is `I` and pointers are `PAX`, where the 64-bit ABI has `_K` and
+    /// `PEAX`. `__CxxFrameHandler4` is deliberately absent: that runtime lacks it.
+    #[test]
+    fn the_x86_preset_uses_the_32_bit_decoration() {
+        assert!(CPP_RUNTIME_MSVC_X86.names.contains(&"??2@YAPAXI@Z"));
+        assert!(CPP_RUNTIME_MSVC_X86.names.contains(&"??3@YAXPAX@Z"));
+        assert!(CPP_RUNTIME_MSVC_X86.names.contains(&"??_U@YAPAXI@Z"));
+        assert!(CPP_RUNTIME_MSVC_X86.names.contains(&"??_V@YAXPAX@Z"));
+        assert!(
+            !CPP_RUNTIME_MSVC_X86.names.contains(&"__CxxFrameHandler4"),
+            "the 32-bit runtime does not export __CxxFrameHandler4"
+        );
+        for name in CPP_RUNTIME_MSVC_X86.names {
+            assert!(
+                !name.contains("PEAX") && !name.contains("_K@"),
+                "{name} carries a 64-bit type code"
+            );
+        }
+    }
+
+    /// The 64-bit preset stays 64-bit: no `I`-as-size_t or bare `PAX` crept in.
+    #[test]
+    fn the_x64_preset_uses_the_64_bit_decoration() {
+        assert!(CPP_RUNTIME_MSVC.names.contains(&"??2@YAPEAX_K@Z"));
+        assert!(CPP_RUNTIME_MSVC.names.contains(&"__CxxFrameHandler4"));
+        for name in CPP_RUNTIME_MSVC.names {
+            assert!(
+                name.contains("PEAX") || name.contains("_K@") || name.starts_with("__Cxx"),
+                "{name} is not a 64-bit decoration"
+            );
+        }
+    }
+
+    #[test]
+    fn the_x86_preset_is_registered_and_addressable() {
+        assert_eq!(
+            by_id("cpp-runtime-msvc-x86").unwrap().id,
+            "cpp-runtime-msvc-x86"
+        );
+        assert!(PRESETS.iter().any(|p| p.id == "cpp-runtime-msvc-x86"));
     }
 }
