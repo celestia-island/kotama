@@ -3,6 +3,8 @@
 //! This crate only plans and renders artifacts. It never changes the input DLL,
 //! guesses function ABIs, or claims to install hooks.
 
+pub mod hook_plan;
+
 use std::collections::BTreeMap;
 
 use regex::Regex;
