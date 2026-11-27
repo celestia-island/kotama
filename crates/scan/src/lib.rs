@@ -85,6 +85,7 @@ pub mod msvc_rtti;
 
 pub mod a64;
 pub mod a64_xrefs;
+pub mod riscv;
 
 pub use kotama::Evidence;
 pub use kotama::FunctionEntry;
@@ -150,6 +151,9 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
     // iced-x86 path entirely.
     if module.arch.is_aarch64() {
         return a64::discover_a64(module);
+    }
+    if module.arch.is_riscv64() {
+        return riscv::discover_riscv(module);
     }
     // Instruction-level discovery needs an x86 decoder. A recognised but
     // non-disassemblable architecture yields no functions rather than a panic.
@@ -653,6 +657,9 @@ pub fn call_graph(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<Cal
     if module.arch.is_aarch64() {
         return a64_xrefs::call_graph_a64(module, functions);
     }
+    if module.arch.is_riscv64() {
+        return riscv::call_graph_riscv(module, functions);
+    }
     use std::collections::BTreeSet;
 
     let space = module.address_space();
@@ -720,6 +727,9 @@ pub struct StringXref {
 pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
     if module.arch.is_aarch64() {
         return a64_xrefs::string_xrefs_a64(module, functions);
+    }
+    if module.arch.is_riscv64() {
+        return riscv::string_xrefs_riscv(module, functions);
     }
     use std::collections::BTreeSet;
 
