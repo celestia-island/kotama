@@ -386,6 +386,7 @@ dependencies = [
  "kotama",
  "kotama-image",
  "kotama-lift-a64",
+ "kotama-lift-riscv",
 ]
 
 [[package]]

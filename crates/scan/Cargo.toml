@@ -14,6 +14,7 @@ kotama.workspace = true
 kotama-image.workspace = true
 iced-x86.workspace = true
 kotama-lift-a64.workspace = true
+kotama-lift-riscv.workspace = true
 
 [lints]
 workspace = true

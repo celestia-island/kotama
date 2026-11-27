@@ -233,6 +233,17 @@ impl Arch {
         matches!(self, Self::Other("aarch64") | Self::Other("aarch64_ilp32"))
     }
 
+    /// True for the 64-bit RISC-V architecture (RV64 with or without the C extension).
+    ///
+    /// Identified by its canonical name, so any container carrying RV64 code
+    /// (ELF, Mach-O, PE, raw) qualifies.
+    #[must_use]
+    pub fn is_riscv64(self) -> bool {
+        matches!(
+            self,
+            Self::Other("riscv64") | Self::Other("riscv64gc") | Self::Other("riscv64imafdc")
+        )
+    }
     /// 短名（进 JSON 报告）。
     #[must_use]
     pub const fn short(self) -> &'static str {

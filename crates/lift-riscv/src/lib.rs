@@ -272,6 +272,18 @@ fn decode32(address: u64, word: u32) -> RvLifted {
             };
             fact(address, 4, text, Flow::Trap, None)
         }
+        // AUIPC: rd = PC + (imm << 12). Not control flow itself, but the first half of
+        // every address formed under the medany code model, including call targets.
+        0x17 => {
+            let imm = (word & 0xffff_f000) as i32 as i64;
+            fact(
+                address,
+                4,
+                format!("auipc x{rd}, {:#x}", address.wrapping_add(imm as u64)),
+                Flow::FallThrough,
+                None,
+            )
+        }
         _ => fact(address, 4, ".word".to_string(), Flow::FallThrough, None),
     }
 }
@@ -441,6 +453,69 @@ pub fn direct_edges(instructions: &[RvLifted]) -> Vec<(u64, u64)> {
         .iter()
         .filter_map(|lifted| lifted.target.map(|target| (lifted.address, target)))
         .collect()
+}
+
+/// One resolved indirect call: `auipc` formed a base, `jalr` added an offset.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CallTarget {
+    /// Address of the `jalr` that performs the call.
+    pub at: u64,
+    /// Absolute target the pair computes.
+    pub target: u64,
+}
+
+/// Absolute target of every `auipc` + `jalr` call pair in `bytes` starting at `address`.
+///
+/// Under the medany code model a call is two instructions: `auipc x1, hi` puts
+/// `PC + (hi << 12)` in the link register, then `jalr x1, x1, lo` calls `base + lo`.
+/// Neither instruction knows the target on its own, so a lifter that reads one
+/// instruction at a time sees a call with no destination. This pairs them.
+///
+/// Tracks the most recent `auipc` per register and pairs it with the next `jalr`
+/// that reads the same register as its base, which is the only way a compiler
+/// forms a call target. `jalr` through a register no `auipc` wrote is a genuine
+/// indirect call and yields nothing.
+#[must_use]
+pub fn call_targets(bytes: &[u8], address: u64) -> Vec<CallTarget> {
+    let mut bases: Vec<(u32, u64)> = Vec::new();
+    let mut out = Vec::new();
+    let mut pc = address;
+    let mut i = 0usize;
+    while i + 2 <= bytes.len() {
+        let low = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        let width = instruction_width(low);
+        if i + width > bytes.len() {
+            break;
+        }
+        if width == 4 {
+            let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+            let opcode = word & 0x7f;
+            let rd = (word >> 7) & 0x1f;
+            let rs1 = (word >> 15) & 0x1f;
+            match opcode {
+                0x17 => {
+                    // auipc x{rd}, hi : base = PC + (hi << 12), sign-extended.
+                    let hi = (word & 0xffff_f000) as i32 as i64;
+                    bases.retain(|(reg, _)| *reg != rd);
+                    bases.push((rd, pc.wrapping_add(hi as u64)));
+                }
+                0x67 if rd == RA || rd == T1 => {
+                    // jalr through a register an auipc wrote: a resolvable call.
+                    let lo = i_imm(word);
+                    if let Some((_, base)) = bases.iter().find(|(reg, _)| *reg == rs1) {
+                        out.push(CallTarget {
+                            at: pc,
+                            target: base.wrapping_add(lo as u64),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += width;
+        pc += width as u64;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -686,5 +761,72 @@ mod tests {
         let lifted = lift(&words(&[0x00ef, 0x0040, 0x8067, 0x0000]), 0x1000);
         assert_eq!(block_ends(&lifted), vec![0x1000, 0x1004]);
         assert_eq!(direct_edges(&lifted), vec![(0x1000, 0x1004)]);
+    }
+
+    fn words32(encodings: &[u32]) -> Vec<u8> {
+        encodings.iter().flat_map(|e| e.to_le_bytes()).collect()
+    }
+
+    // Encodings below were emitted by a real assembler and read back with capstone.
+
+    #[test]
+    fn an_auipc_jalr_pair_resolves_to_an_absolute_target() {
+        // At 0x1000: auipc x1, 0 ; jalr x1, x1, -88  ->  target 0x1000 - 88 = 0xfa8
+        let code = words32(&[0x0000_0097, 0xfa80_80e7]);
+        let targets = call_targets(&code, 0x1000);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].at, 0x1004);
+        assert_eq!(targets[0].target, 0x1000u64.wrapping_sub(88));
+    }
+
+    #[test]
+    fn an_auipc_with_a_high_immediate_contributes_its_page() {
+        // auipc x1, 1 -> base = 0x1000 + 0x1000 = 0x2000 ; jalr x1, x1, 0x10 -> 0x2010
+        let code = words32(&[0x0000_1097, 0x0100_80e7]);
+        let targets = call_targets(&code, 0x1000);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, 0x2010);
+    }
+
+    #[test]
+    fn a_jalr_without_a_matching_auipc_is_a_genuine_indirect_call() {
+        // jalr x1, x10, 0 : the base register was never written by an auipc here.
+        let code = words32(&[0x0005_00e7]);
+        assert!(call_targets(&code, 0x1000).is_empty());
+    }
+
+    #[test]
+    fn the_most_recent_auipc_for_a_register_wins() {
+        // Two auipc writes to x1 with different pages, then a jalr through x1.
+        // The second base must win: 0x1004 + (2 << 12) = 0x3004.
+        let code = words32(&[0x0000_1097, 0x0000_2097, 0x0000_80e7]);
+        let targets = call_targets(&code, 0x1000);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, 0x3004);
+    }
+
+    #[test]
+    fn a_plain_jal_needs_no_pairing() {
+        // jal ra, +4 carries its own target; call_targets only reports pairs.
+        let code = words32(&[0x0040_00ef]);
+        assert!(call_targets(&code, 0x1000).is_empty());
+    }
+
+    #[test]
+    fn a_negative_auipc_high_part_reaches_lower_addresses() {
+        // auipc x1, 0xfffff -> hi = -4096, base = 0x8000 - 0x1000 = 0x7000.
+        // Without sign extension the base would be 0x8000 + 0xfffff000, a wild address.
+        let code = words32(&[0xffff_f097, 0x0000_80e7]);
+        let targets = call_targets(&code, 0x8000);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, 0x7000);
+    }
+
+    #[test]
+    fn a_jalr_that_writes_a_plain_register_is_not_a_call() {
+        // jalr a0, ra, 0 = 0x0000_8567 : rd=x10 is not a link register, so this is an
+        // indirect jump even though an auipc did write the base register ra.
+        let code = words32(&[0x0000_0097, 0x0000_8567]);
+        assert!(call_targets(&code, 0x1000).is_empty());
     }
 }

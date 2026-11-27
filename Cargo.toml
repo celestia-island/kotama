@@ -39,6 +39,7 @@ kotama-pack = { path = "crates/pack", version = "^0.1" }
 kotama-proxy = { path = "crates/proxy", version = "^0.1" }
 kotama-resource = { path = "crates/resource", version = "^0.1" }
 kotama-lift-a64 = { path = "crates/lift-a64", version = "^0.1" }
+kotama-lift-riscv = { path = "crates/lift-riscv", version = "^0.1" }
 
 # 静态管线（P0）
 object = { version = "^0.41", features = ["macho", "xcoff", "wasm", "archive", "coff", "pe"] }
