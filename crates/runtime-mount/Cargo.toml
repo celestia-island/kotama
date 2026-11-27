@@ -1,0 +1,18 @@
+[package]
+name = "kotama-runtime-mount"
+description = "Runtime function-table mounting: JNI and Lua slots planned through the shared hook selector."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish = false
+
+[dependencies]
+kotama-proxy.workspace = true
+kotama-runtime-jni = { path = "../runtime-jni", version = "^0.1" }
+kotama-runtime-lua = { path = "../runtime-lua", version = "^0.1" }
+
+[lints]
+workspace = true

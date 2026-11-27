@@ -15,7 +15,7 @@ workspace = true
 [workspace]
 resolver = "2"
 exclude = ["ui"]
-members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay", "examples/engine-formats", "crates/runtime-jni", "crates/runtime-lua", "crates/lift-a64", "crates/lift-riscv", "crates/lift-arm"]
+members = ["crates/cli", "crates/image", "crates/scan", "crates/decomp", "crates/backend-ghidra", "crates/proto", "crates/host", "crates/payload", "crates/pack", "crates/proxy", "crates/resource", "crates/overlay", "examples/engine-formats", "crates/runtime-jni", "crates/runtime-lua", "crates/runtime-mount", "crates/lift-a64", "crates/lift-riscv", "crates/lift-arm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -37,6 +37,7 @@ kotama-proto = { path = "crates/proto", version = "^0.1" }
 kotama-host = { path = "crates/host", version = "^0.1" }
 kotama-pack = { path = "crates/pack", version = "^0.1" }
 kotama-proxy = { path = "crates/proxy", version = "^0.1" }
+kotama-runtime-mount = { path = "crates/runtime-mount", version = "^0.1" }
 kotama-resource = { path = "crates/resource", version = "^0.1" }
 kotama-lift-a64 = { path = "crates/lift-a64", version = "^0.1" }
 kotama-lift-riscv = { path = "crates/lift-riscv", version = "^0.1" }

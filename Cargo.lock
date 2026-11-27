@@ -383,6 +383,15 @@ name = "kotama-runtime-lua"
 version = "0.1.0"
 
 [[package]]
+name = "kotama-runtime-mount"
+version = "0.1.0"
+dependencies = [
+ "kotama-proxy",
+ "kotama-runtime-jni",
+ "kotama-runtime-lua",
+]
+
+[[package]]
 name = "kotama-scan"
 version = "0.1.0"
 dependencies = [
