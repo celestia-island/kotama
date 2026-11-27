@@ -438,3 +438,147 @@ mod tests {
         }
     }
 }
+
+/// The Invocation API: the `JNI_*` symbols a JVM library **exports directly**.
+///
+/// Everything in [`JNI_ENTRIES`] is reached through a `JNIEnv*`, which only exists
+/// once a VM is in the process. These three are how it gets there, and they are
+/// ordinary exported symbols rather than table slots — so they are what a module's
+/// export table is searched for, and what a hook planner can describe before any
+/// environment exists.
+///
+/// The names and the count were read off the export directory of a real JVM
+/// library (`jvm.dll`, 4507 exports, exactly three `JNI_*`): the Invocation API
+/// is specified as these three and nothing else, and the binary agrees.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InvocationExport {
+    /// Exported symbol name.
+    pub name: &'static str,
+    /// What the call does for a mount.
+    pub role: InvocationRole,
+}
+
+/// What an Invocation API call means to someone mounting a runtime.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InvocationRole {
+    /// Creates a VM and hands back its `JavaVM*` and a `JNIEnv*` for the current thread.
+    CreateVm,
+    /// Finds VMs already running in the process — the attach path for an injected agent.
+    FindVms,
+    /// Fills an init-args struct with defaults for the version; a prerequisite of `CreateVm`.
+    DefaultInitArgs,
+}
+
+/// The Invocation API exports, sorted by name.
+pub const INVOCATION_EXPORTS: &[InvocationExport] = &[
+    InvocationExport {
+        name: "JNI_CreateJavaVM",
+        role: InvocationRole::CreateVm,
+    },
+    InvocationExport {
+        name: "JNI_GetCreatedJavaVMs",
+        role: InvocationRole::FindVms,
+    },
+    InvocationExport {
+        name: "JNI_GetDefaultJavaVMInitArgs",
+        role: InvocationRole::DefaultInitArgs,
+    },
+];
+
+/// Look up an Invocation API export by its exact name.
+#[must_use]
+pub fn invocation_by_name(name: &str) -> Option<&'static InvocationExport> {
+    INVOCATION_EXPORTS.iter().find(|export| export.name == name)
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+
+    /// Exactly three, because that is what the specification defines and what the
+    /// real library exports. A fourth would be a vendor extension, which this table
+    /// deliberately does not assume.
+    #[test]
+    fn the_invocation_api_is_three_exports() {
+        assert_eq!(INVOCATION_EXPORTS.len(), 3);
+    }
+
+    /// Sorted by name, as the planner's merge assumes.
+    #[test]
+    fn invocation_exports_are_sorted_by_name() {
+        for pair in INVOCATION_EXPORTS.windows(2) {
+            assert!(
+                pair[0].name < pair[1].name,
+                "{} !< {}",
+                pair[0].name,
+                pair[1].name
+            );
+        }
+    }
+
+    /// The three names the binary exports, spelled exactly as it spells them.
+    #[test]
+    fn the_names_match_the_jvm_library_export_directory() {
+        assert_eq!(
+            INVOCATION_EXPORTS
+                .iter()
+                .map(|e| e.name)
+                .collect::<Vec<_>>(),
+            [
+                "JNI_CreateJavaVM",
+                "JNI_GetCreatedJavaVMs",
+                "JNI_GetDefaultJavaVMInitArgs"
+            ]
+        );
+    }
+
+    /// Each role appears exactly once, so a mount plan can ask for "the create path"
+    /// without naming the symbol.
+    #[test]
+    fn each_role_is_present_exactly_once() {
+        for role in [
+            InvocationRole::CreateVm,
+            InvocationRole::FindVms,
+            InvocationRole::DefaultInitArgs,
+        ] {
+            assert_eq!(
+                INVOCATION_EXPORTS.iter().filter(|e| e.role == role).count(),
+                1,
+                "{role:?}"
+            );
+        }
+    }
+
+    /// The Invocation API and the table slots are disjoint namespaces: nothing here
+    /// is a slot, nothing in the table is an export. The two halves of a mount must
+    /// not be confused for one another.
+    #[test]
+    fn invocation_exports_are_not_table_slots_and_vice_versa() {
+        for export in INVOCATION_EXPORTS {
+            assert!(
+                by_name(export.name).is_none(),
+                "{} is an export, not a slot",
+                export.name
+            );
+        }
+        assert!(invocation_by_name("GetVersion").is_none());
+    }
+
+    /// An injected agent finds a running VM; it does not create one. The role the
+    /// agent needs is the find path, and it must be addressable without the symbol.
+    #[test]
+    fn the_attach_path_is_addressable_by_role() {
+        let find = INVOCATION_EXPORTS
+            .iter()
+            .find(|e| e.role == InvocationRole::FindVms)
+            .expect("find path");
+        assert_eq!(find.name, "JNI_GetCreatedJavaVMs");
+    }
+
+    #[test]
+    fn lookup_by_name_is_exact() {
+        assert!(invocation_by_name("JNI_CreateJavaVM").is_some());
+        assert!(invocation_by_name("jni_createjavavm").is_none());
+        assert!(invocation_by_name("CreateJavaVM").is_none());
+    }
+}

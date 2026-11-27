@@ -8,6 +8,6 @@
 pub mod table;
 
 pub use table::{
-    by_name, by_slot, in_category, JniCategory, JniEntry, FIRST_PUBLIC_SLOT, JNI_ENTRIES,
-    KNOWN_ALIAS_GROUPS,
+    by_name, by_slot, in_category, invocation_by_name, InvocationExport, InvocationRole,
+    JniCategory, JniEntry, FIRST_PUBLIC_SLOT, INVOCATION_EXPORTS, JNI_ENTRIES, KNOWN_ALIAS_GROUPS,
 };
