@@ -253,6 +253,8 @@ dependencies = [
  "kotama-proto",
  "kotama-proxy",
  "kotama-resource",
+ "kotama-runtime-mount",
+ "kotama-runtime-resolve",
  "kotama-scan",
  "serde",
  "serde_json",
