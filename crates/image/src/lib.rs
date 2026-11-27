@@ -2091,4 +2091,195 @@ mod tests {
             );
         }
     }
+
+    /// Cross-compiled fixtures under `fixtures/generated/cross/<lane>/<stem>`.
+    fn cross(lane: &str, stem: &str) -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/cross")
+            .join(lane)
+            .join(stem);
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required cross fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            );
+        } else {
+            None
+        }
+    }
+
+    fn load(lane: &str, stem: &str) -> Option<LoadedModule> {
+        cross(lane, stem).map(|path| {
+            LoadedModule::parse(&std::fs::read(path).unwrap()).expect("cross fixture must parse")
+        })
+    }
+
+    #[test]
+    fn every_cross_fixture_parses_with_its_container_and_architecture() {
+        // (lane, stem, container, arch name, has an entry point)
+        let expected = [
+            ("riscv64-norvc", "norvc", Container::Elf64, "riscv64", true),
+            ("riscv64-rvc", "rvc", Container::Elf64, "riscv64", true),
+            (
+                "riscv64-strings",
+                "strings",
+                Container::Elf64,
+                "riscv64",
+                true,
+            ),
+            ("arm-a32", "a32", Container::Elf32, "arm", true),
+            ("arm-thumb", "thumb", Container::Elf32, "arm", true),
+            ("arm-strings", "a32", Container::Elf32, "arm", true),
+            ("arm-strings-thumb", "thumb", Container::Elf32, "arm", true),
+            ("aarch64-elf", "elf", Container::Elf64, "aarch64", true),
+            (
+                "aarch64-macho",
+                "macho",
+                Container::MachO64,
+                "aarch64",
+                true,
+            ),
+        ];
+        let mut checked = 0;
+        for (lane, stem, container, arch, entry) in expected {
+            let Some(module) = load(lane, stem) else {
+                continue;
+            };
+            assert_eq!(module.container, container, "{lane}");
+            assert_eq!(module.arch, Arch::Other(arch), "{lane}");
+            assert_eq!(module.entry_rva.is_some(), entry, "{lane}");
+            assert!(
+                module.sections.iter().any(|section| section.executable),
+                "{lane}: no executable section"
+            );
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("skip: cross fixtures not built");
+        }
+    }
+
+    #[test]
+    fn the_cross_fixtures_are_stripped_as_the_lanes_intend() {
+        // Every cross lane links with -s. A symbol table surviving would mean the
+        // discovery tests are passing on symbols rather than on the lifters.
+        for (lane, stem) in [
+            ("riscv64-norvc", "norvc"),
+            ("arm-a32", "a32"),
+            ("aarch64-elf", "elf"),
+        ] {
+            let Some(module) = load(lane, stem) else {
+                continue;
+            };
+            assert!(
+                module.symbols.is_empty(),
+                "{lane}: {lane} must be stripped, found {} symbols",
+                module.symbols.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_frame_section_follows_the_architecture_not_the_container() {
+        // A64 and RISC-V link .eh_frame; ARM release builds do not. Both are ELF64 or
+        // ELF32 containers, so the container alone does not predict the frame section.
+        let Some(riscv) = load("riscv64-norvc", "norvc") else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        assert_eq!(riscv.eh_frame_functions.len(), 4, "riscv64");
+        let arm = load("arm-a32", "a32").unwrap();
+        assert!(
+            arm.eh_frame_functions.is_empty(),
+            "ARM release builds carry no .eh_frame; got {}",
+            arm.eh_frame_functions.len()
+        );
+        let a64 = load("aarch64-elf", "elf").unwrap();
+        assert_eq!(a64.eh_frame_functions.len(), 20, "aarch64");
+    }
+
+    #[test]
+    fn the_macho_cross_fixture_has_both_unwind_sources_and_they_disagree() {
+        // The two Mach-O sources cover different sets, and this fixture shows it:
+        // the symbol table names 4, __unwind_info indexes 2 (the ones with a frame) and
+        // __eh_frame carries 1 FDE (_main alone — the three callees were inlined and have
+        // no frame of their own). Each source answers a different question, and none
+        // implies another; a reader that assumed otherwise would be wrong on this file.
+        let Some(module) = load("aarch64-macho", "macho") else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let has = |name: &str| module.sections.iter().any(|section| section.name == name);
+        assert!(has("__unwind_info"), "Mach-O must carry compact unwind");
+        assert!(has("__eh_frame"), "Mach-O must carry a frame section");
+        assert_eq!(module.eh_frame_functions.len(), 1);
+        assert_eq!(module.eh_frame_functions[0].rva, 0x1550, "_main");
+        let offsets = crate::macho_unwind::function_offsets(
+            module
+                .address_space()
+                .read(
+                    module
+                        .sections
+                        .iter()
+                        .find(|s| s.name == "__unwind_info")
+                        .unwrap()
+                        .rva,
+                    0x50,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            offsets.len(),
+            2,
+            "compact unwind: functions with a frame, leaves excluded"
+        );
+    }
+
+    #[test]
+    fn the_thumb_fixture_keeps_its_entry_in_thumb_mode() {
+        // The ELF entry of a Thumb build has bit 0 set; the image must report it as-is
+        // so the lifter can read the mode off it.
+        let Some(module) = load("arm-thumb", "thumb") else {
+            eprintln!("skip: cross fixtures not built");
+            return;
+        };
+        let entry = module.entry_rva.expect("entry");
+        assert_eq!(entry & 1, 1, "a Thumb entry address is odd");
+        let a32 = load("arm-a32", "a32").unwrap();
+        assert_eq!(
+            a32.entry_rva.unwrap() & 1,
+            0,
+            "an A32 entry address is even"
+        );
+    }
+
+    #[test]
+    fn the_string_fixtures_keep_their_literals_in_a_data_section() {
+        for (lane, stem, literal) in [
+            ("riscv64-strings", "strings", "hello_from_riscv"),
+            ("arm-strings", "a32", "hello_from_arm"),
+            ("arm-strings-thumb", "thumb", "hello_from_arm"),
+        ] {
+            let Some(module) = load(lane, stem) else {
+                continue;
+            };
+            use kotama::AddressSpace as _;
+            let space = module.address_space();
+            let data: Vec<u8> = module
+                .sections
+                .iter()
+                .filter(|section| !section.executable && section.size > 0)
+                .filter_map(|section| space.read(section.rva, section.size as usize))
+                .flatten()
+                .copied()
+                .collect();
+            assert!(
+                data.windows(literal.len()).any(|w| w == literal.as_bytes()),
+                "{lane}: literal {literal:?} not found in data sections"
+            );
+        }
+    }
 }
