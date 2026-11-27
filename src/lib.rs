@@ -171,6 +171,12 @@ pub enum Evidence {
     /// Only functions with a stack frame appear here, so it is exhaustive for
     /// non-leaf functions and survives stripping.
     UnwindInfo,
+    /// Frame-section entry (`__eh_frame` / `.eh_frame`) FDE covering a function.
+    ///
+    /// This is the DWARF call-frame table: one entry per function the compiler
+    /// emitted CFI for. It is the only function table a fully stripped ELF keeps,
+    /// so it carries discovery when the symbol table is gone.
+    EhFrame,
     /// 映像入口点。
     Entry,
     /// 直接 call 目标。
@@ -194,6 +200,7 @@ impl Evidence {
             Self::Pdb => "pdb",
             Self::Pdata => "pdata",
             Self::UnwindInfo => "unwind",
+            Self::EhFrame => "eh_frame",
             Self::Entry => "entry",
             Self::CallTarget => "call",
             Self::PointerTarget => "pointer",

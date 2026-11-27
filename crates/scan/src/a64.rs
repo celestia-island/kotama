@@ -47,6 +47,11 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
     for symbol in &module.debug_functions {
         seed_symbol(&mut table, symbol, Evidence::Dwarf);
     }
+    // Frame-section FDEs: one entry per function the compiler emitted CFI for.
+    // This is what still names boundaries in a fully stripped A64 ELF.
+    for symbol in &module.eh_frame_functions {
+        seed_symbol(&mut table, symbol, Evidence::EhFrame);
+    }
     if let Some(entry) = module.entry_rva {
         table
             .entry(entry)

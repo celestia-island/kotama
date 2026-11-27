@@ -112,6 +112,7 @@ struct ViewAdapter<'a> {
     symbols: &'a [SymbolInfo],
     dynamic_symbols: &'a [SymbolInfo],
     debug_functions: &'a [SymbolInfo],
+    eh_frame_functions: &'a [SymbolInfo],
     space: &'a dyn AddressSpace,
 }
 impl ViewAdapter<'_> {
@@ -140,6 +141,8 @@ pub struct ScanView<'a> {
     pub dynamic_symbols: &'a [SymbolInfo],
     /// 调试信息子程序（DWARF / PDB；活体一般为空）。
     pub debug_functions: &'a [SymbolInfo],
+    /// 帧节 FDE 覆盖范围（`__eh_frame` / `.eh_frame`）；活体一般为空。【证据等级】
+    pub eh_frame_functions: &'a [SymbolInfo],
 }
 
 /// 对一个装载好的模块做函数发现（静态侧便捷入口）。
@@ -169,6 +172,7 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
         symbols: &module.symbols,
         dynamic_symbols: &module.dynamic_symbols,
         debug_functions: &module.debug_functions,
+        eh_frame_functions: &module.eh_frame_functions,
     };
     discover_impl(view, &module.address_space(), module.exception_directory)
 }
@@ -189,6 +193,7 @@ pub fn exception_functions(module: &LoadedModule) -> Vec<ExceptionFunction> {
         symbols: &module.symbols,
         dynamic_symbols: &module.dynamic_symbols,
         debug_functions: &module.debug_functions,
+        eh_frame_functions: &module.eh_frame_functions,
         space: &space,
     };
     exception_functions_impl(&view, exception_directory)
@@ -230,6 +235,7 @@ fn discover_impl(
         symbols: view.symbols,
         dynamic_symbols: view.dynamic_symbols,
         debug_functions: view.debug_functions,
+        eh_frame_functions: view.eh_frame_functions,
         space,
     };
     let mut table: BTreeMap<u64, Builder> = BTreeMap::new();
@@ -265,6 +271,29 @@ fn discover_impl(
             entry.name = Some(symbol.name.clone());
         }
         entry.evidence.insert(debug_evidence);
+    }
+
+    // Frame-section FDEs. Unlike every source above this one is present in a
+    // fully stripped ELF, where the symbol table and debug info are both gone.
+    // An FDE may describe padding or a section the loader does not map, so unlike a
+    // call target it is not code by construction; only ranges inside an executable
+    // section are function boundaries.
+    let is_code = |rva: u64| {
+        module.sections.iter().any(|section| {
+            section.executable
+                && rva >= section.rva
+                && rva < section.rva.saturating_add(section.size)
+        })
+    };
+    for symbol in module.eh_frame_functions {
+        if !is_code(symbol.rva) {
+            continue;
+        }
+        let entry = table.entry(symbol.rva).or_default();
+        if entry.size.is_none() && symbol.size > 0 {
+            entry.size = Some(symbol.size);
+        }
+        entry.evidence.insert(Evidence::EhFrame);
     }
 
     // 3) ELF dynsym：导出面（strip 但保留动态符号的库 / PIE）。
@@ -2679,6 +2708,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
             space,
         }
     }
@@ -2738,6 +2768,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_impl(view, &space, Some(directory));
         let function = functions
@@ -2820,6 +2851,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let directory = DataDirectory {
             rva: 0x2000,
@@ -2834,6 +2866,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
             space: &space,
         };
         let facts = exception_functions_impl(&adapter, Some(directory));
@@ -2899,6 +2932,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -2954,6 +2988,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3014,6 +3049,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3131,6 +3167,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         let prologue_targets: Vec<u64> = functions
@@ -3222,6 +3259,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         let entry = functions
@@ -3281,6 +3319,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3338,6 +3377,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3420,6 +3460,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         let has = |rva: u64, evidence: Evidence| {
@@ -3498,6 +3539,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3581,6 +3623,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3659,6 +3702,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         for rva in [0x1030u64, 0x1050] {
@@ -3744,6 +3788,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         let has = |rva: u64| {
@@ -3811,6 +3856,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         let by_rva = |rva: u64| functions.iter().find(|function| function.rva == rva);
@@ -3899,6 +3945,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         for (rva, size) in [(0x1010u64, 6u64), (0x1016, 6), (0x1048, 3), (0x1050, 9)] {
@@ -3949,6 +3996,7 @@ mod tests {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            eh_frame_functions: &[],
         };
         let functions = discover_with(view, &space);
         assert!(
@@ -3966,5 +4014,113 @@ mod tests {
         };
         let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(discover(&module), discover(&module));
+    }
+
+    #[test]
+    fn frame_section_ranges_are_seeded_with_their_own_evidence() {
+        // The frame section is the only function table a fully stripped ELF keeps,
+        // so its entries must reach discovery as exact boundaries.
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        // A bare `ret` at each start keeps the x86 sweep from inventing anything.
+        space.write(0x1000, &[0xC3]);
+        space.write(0x1020, &[0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x1000,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let frame = vec![
+            SymbolInfo {
+                rva: 0x1000,
+                size: 0x10,
+                name: String::new(),
+            },
+            SymbolInfo {
+                rva: 0x1020,
+                size: 0x8,
+                name: String::new(),
+            },
+        ];
+        let view = ScanView {
+            container: Container::Elf64,
+            arch: Arch::X86,
+            image_base: 0x1000,
+            entry_rva: None,
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+            eh_frame_functions: &frame,
+        };
+        let functions = discover_with(view, &space);
+        let second = functions
+            .iter()
+            .find(|function| function.rva == 0x1020)
+            .expect("frame entry must be seeded");
+        assert!(second.evidence.contains(&Evidence::EhFrame));
+        // An FDE states its length, so the size is measured, not inferred.
+        assert_eq!((second.size, second.size_inferred), (8, false));
+    }
+
+    #[test]
+    fn a_frame_range_beyond_the_code_section_is_dropped() {
+        // An FDE can describe padding or a section the loader did not map; the
+        // executable-section filter must still apply to it.
+        let segment = |rva, size, execute| kotama::Segment {
+            rva,
+            size,
+            perms: kotama::Perms {
+                read: true,
+                write: false,
+                execute,
+            },
+        };
+        let mut space = SyntheticSpace {
+            base: 0x1000,
+            bytes: vec![0u8; 0x2000],
+            segments: vec![segment(0x1000, 0x1000, true)],
+        };
+        space.write(0x1000, &[0xC3]);
+        let sections = vec![SectionInfo {
+            rva: 0x1000,
+            size: 0x100,
+            name: ".text".into(),
+            executable: true,
+        }];
+        let frame = vec![SymbolInfo {
+            rva: 0x5000,
+            size: 0x8,
+            name: String::new(),
+        }];
+        let view = ScanView {
+            container: Container::Elf64,
+            arch: Arch::X86,
+            image_base: 0x1000,
+            entry_rva: None,
+            sections: &sections,
+            symbols: &[],
+            dynamic_symbols: &[],
+            debug_functions: &[],
+            eh_frame_functions: &frame,
+        };
+        let functions = discover_with(view, &space);
+        assert!(
+            functions.iter().all(|function| function.rva != 0x5000),
+            "out-of-section frame range must be dropped: {functions:?}"
+        );
     }
 }
