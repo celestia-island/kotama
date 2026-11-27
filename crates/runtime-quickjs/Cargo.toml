@@ -1,0 +1,15 @@
+[package]
+name = "kotama-runtime-quickjs"
+description = "QuickJS-ng C ABI export facts for runtime mounting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

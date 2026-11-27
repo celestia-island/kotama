@@ -13,6 +13,7 @@ publish = false
 kotama-proxy.workspace = true
 kotama-runtime-jni = { path = "../runtime-jni", version = "^0.1" }
 kotama-runtime-lua = { path = "../runtime-lua", version = "^0.1" }
+kotama-runtime-quickjs = { path = "../runtime-quickjs", version = "^0.1" }
 
 [lints]
 workspace = true
