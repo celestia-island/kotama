@@ -441,6 +441,9 @@ fn live_e2e_attach_then_inject_into_x86_target_over_default_pid_pipe() {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            // A live process carries no frame section: .eh_frame is a file fact, so the
+            // live path takes its boundaries from .pdata and passes none here.
+            eh_frame_functions: &[],
         },
         &image,
     );
@@ -456,6 +459,10 @@ fn live_e2e_attach_then_inject_into_x86_target_over_default_pid_pipe() {
             symbols: &[],
             dynamic_symbols: &[],
             debug_functions: &[],
+            // The static side hands over what the file carries, so both views are judged
+            // on the same evidence. The assertion below must see equal sets: dropping the
+            // frame seed reddens it, which is the probe listed in the mutation table.
+            eh_frame_functions: &module.eh_frame_functions,
         },
         &module.address_space(),
     );

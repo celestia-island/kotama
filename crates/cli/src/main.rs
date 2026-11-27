@@ -513,6 +513,8 @@ fn live(args: &[String]) -> ExitCode {
                     symbols: &[],
                     dynamic_symbols: &[],
                     debug_functions: &[],
+                    // A live process has no frame section parsed; the PE path uses .pdata.
+                    eh_frame_functions: &[],
                 },
                 &image,
             );

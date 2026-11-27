@@ -11,6 +11,7 @@
 //! 确定性：同一字节序列两次装载得到逐字段相同的 [`LoadedModule`]（所有集合按地址
 //! 排序，无时间戳）——差分与知识库复用的前提。
 
+pub mod eh_frame;
 pub mod elf_export;
 pub mod macho_unwind;
 pub mod pe_export;
@@ -410,6 +411,11 @@ pub struct LoadedModule {
     pub imports: Vec<ImportInfo>,
     /// DWARF `DW_TAG_subprogram` 的子程序（名字 + 精确边界；`-g` 编译的 ELF 有）。
     pub debug_functions: Vec<SymbolInfo>,
+    /// Frame-section FDE ranges (`__eh_frame` / `.eh_frame`),带精确长度、无名字。
+    ///
+    /// 全 strip 的 ELF 只剩这张表能给出函数边界，所以它单独一份、不与
+    /// `debug_functions` 混在一起：来源不同，证据等级也不同。
+    pub eh_frame_functions: Vec<SymbolInfo>,
     /// PE exception directory（DataDirectory 索引 3）；不依赖节名。
     pub exception_directory: Option<DataDirectory>,
     /// PE 资源目录中的叶子资源（DataDirectory 索引 2）。
@@ -1029,6 +1035,39 @@ fn authenticate_pdb(
 /// ELF 它与 symtab 互为印证（差分口径见 oracle）。没有 `.debug_info` 就返回空。
 /// 只处理 x86/x64 的小端（[`Arch`] 门已保证），压缩节（SHF_COMPRESSED）暂不支持——
 /// 读不出来就当没有，不报错。
+/// Frame-section FDE ranges as function entries (no names, exact lengths).
+///
+/// Both container families spell the section differently and both spellings are
+/// tried. A missing section is not an error: most PE files have none, and a
+/// Mach-O linked for compact unwinding may carry only a lone CIE.
+fn frame_functions(file: &object::File<'_>, base: u64) -> Vec<SymbolInfo> {
+    let Some(section) = file
+        .section_by_name("__eh_frame")
+        .or_else(|| file.section_by_name(".eh_frame"))
+    else {
+        return Vec::new();
+    };
+    let Ok(data) = section.data() else {
+        return Vec::new();
+    };
+    // The FDE initial location is PC-relative, so the section's own address is
+    // part of the input, not just the bytes.
+    // `Section::address()` is already the link-time address in both containers,
+    // so it is the pcrel base as-is; adding `base` again shifts every range.
+    let ranges = crate::eh_frame::function_ranges(data, section.address());
+    ranges
+        .into_iter()
+        .filter_map(|range| {
+            let rva = range.start.checked_sub(base)?;
+            Some(SymbolInfo {
+                rva,
+                size: range.length,
+                name: String::new(),
+            })
+        })
+        .collect()
+}
+
 fn dwarf_functions(file: &object::File<'_>, base: u64) -> Vec<SymbolInfo> {
     let load = |id: gimli::SectionId| -> Result<EndianSlice<'_, LittleEndian>, gimli::Error> {
         let bytes: &[u8] = file
@@ -1409,6 +1448,7 @@ impl LoadedModule {
         }
         relative_relocations.sort_unstable();
         let debug_functions = dwarf_functions(file, base);
+        let eh_frame_functions = frame_functions(file, base);
         let exception_directory = pe_data_directory(data, container, 3);
         let pdb_identity = pe_pdb_identity(data, &backing, container);
         let resources = pe_resources(data, &backing, container);
@@ -1424,6 +1464,7 @@ impl LoadedModule {
             dynamic_symbols,
             imports,
             debug_functions,
+            eh_frame_functions,
             exception_directory,
             resources,
             version_info,
@@ -1948,5 +1989,71 @@ mod tests {
         assert_eq!(Container::CoffBig.short(), "coff-big");
         assert!(Container::MachO32.is_loadable());
         assert!(!Container::Coff.is_loadable());
+    }
+
+    #[test]
+    fn a_real_elf_exposes_frame_ranges_inside_its_code_section() {
+        // The fixture is a real linked ELF, so this covers the whole path from the
+        // section lookup through the pcrel decode to the image-base subtraction.
+        // Getting the base wrong shifts every range out of `.text`, so the assertion
+        // is that they land inside it.
+        let Some(path) = fixture("x86_64-linux-gnu/-O2/loops") else {
+            eprintln!("skip: fixtures not built");
+            return;
+        };
+        let module = LoadedModule::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert!(
+            !module.eh_frame_functions.is_empty(),
+            "a linked ELF with debug-friendly code always carries .eh_frame"
+        );
+        let text = module
+            .sections
+            .iter()
+            .find(|section| section.executable && section.name.contains("text"))
+            .expect("an executable section");
+        let (start, end) = (text.rva, text.rva.saturating_add(text.size));
+        let outside: Vec<u64> = module
+            .eh_frame_functions
+            .iter()
+            .map(|function| function.rva)
+            .filter(|rva| *rva < start || *rva >= end)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "frame ranges outside .text[{start:#x}..{end:#x}]: {outside:x?}"
+        );
+        // Every range has a length, because an FDE states one.
+        assert!(module.eh_frame_functions.iter().all(|f| f.size > 0));
+        // A frame entry carries no name: the section describes ranges, not symbols.
+        assert!(module.eh_frame_functions.iter().all(|f| f.name.is_empty()));
+        // Cross-check against an independent source: the same binary's DWARF
+        // subprograms state a length for the same functions. Where both describe a
+        // function they must agree, which pins the FDE length decode against
+        // something other than itself.
+        let dwarf: std::collections::BTreeMap<u64, u64> = module
+            .debug_functions
+            .iter()
+            .map(|function| (function.rva, function.size))
+            .collect();
+        assert!(!dwarf.is_empty(), "fixture must carry DWARF subprograms");
+        let compared: Vec<(u64, u64, u64)> = module
+            .eh_frame_functions
+            .iter()
+            .filter_map(|function| {
+                dwarf
+                    .get(&function.rva)
+                    .map(|size| (function.rva, function.size, *size))
+            })
+            .collect();
+        assert!(
+            !compared.is_empty(),
+            "no function is described by both tables"
+        );
+        for (rva, frame_size, dwarf_size) in &compared {
+            assert_eq!(
+                frame_size, dwarf_size,
+                "frame and DWARF disagree on the length of {rva:#x}"
+            );
+        }
     }
 }

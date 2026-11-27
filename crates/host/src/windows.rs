@@ -595,6 +595,7 @@ mod tests {
                 symbols: image.empty_symbols(),
                 dynamic_symbols: image.empty_symbols(),
                 debug_functions: image.empty_symbols(),
+                eh_frame_functions: image.empty_symbols(),
             },
             &image,
         );
