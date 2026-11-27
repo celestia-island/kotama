@@ -65,14 +65,15 @@ fn lua_5_4_resolves_every_mount_point() {
     let address = u64::from_str_radix(first.trim_start_matches("0x"), 16).unwrap();
     assert!(address > 0x1000, "{first}");
 }
-
 /// The 5.1 release lacks 34 names: the plan verifies incomplete with exactly
 /// 34 missing groups, and the command always exits non-zero on an incomplete
 /// plan rather than reporting one that cannot be mounted.
 /// mutate: incomplete-exits-zero (an exit code that ignores verification makes
 /// this test fail on the status code while the JSON is unchanged).
+/// This attribute was lost once to an edit that ended on it; a test that is not
+/// a test still compiles, so the count is what catches it.
+#[test]
 fn lua_5_1_reports_exactly_the_absent_names_and_fails() {
-    let Some(so) = fixture("lua/liblua-5.1.5.so") else {
         eprintln!("skip: Lua fixture not built");
         return;
     };
