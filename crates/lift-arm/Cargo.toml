@@ -1,0 +1,11 @@
+[package]
+name = "kotama-lift-arm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "ARM (A32) and Thumb-2 instruction lifting into control-flow facts."
+
+[dependencies]
+
+[lints]
+workspace = true
