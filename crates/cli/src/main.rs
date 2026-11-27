@@ -21,6 +21,7 @@ use kotama_scan::string_xrefs;
 use kotama_scan::vtables_with_rtti;
 use serde::Serialize;
 
+mod hook;
 mod proxy;
 mod resource;
 
@@ -91,6 +92,7 @@ fn main() -> ExitCode {
         Some("export") => export(&args.collect::<Vec<_>>()),
         Some("live") => live(&args.collect::<Vec<_>>()),
         Some("pack") => pack(&args.collect::<Vec<_>>()),
+        Some("hook") => hook::run(&args.collect::<Vec<_>>()),
         Some("proxy") => proxy::run(&args.collect::<Vec<_>>()),
         Some("resource") => resource::run(&args.collect::<Vec<_>>()),
         Some(command) => {

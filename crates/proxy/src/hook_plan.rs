@@ -214,6 +214,69 @@ pub fn plan_hooks(
     }
     Ok(HookPlan { hooks, warnings })
 }
+/// Hookable symbols for a PE image, one group per public ordinal.
+///
+/// An ordinal with several names is one group. No system library on the machine
+/// this was written on carries such an alias (kernel32, ntdll and both msvcrt
+/// were checked: every ordinal has exactly one name), so that case is stated
+/// here as the contract rather than pinned by a test with a real sample.
+///
+/// Aliases (several names on one ordinal) stay in one group, which is what the
+/// planner's grouping means: a PE alias is intercepted as one hook. Names are the
+/// raw bytes the container stores, as `HookableSymbol` wants.
+///
+/// # Errors
+/// Returns [HookPlanError] when the image is not a PE or its export table is
+/// malformed; the message says which.
+pub fn pe_hookable_symbols(data: &[u8]) -> Result<Vec<HookableSymbol>, HookPlanError> {
+    let table = kotama_image::pe_export::parse_pe_exports(data)
+        .map_err(|error| HookPlanError(format!("export table: {error}")))?
+        .ok_or_else(|| HookPlanError("not a PE image".to_string()))?;
+    Ok(table
+        .entries
+        .iter()
+        .flat_map(|entry| {
+            entry.names.iter().map(move |name| HookableSymbol {
+                name: name.clone(),
+                group: u32::from(entry.ordinal),
+            })
+        })
+        .collect())
+}
+
+/// Hookable symbols for a shared ELF object, one group per exported name.
+///
+/// ELF has no ordinals; the group is the name's index among the exports in
+/// table order, so two names never share a group the way PE aliases do.
+/// Names are deduplicated: a name exported under two bindings is one hook. No
+/// fixture here carries such a duplicate, so that is the contract, not a test.
+///
+/// # Errors
+/// Returns [HookPlanError] when the image is not an ELF shared object.
+pub fn elf_hookable_symbols(data: &[u8]) -> Result<Vec<HookableSymbol>, HookPlanError> {
+    let module = kotama_image::LoadedModule::parse(data)
+        .map_err(|error| HookPlanError(error.to_string()))?;
+    if !matches!(
+        module.container,
+        kotama_image::Container::Elf32 | kotama_image::Container::Elf64
+    ) {
+        return Err(HookPlanError("not an ELF image".to_string()));
+    }
+    let mut symbols: Vec<HookableSymbol> = module
+        .dynamic_symbols
+        .iter()
+        .filter(|symbol| !symbol.name.is_empty())
+        .enumerate()
+        .map(|(index, symbol)| HookableSymbol {
+            name: symbol.name.clone().into_bytes(),
+            group: u32::try_from(index).unwrap_or(u32::MAX) + 1,
+        })
+        .collect();
+    symbols.sort_by(|a, b| a.name.cmp(&b.name));
+    symbols.dedup_by(|a, b| a.name == b.name);
+    Ok(symbols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,5 +528,63 @@ mod tests {
             .selection_for(crate::sdk_presets::Platform::Native);
         selection.names.push("LoadLibraryX".to_string());
         assert!(plan_hooks(&symbols, &selection).is_err());
+    }
+
+    /// The PE bridge groups aliases by ordinal. The shared-library fixture has
+    /// six exports — three of its own and three the toolchain's CRT glue — each
+    /// on its own ordinal, so six groups for six names.
+    #[test]
+    fn the_pe_bridge_groups_aliases_by_ordinal() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/x86_64-windows-gnu/-O2/libexports.dll");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skip: fixture not built");
+            return;
+        };
+        let symbols = pe_hookable_symbols(&data).unwrap();
+        assert_eq!(
+            symbols.len(),
+            6,
+            "three exports plus three CRT-glue exports"
+        );
+        let groups: std::collections::BTreeSet<u32> =
+            symbols.iter().map(|symbol| symbol.group).collect();
+        assert_eq!(groups.len(), 6, "every export is on its own ordinal here");
+    }
+
+    /// The ELF bridge dedupes by name: a name exported twice (once as a default
+    /// and once as a hidden alias, say) is one hookable symbol, not two groups.
+    #[test]
+    fn the_elf_bridge_dedupes_by_name() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/lua/liblua-5.4.7.so");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skip: Lua fixture not built");
+            return;
+        };
+        let symbols = elf_hookable_symbols(&data).unwrap();
+        let names: std::collections::BTreeSet<&[u8]> = symbols
+            .iter()
+            .map(|symbol| symbol.name.as_slice())
+            .collect();
+        assert_eq!(names.len(), symbols.len(), "no name appears twice");
+        let groups: std::collections::BTreeSet<u32> =
+            symbols.iter().map(|symbol| symbol.group).collect();
+        assert_eq!(groups.len(), symbols.len(), "one group per name");
+        for pair in symbols.windows(2) {
+            assert!(pair[0].name < pair[1].name, "sorted by name");
+        }
+    }
+
+    /// A non-PE input is an error from the PE bridge, not a panic and not a empty
+    /// table that would plan nothing and look like success.
+    #[test]
+    fn the_pe_bridge_refuses_non_pe_input() {
+        assert!(pe_hookable_symbols(b"not a binary").is_err());
+    }
+
+    #[test]
+    fn the_elf_bridge_refuses_non_elf_input() {
+        assert!(elf_hookable_symbols(b"not a binary").is_err());
     }
 }
