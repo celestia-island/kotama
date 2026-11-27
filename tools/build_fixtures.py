@@ -226,6 +226,53 @@ def build_shared(zig: str | None, targets: list[str], opt_levels: list[str]) -> 
     return failures
 
 
+CROSS_LANES = [
+    # (name, zig target, extra cc flags, source stem, output stem)
+    ("riscv64-norvc", "riscv64-linux-musl", ["-nostdlib", "-mcpu=generic_rv64"], "riscv", "norvc"),
+    ("riscv64-rvc", "riscv64-linux-musl", ["-nostdlib", "-mcpu=generic_rv64+c"], "riscv", "rvc"),
+    ("riscv64-strings", "riscv64-linux-musl", ["-nostdlib", "-mcpu=generic_rv64+c", "-fno-builtin"], "riscv_strings", "strings"),
+    ("arm-a32", "arm-linux-musleabi", [], "arm", "a32"),
+    ("arm-thumb", "thumb-linux-musleabi", [], "arm", "thumb"),
+    ("arm-strings", "arm-linux-musleabi", [], "arm_strings", "a32"),
+    ("arm-strings-thumb", "thumb-linux-musleabi", [], "arm_strings", "thumb"),
+    ("aarch64-elf", "aarch64-linux-musl", [], "macho", "elf"),
+    ("aarch64-macho", "aarch64-macos", ["-nostdlib", "-fno-sanitize=all"], "macho", "macho"),
+]
+
+def build_cross(zig: str | None) -> int:
+    """Cross-compile the non-x86 samples under fixtures/src/cross/.
+
+    These exercise the lifters (A64, RISC-V, ARM/Thumb) and the frame-section
+    discovery on real binaries. They are never run here — the host cannot execute
+    them — so each is linked with -s to drop the symbol table, which is the stripped
+    shape the lifters exist for.
+    """
+    cross_dir = SRC_DIR / "cross"
+    if not cross_dir.is_dir():
+        return 0
+    if zig is None:
+        sys.exit("build_fixtures: zig is required for cross lanes")
+    failures = 0
+    out_root = OUT_ROOT / "cross"
+    for name, target, extra, src_stem, out_stem in CROSS_LANES:
+        src = cross_dir / f"{src_stem}.c"
+        if not src.exists():
+            print(f"skip {name}: {src.name} missing")
+            continue
+        out_dir = out_root / name
+        out_dir.mkdir(parents = True, exist_ok = True)
+        exe = out_dir / out_stem
+        static_flag = [] if target.endswith("-macos") else ["-static"]
+        cmd = [zig, "cc", "-target", target, "-O2", "-s", *static_flag, "-fno-sanitize=all", *extra, "-o", str(exe), str(src)]
+        proc = run(cmd)
+        if proc.returncode != 0:
+            failures += 1
+            print(f"FAIL cross/{name}\n{proc.stderr.strip()}")
+        else:
+            print(f"ok   cross/{name}/{out_stem} ({exe.stat().st_size} B)")
+    return failures
+
+
 def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> int:
     failures = 0
     native_windows = os.name == "nt"
@@ -309,6 +356,7 @@ def main() -> int:
     # Shared libraries are built for every lane: they are never run, so they cost
     # only the compile, and export-table consumers need them per target.
     failures += build_shared(zig, args.targets, opt_levels)
+    failures += build_cross(zig)
 
     if args.host_samples:
         copy_host_samples()
