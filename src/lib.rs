@@ -166,6 +166,11 @@ pub enum Evidence {
     Pdb,
     /// PE64 `.pdata` RUNTIME_FUNCTION。
     Pdata,
+    /// Mach-O `__unwind_info` compact unwind index entry.
+    ///
+    /// Only functions with a stack frame appear here, so it is exhaustive for
+    /// non-leaf functions and survives stripping.
+    UnwindInfo,
     /// 映像入口点。
     Entry,
     /// 直接 call 目标。
@@ -188,6 +193,7 @@ impl Evidence {
             Self::Dwarf => "dwarf",
             Self::Pdb => "pdb",
             Self::Pdata => "pdata",
+            Self::UnwindInfo => "unwind",
             Self::Entry => "entry",
             Self::CallTarget => "call",
             Self::PointerTarget => "pointer",
