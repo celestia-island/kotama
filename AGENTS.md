@@ -30,13 +30,13 @@
   `engine-formats-cli` 二进制），**不进 `kotama-resource` 正式包、不进正式 CLI 子命令**。正式包只保留
   厂商中立格式（SWF / VBS / DOS COM / DDS / TGA）。这样工具包不会被误读为针对某个产品。
 - 具体目标的适配代码**刻意留到接触该工程时按需编写**，落在本仓之外；本仓不预留、不备份、不 vendored。
-- 提交前自查：对 rs/toml/md/json/yml/py 做一遍作品名与引擎世代词扫描，命中即改。
+- 提交前自查已机械化：`just genericity`（= `tools/genericity_scan.py` + 自测）扫 rs/toml/md/json/yml/py/ts/js/c/cpp/h，作品名/系列名/工作室名/引擎世代的词表在脚本里显式列出、可审计；`examples/engine-formats` 是唯一允许命中的位置。该配方已进 `just gate`，命中即红。新增禁词改脚本，不靠记忆。
 - 违反此边界的改动按许可越界同级处理：先删干净、再讨论泛化。
 
 ## 门禁
 
 `just gate` = `cargo fmt --check` → `cargo clippy --workspace --all-targets -- -D warnings` →
-`cargo test --workspace` → `cargo deny check licenses bans sources`。
+`just genericity`（作品名扫描 + 自测）→ `cargo test --workspace` → `cargo deny check licenses bans sources`。
 
 `ci.yml` 仅 `workflow_dispatch`（编译 + deny 道，自托管 runner）；`depspec-lint` / `family-versions` /
 `verify-versions` 在 `master` 推送时跑。

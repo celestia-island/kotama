@@ -25,17 +25,18 @@ test:
 # Format check.
 fmt:
     cargo fmt --all -- --check
+# Genericity: no product, series, studio or engine-generation names outside
+# examples/engine-formats. The mechanical half of the AGENTS.md rule.
+genericity:
+    python tools/genericity_scan.py
+    python tools/genericity_selftest.py
 
-# Format write.
-fmt-write:
-    cargo fmt --all
-
-# Dependency licences: permissive only, no AGPL/GPL/LGPL in the tree.
+# One-shot gate.
 licenses:
     cargo deny check licenses bans sources
 
 # One-shot gate.
-gate: fmt lint test licenses
+gate: fmt lint genericity test licenses
 
 # Build the optional desktop shells (Tauri frontend must be built first).
 ui-build:
