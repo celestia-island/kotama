@@ -314,6 +314,134 @@ pub fn lift(bytes: &[u8], address: u64, mode: Mode) -> Vec<ArmLifted> {
     out
 }
 
+/// One resolved data address: a `movw` + `movt` pair that materialises a 32-bit value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AddressForm {
+    /// Address of the `movt` that completes the value.
+    pub at: u64,
+    /// The 32-bit value the pair computes, zero-extended.
+    pub target: u64,
+}
+
+/// Decode an A32 `movw`/`movt` word; returns `(is_movt, rd, imm16)`.
+const fn arm_mov_imm(word: u32) -> Option<(bool, u32, u32)> {
+    // bits 27:20 = 0x30 (movw) or 0x34 (movt); imm4 in bits 19:16, rd in 15:12, imm12 low.
+    let op = (word >> 20) & 0xff;
+    if op != 0x30 && op != 0x34 {
+        return None;
+    }
+    let imm4 = (word >> 16) & 0xf;
+    let rd = (word >> 12) & 0xf;
+    let imm12 = word & 0xfff;
+    Some((op == 0x34, rd, (imm4 << 12) | imm12))
+}
+
+/// Decode a Thumb-2 `movw`/`movt` from its two halfwords; returns `(is_movt, rd, imm16)`.
+const fn thumb_mov_imm(low: u16, second: u16) -> Option<(bool, u32, u32)> {
+    // hw1 = 1111 0 i 10 op1 imm4 with op1 = 0100 (movw) / 1100 (movt); hw2 = 0 imm3 rd imm8.
+    // hw1 = 11110 i 10 op1 imm4: bit 9 is 1 and bit 8 is 0 (bit 10 carries i, so it is
+    // not part of the fixed pattern).
+    if low >> 11 != 0b11110 || low >> 8 & 0b11 != 0b10 {
+        return None;
+    }
+    let op1 = (low >> 4) & 0xf;
+    if op1 != 0b0100 && op1 != 0b1100 {
+        return None;
+    }
+    if second >> 15 != 0 {
+        return None;
+    }
+    let i = (low >> 10 & 1) as u32;
+    let imm4 = (low & 0xf) as u32;
+    let imm3 = (second >> 12 & 0x7) as u32;
+    let rd = (second >> 8 & 0xf) as u32;
+    let imm8 = (second & 0xff) as u32;
+    Some((
+        op1 == 0b1100,
+        rd,
+        (i << 11) | (imm4 << 12) | (imm3 << 8) | imm8,
+    ))
+}
+
+/// Every 32-bit constant materialised by a `movw` + `movt` pair in `bytes`.
+///
+/// ARM cannot load a 32-bit address in one instruction. The compiler emits `movw` to set
+/// the low half of a register and `movt` to set the high half while keeping the low, so
+/// the two together form a constant — which for a string literal is its address. This is
+/// ARM's counterpart of RISC-V's `lui` + `addi`.
+///
+/// Each register's most recent `movw` is tracked and paired with the next `movt` on that
+/// same register. A `movt` with no preceding `movw` forms only the high half and is not a
+/// complete address, so it is skipped. Any other write to a tracked register ends its
+/// pending `movw`.
+#[must_use]
+pub fn address_forms(bytes: &[u8], address: u64, mode: Mode) -> Vec<AddressForm> {
+    let mut pending: Vec<(u32, u32)> = Vec::new();
+    let mut out = Vec::new();
+    let mut pc = address;
+    let mut i = 0usize;
+    while i + 2 <= bytes.len() {
+        let low = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        let width = match mode {
+            Mode::Arm => 4,
+            Mode::Thumb => thumb_width(low),
+        };
+        if i + width > bytes.len() {
+            break;
+        }
+        let decoded = match mode {
+            Mode::Arm => {
+                let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+                arm_mov_imm(word)
+            }
+            Mode::Thumb if width == 4 => {
+                let second = u16::from_le_bytes([bytes[i + 2], bytes[i + 3]]);
+                thumb_mov_imm(low, second)
+            }
+            Mode::Thumb => None,
+        };
+        if let Some((is_movt, rd, imm16)) = decoded {
+            if is_movt {
+                if let Some(index) = pending.iter().position(|(reg, _)| *reg == rd) {
+                    let low_half = pending[index].1;
+                    out.push(AddressForm {
+                        at: pc,
+                        target: u64::from(low_half | (imm16 << 16)),
+                    });
+                    pending.remove(index);
+                }
+            } else {
+                pending.retain(|(reg, _)| *reg != rd);
+                pending.push((rd, imm16));
+            }
+        } else if let Some(rd) = register_written(mode, low, bytes.get(i + 1).copied(), width) {
+            pending.retain(|(reg, _)| *reg != rd);
+        }
+        i += width;
+        pc += width as u64;
+    }
+    out
+}
+
+/// Best-effort destination register of an instruction, for invalidating a pending `movw`.
+///
+/// Only the common data-processing shapes are recognised; anything else returns `None`,
+/// which leaves the pending `movw` in place rather than discarding a real one.
+fn register_written(mode: Mode, low: u16, _second: Option<u8>, width: usize) -> Option<u32> {
+    match (mode, width) {
+        (Mode::Arm, 4) => None,
+        (Mode::Thumb, 2) => {
+            // 16-bit Thumb data-processing: op 00 xxxxx; rd in bits 2:0 for the two-operand form.
+            if low >> 10 <= 0b00100 {
+                Some(u32::from(low & 0x7))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,5 +593,88 @@ mod tests {
         assert!(blx[0].text.starts_with("blx"), "{}", blx[0].text);
         let bl = lift(&le(&[0x00, 0xf0, 0x02, 0xf8]), 0x2000, Mode::Thumb);
         assert!(bl[0].text.starts_with("bl "), "{}", bl[0].text);
+    }
+
+    // Every encoding below was read from a real binary through a reference decoder.
+
+    #[test]
+    fn arm_movw_movt_form_the_string_address() {
+        // movw r0, #0x230 ; movt r0, #1 at 0x202fc -> 0x10230 (hello_from_arm).
+        let code = le(&[0x30, 0x02, 0x00, 0xe3, 0x01, 0x00, 0x40, 0xe3]);
+        let forms = address_forms(&code, 0x202fc, Mode::Arm);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].at, 0x20300);
+        assert_eq!(forms[0].target, 0x1_0230);
+    }
+
+    #[test]
+    fn thumb_movw_movt_form_the_string_address() {
+        // From the real binary: 40 f2 10 20 (movw r0,#0x210) ; c0 f2 01 00 (movt r0,#1).
+        let code = le(&[0x40, 0xf2, 0x10, 0x20, 0xc0, 0xf2, 0x01, 0x00]);
+        let forms = address_forms(&code, 0x202c0, Mode::Thumb);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].at, 0x202c4);
+        assert_eq!(forms[0].target, 0x1_0210);
+    }
+
+    #[test]
+    fn thumb_movt_alone_forms_nothing() {
+        // c0 f2 01 00: movt r0, #1 with no movw before it.
+        let code = le(&[0xc0, 0xf2, 0x01, 0x00]);
+        assert!(address_forms(&code, 0x2000, Mode::Thumb).is_empty());
+    }
+
+    #[test]
+    fn a_movw_on_another_register_does_not_pair() {
+        // movw r0,#0x210 (40 f2 10 20) ; movt r1,#1 (c1 f2 01 01): no address.
+        let code = le(&[0x40, 0xf2, 0x10, 0x20, 0xc1, 0xf2, 0x01, 0x01]);
+        assert!(address_forms(&code, 0x2000, Mode::Thumb).is_empty());
+    }
+
+    #[test]
+    fn the_thumb_i_bit_contributes_bit_11() {
+        // From the real binary: 40 f6 60 14 (movw r4,#0x960, i=1) ; c0 f2 03 04 (movt r4,#3).
+        let code = le(&[0x40, 0xf6, 0x60, 0x14, 0xc0, 0xf2, 0x03, 0x04]);
+        let forms = address_forms(&code, 0x202cc, Mode::Thumb);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].target, 0x3_0960);
+    }
+
+    #[test]
+    fn a_mixed_width_sequence_stays_aligned() {
+        // 16-bit push, a 32-bit movw, 16-bit nop: widths must tile.
+        let code = le(&[0x80, 0xb5, 0x40, 0xf2, 0x10, 0x20, 0x00, 0xbf]);
+        let forms = address_forms(&code, 0x2000, Mode::Thumb);
+        assert!(forms.is_empty(), "movw alone forms nothing: {forms:?}");
+    }
+
+    #[test]
+    fn arm_movw_with_a_high_imm4_is_decoded() {
+        // movw r0,#0xf230 = 30 02 0f e3 (imm4 = 0xf in bits 19:16) ; movt r0,#1 = 01 00 40 e3.
+        let code = le(&[0x30, 0x02, 0x0f, 0xe3, 0x01, 0x00, 0x40, 0xe3]);
+        let forms = address_forms(&code, 0x2000, Mode::Arm);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].target, 0x1_f230);
+    }
+
+    #[test]
+    fn thumb_imm4_lives_in_the_low_nibble_of_the_first_halfword() {
+        // movw r0,#0xf230 = 4f f2 30 20 (imm4 = 0xf in hw1[3:0]) ; movt r0,#1 = c0 f2 01 00.
+        let code = le(&[0x4f, 0xf2, 0x30, 0x20, 0xc0, 0xf2, 0x01, 0x00]);
+        let forms = address_forms(&code, 0x2000, Mode::Thumb);
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].target, 0x1_f230);
+    }
+
+    #[test]
+    fn a_second_movt_on_the_same_register_forms_nothing() {
+        // movw r0,#0x210 ; movt r0,#1 ; movt r0,#2: the movw is consumed by the first
+        // movt, so the second forms only a high half and must not be reported.
+        let code = le(&[
+            0x40, 0xf2, 0x10, 0x20, 0xc0, 0xf2, 0x01, 0x00, 0xc0, 0xf2, 0x02, 0x00,
+        ]);
+        let forms = address_forms(&code, 0x2000, Mode::Thumb);
+        assert_eq!(forms.len(), 1, "{forms:?}");
+        assert_eq!(forms[0].target, 0x1_0210);
     }
 }
