@@ -1,0 +1,14 @@
+[package]
+name = "kotama-runtime-jni"
+description = "JNI native-interface table facts and hook planning for runtime mounting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish = false
+
+[dependencies]
+[lints]
+workspace = true
