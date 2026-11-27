@@ -25,6 +25,8 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
+import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -273,6 +275,47 @@ def build_cross(zig: str | None) -> int:
     return failures
 
 
+LUA_VERSIONS = ["5.4.7", "5.3.6", "5.1.5"]
+
+def build_lua(zig: str | None) -> int:
+    """Build the official Lua releases as ELF shared libraries under fixtures/generated/lua/.
+
+    Each release is a different answer to "what does the Lua C API export". The 5.4
+    table is checked against 5.4; the version-absence list is checked against all three.
+    Sources are the official tarballs from lua.org (each under 400 KB), unpacked once
+    into a cache directory and never committed.
+    """
+    if zig is None:
+        sys.exit("build_fixtures: zig is required for the lua lane")
+    cache = OUT_ROOT / "_lua-src"
+    out_root = OUT_ROOT / "lua"
+    failures = 0
+    for version in LUA_VERSIONS:
+        stem = f"lua-{version}"
+        src_dir = cache / stem / "src"
+        if not src_dir.exists():
+            cache.mkdir(parents = True, exist_ok = True)
+            tarball = cache / f"{stem}.tar.gz"
+            if not tarball.exists():
+                url = f"https://www.lua.org/ftp/{stem}.tar.gz"
+                print(f"fetch {url}")
+                with urllib.request.urlopen(url, timeout = 60) as response:
+                    tarball.write_bytes(response.read())
+            with tarfile.open(tarball) as archive:
+                archive.extractall(cache, filter = "data")
+        out = out_root / f"liblua-{version}.so"
+        out.parent.mkdir(parents = True, exist_ok = True)
+        sources = sorted(p.name for p in src_dir.glob("*.c") if not p.name.startswith("lua"))
+        cmd = [zig, "cc", "-target", "x86_64-linux-musl", "-O2", "-fPIC", "-shared", "-DLUA_USE_LINUX", "-o", str(out)] + [str(src_dir / name) for name in sources] + ["-lm"]
+        proc = run(cmd)
+        if proc.returncode != 0:
+            failures += 1
+            print(f"FAIL lua/{version}\n{proc.stderr.strip()[-400:]}")
+        else:
+            print(f"ok   lua/liblua-{version}.so ({out.stat().st_size} B)")
+    return failures
+
+
 def smoke_run(targets: list[str], opt_levels: list[str], wine: str | None) -> int:
     failures = 0
     native_windows = os.name == "nt"
@@ -357,6 +400,7 @@ def main() -> int:
     # only the compile, and export-table consumers need them per target.
     failures += build_shared(zig, args.targets, opt_levels)
     failures += build_cross(zig)
+    failures += build_lua(zig)
 
     if args.host_samples:
         copy_host_samples()
