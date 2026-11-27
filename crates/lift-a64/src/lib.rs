@@ -193,6 +193,96 @@ pub fn direct_edges(instructions: &[Lifted]) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// One `ADRP` + `ADD` pair, which is how A64 forms a data address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AddressForm {
+    /// Address of the `ADD` that completes the address.
+    pub at: u64,
+    /// The absolute (image-relative) address the pair computes.
+    pub target: u64,
+}
+
+/// Page base computed by an `ADRP` at `pc` with the given offset.
+const fn adrp_page(pc: u64, offset: i64) -> u64 {
+    // ADRP rounds the PC down to 4 KiB, then adds the (already shifted) offset.
+    (pc & !0xfff).wrapping_add(offset as u64)
+}
+
+/// The 12-bit immediate of an `ADD (immediate)` operand, if it is one.
+fn add_immediate(operand: &Operand) -> Option<u64> {
+    match operand {
+        Operand::Immediate(value) => Some(u64::from(*value)),
+        Operand::ImmShift(value, shift) => Some(u64::from(*value) << *shift),
+        _ => None,
+    }
+}
+
+/// Every `ADRP` + `ADD` address formed in `bytes` starting at `address`.
+///
+/// Tracks the most recent `ADRP` per base register and pairs it with the next
+/// `ADD` that reads that register. This is the A64 idiom for taking the address
+/// of a static object, so the result is exactly the set of data addresses the
+/// code materialises, without the caller knowing any opcode.
+#[must_use]
+pub fn address_forms(bytes: &[u8], address: u64) -> Vec<AddressForm> {
+    use yaxpeax_arch::{Arch, Decoder, U8Reader};
+    use yaxpeax_arm::armv8::a64::{ARMv8, Opcode};
+    let decoder: <ARMv8 as Arch>::Decoder = InstDecoder::default();
+    let mut reader = U8Reader::new(bytes);
+    let mut pc = address;
+    let mut pages: Vec<(u64, u64)> = Vec::new();
+    let mut out = Vec::new();
+    while let Ok(decoded) = decoder.decode(&mut reader) {
+        match decoded.opcode {
+            Opcode::ADRP => {
+                if let (Operand::Register(_, rd), Operand::PCOffset(offset)) =
+                    (decoded.operands[0], decoded.operands[1])
+                {
+                    pages.retain(|(reg, _)| *reg != u64::from(rd));
+                    pages.push((u64::from(rd), adrp_page(pc, offset)));
+                }
+            }
+            Opcode::ADD => {
+                // `add xd, xn, #imm` materialises an address into a register.
+                if let (Operand::RegisterOrSP(_, rn), Some(imm)) =
+                    (decoded.operands[1], add_immediate(&decoded.operands[2]))
+                {
+                    if let Some((_, page)) = pages.iter().find(|(reg, _)| *reg == u64::from(rn)) {
+                        out.push(AddressForm {
+                            at: pc,
+                            target: page.wrapping_add(imm),
+                        });
+                    }
+                }
+            }
+            // `ldr/str xt, [xn, #imm]` is the commonest A64 memory shape: the
+            // base is a paged register and the offset indexes into that page.
+            Opcode::LDR
+            | Opcode::LDRB
+            | Opcode::LDRH
+            | Opcode::LDRSW
+            | Opcode::STR
+            | Opcode::STRB
+            | Opcode::STRH => {
+                for operand in &decoded.operands[1..] {
+                    if let Operand::RegPreIndex(rn, offset, false) = *operand {
+                        if let Some((_, page)) = pages.iter().find(|(reg, _)| *reg == u64::from(rn))
+                        {
+                            out.push(AddressForm {
+                                at: pc,
+                                target: page.wrapping_add(offset as u64),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        pc += INSTRUCTION_SIZE;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

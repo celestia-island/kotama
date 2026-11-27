@@ -84,6 +84,7 @@ mod field_xref_tests {
 pub mod msvc_rtti;
 
 pub mod a64;
+pub mod a64_xrefs;
 
 pub use kotama::Evidence;
 pub use kotama::FunctionEntry;
@@ -649,6 +650,9 @@ pub struct CallEdge {
 /// 确定性：按 `(from, to)` 排序去重。
 #[must_use]
 pub fn call_graph(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<CallEdge> {
+    if module.arch.is_aarch64() {
+        return a64_xrefs::call_graph_a64(module, functions);
+    }
     use std::collections::BTreeSet;
 
     let space = module.address_space();
@@ -714,6 +718,9 @@ pub struct StringXref {
 /// 确定性：按 `(func_rva, string_rva)` 排序去重。
 #[must_use]
 pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<StringXref> {
+    if module.arch.is_aarch64() {
+        return a64_xrefs::string_xrefs_a64(module, functions);
+    }
     use std::collections::BTreeSet;
 
     // x86 非 PIE 用绝对地址立即数引用字符串（`push offset str` / `mov reg, imm32`）。
@@ -788,7 +795,7 @@ pub fn string_xrefs(module: &LoadedModule, functions: &[FunctionEntry]) -> Vec<S
 ///
 /// 读取按所在段尾截断——`AddressSpace::read` 的契约是「完整落在单个背书范围」，
 /// 一次要满 65 字节会在字符串贴节尾时整体失败（jump_table 同型坑）。
-fn read_cstring(space: &dyn AddressSpace, rva: u64) -> Option<String> {
+pub(crate) fn read_cstring(space: &dyn AddressSpace, rva: u64) -> Option<String> {
     const MAX: usize = 64;
     let limit = space
         .segment_at(rva)?
