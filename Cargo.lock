@@ -397,6 +397,17 @@ name = "kotama-runtime-quickjs"
 version = "0.1.0"
 
 [[package]]
+name = "kotama-runtime-resolve"
+version = "0.1.0"
+dependencies = [
+ "kotama-proxy",
+ "kotama-runtime-jni",
+ "kotama-runtime-lua",
+ "kotama-runtime-mount",
+ "kotama-runtime-quickjs",
+]
+
+[[package]]
 name = "kotama-scan"
 version = "0.1.0"
 dependencies = [

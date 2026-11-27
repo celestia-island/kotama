@@ -1,0 +1,20 @@
+[package]
+name = "kotama-runtime-resolve"
+description = "Resolve a runtime hook plan to concrete addresses from a table snapshot or an export list."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license-file.workspace = true
+publish = false
+
+[dependencies]
+kotama-proxy = { path = "../proxy", version = "^0.1" }
+kotama-runtime-jni = { path = "../runtime-jni", version = "^0.1" }
+kotama-runtime-lua = { path = "../runtime-lua", version = "^0.1" }
+kotama-runtime-quickjs = { path = "../runtime-quickjs", version = "^0.1" }
+kotama-runtime-mount = { path = "../runtime-mount", version = "^0.1" }
+
+[lints]
+workspace = true
