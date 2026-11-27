@@ -171,6 +171,27 @@ pub fn resolve_lua_exports(
     )
 }
 
+/// Resolve the JNI Invocation API against a VM library's export list.
+///
+/// Unlike [`resolve_jni_table`], which needs a `JNIEnv*` snapshot that only exists once
+/// a VM is in the process, this resolves the three exported symbols a VM library ships
+/// — so it can be run against the library's export table before anything is attached.
+#[must_use]
+pub fn resolve_jni_invocation(
+    exports: &[(String, u64)],
+) -> (Vec<ResolvedHook>, Vec<(String, Unresolved)>) {
+    let names: Vec<&str> = kotama_runtime_jni::INVOCATION_EXPORTS
+        .iter()
+        .map(|export| export.name)
+        .collect();
+    resolve_named_exports(
+        Runtime::Jni,
+        kotama_runtime_mount::JNI_INVOCATION_GROUP_BASE,
+        &names,
+        exports,
+    )
+}
+
 /// Resolve the QuickJS C ABI against an export list.
 #[must_use]
 pub fn resolve_quickjs_exports(
@@ -567,5 +588,90 @@ mod tests {
         let (resolved, _) = resolve_lua_exports(&exports);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].address, 0x7f0010);
+    }
+
+    /// The Invocation API resolves from an export list alone — no environment snapshot.
+    #[test]
+    fn the_invocation_api_resolves_from_a_bare_export_list() {
+        let exports = vec![
+            ("JNI_GetCreatedJavaVMs".to_string(), 0x7f0100u64),
+            ("JNI_CreateJavaVM".to_string(), 0x7f0200),
+            ("JNI_GetDefaultJavaVMInitArgs".to_string(), 0x7f0300),
+        ];
+        let (resolved, unresolved) = resolve_jni_invocation(&exports);
+        assert!(unresolved.is_empty());
+        assert_eq!(resolved.len(), 3);
+        let by_name: std::collections::BTreeMap<&str, u64> = resolved
+            .iter()
+            .map(|hook| (hook.name.as_str(), hook.address))
+            .collect();
+        assert_eq!(by_name["JNI_CreateJavaVM"], 0x7f0200);
+        assert_eq!(by_name["JNI_GetCreatedJavaVMs"], 0x7f0100);
+        for hook in &resolved {
+            assert_eq!(hook.runtime, Runtime::Jni);
+            assert!(
+                hook.group >= kotama_runtime_mount::JNI_INVOCATION_GROUP_BASE,
+                "invocation groups must sit above the slot range"
+            );
+        }
+    }
+
+    /// A library that is not a VM exports none of the three; all are reported, by name.
+    #[test]
+    fn a_library_without_the_invocation_api_reports_all_three_unresolved() {
+        let exports = vec![("malloc".to_string(), 0x1000u64)];
+        let (resolved, unresolved) = resolve_jni_invocation(&exports);
+        assert!(resolved.is_empty());
+        assert_eq!(unresolved.len(), 3);
+        for (name, reason) in &unresolved {
+            assert!(matches!(reason, Unresolved::NoExport { .. }), "{name}");
+        }
+    }
+
+    /// The invocation groups must not collide with the slot groups: slot 0..=255 and
+    /// The invocation groups must not collide with the slot groups: slot 0..=255 and
+    /// the invocation base are different key spaces, and a plan over both must keep
+    /// them apart. The bound is absolute — above every slot the table knows — so a
+    /// base moved down into the slot range fails here rather than in some plan.
+    #[test]
+    fn invocation_groups_never_collide_with_slot_groups() {
+        let exports: Vec<(String, u64)> = kotama_runtime_jni::INVOCATION_EXPORTS
+            .iter()
+            .map(|export| (export.name.to_string(), 0x4000))
+            .collect();
+        let (resolved, _) = resolve_jni_invocation(&exports);
+        let highest_slot = kotama_runtime_jni::JNI_ENTRIES
+            .iter()
+            .map(|entry| entry.slot)
+            .max()
+            .unwrap();
+        assert!(
+            kotama_runtime_mount::JNI_INVOCATION_GROUP_BASE > highest_slot,
+            "base {:#x} sits inside the slot range (highest slot {highest_slot})",
+            kotama_runtime_mount::JNI_INVOCATION_GROUP_BASE
+        );
+        for hook in &resolved {
+            assert!(
+                hook.group >= kotama_runtime_mount::JNI_INVOCATION_GROUP_BASE
+                    && hook.group < kotama_runtime_mount::JNI_INVOCATION_GROUP_BASE + 3,
+                "{} group {}",
+                hook.name,
+                hook.group
+            );
+        }
+    }
+    #[test]
+    fn invocation_mount_points_and_resolver_agree() {
+        let points = kotama_runtime_mount::jni_invocation_points();
+        let exports: Vec<(String, u64)> = kotama_runtime_jni::INVOCATION_EXPORTS
+            .iter()
+            .map(|export| (export.name.to_string(), 0x5000))
+            .collect();
+        let (resolved, _) = resolve_jni_invocation(&exports);
+        assert_eq!(points.len(), resolved.len());
+        for (point, hook) in points.iter().zip(&resolved) {
+            assert_eq!(point.name, hook.name);
+            assert_eq!(point.group, hook.group);
+        }
     }
 }

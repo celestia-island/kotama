@@ -19,7 +19,7 @@
 //! the container-agnostic part every mounting strategy shares.
 
 use kotama_proxy::hook_plan::{plan_hooks, HookPlan, HookPlanError, HookSelection, HookableSymbol};
-use kotama_runtime_jni::JniCategory;
+use kotama_runtime_jni::{InvocationRole, JniCategory};
 use kotama_runtime_lua::LuaCategory;
 use kotama_runtime_quickjs::QuickJsCategory;
 
@@ -116,6 +116,39 @@ pub const LUA_GROUP_BASE: u32 = 0x1_0000;
 /// Placed above both the JNI slot range and the Lua base so the three key spaces stay
 /// disjoint; see [`LUA_GROUP_BASE`] for why an index must not start at zero.
 pub const QUICKJS_GROUP_BASE: u32 = 0x2_0000;
+/// First group key used for the JNI Invocation API mount points.
+///
+/// The Invocation API is the JNI runtime's *export* surface — the three `JNI_*` symbols
+/// the VM library exports directly — as opposed to its slot surface, which is reached
+/// through a `JNIEnv*`. Slots are numbered from 4 and stay under 256; this base sits
+/// above the Lua and QuickJS bases so all four key spaces stay disjoint.
+pub const JNI_INVOCATION_GROUP_BASE: u32 = 0x3_0000;
+
+/// Every Invocation API export as a mount point, grouped by index from the base.
+#[must_use]
+pub fn jni_invocation_points() -> Vec<MountPoint> {
+    kotama_runtime_jni::INVOCATION_EXPORTS
+        .iter()
+        .enumerate()
+        .map(|(index, export)| MountPoint {
+            runtime: Runtime::Jni,
+            group: JNI_INVOCATION_GROUP_BASE + u32::try_from(index).unwrap_or(u32::MAX),
+            name: export.name.to_string(),
+            role: invocation_role(export.role),
+        })
+        .collect()
+}
+
+/// Map an Invocation API role onto the shared roles.
+const fn invocation_role(role: InvocationRole) -> Role {
+    match role {
+        // All three are lifecycle: two create or find a VM, the third prepares the
+        // arguments the create call needs. None of them looks anything up or calls in.
+        InvocationRole::CreateVm | InvocationRole::FindVms | InvocationRole::DefaultInitArgs => {
+            Role::State
+        }
+    }
+}
 
 /// Map a QuickJS category onto the shared roles.
 const fn quickjs_role(category: QuickJsCategory) -> Role {
