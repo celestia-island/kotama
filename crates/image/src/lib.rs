@@ -12,6 +12,7 @@
 //! 排序，无时间戳）——差分与知识库复用的前提。
 
 pub mod elf_export;
+pub mod macho_unwind;
 pub mod pe_export;
 
 use std::collections::BTreeMap;

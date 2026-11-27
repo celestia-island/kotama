@@ -6,7 +6,8 @@
 //! sections recovers every direct callee without any heuristic. Symbols and the
 //! image entry point seed the table; `BL` targets add functions the symbols missed;
 //! sizes come from the symbol when it has one and are otherwise inferred as the
-//! distance to the next entry.
+//! distance to the next entry. The compact unwind index adds every function that
+//! has a stack frame, which is the only source that survives stripping.
 
 use std::collections::BTreeMap;
 
@@ -69,6 +70,27 @@ pub fn discover_a64(module: &LoadedModule) -> Vec<kotama::FunctionEntry> {
                         .or_default()
                         .evidence
                         .insert(Evidence::CallTarget);
+                }
+            }
+        }
+    }
+
+    // Compact unwind names every function that has a stack frame. It is the
+    // Mach-O counterpart of the PE exception directory: exhaustive for non-leaf
+    // functions and present in a stripped binary, where symbols are not.
+    if let Some(section) = module
+        .sections
+        .iter()
+        .find(|section| section.name == "__unwind_info")
+    {
+        if let Some(bytes) = space.read(section.rva, section.size as usize) {
+            if let Ok(offsets) = kotama_image::macho_unwind::function_offsets(bytes) {
+                for rva in offsets {
+                    table
+                        .entry(rva)
+                        .or_default()
+                        .evidence
+                        .insert(Evidence::UnwindInfo);
                 }
             }
         }
