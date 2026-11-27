@@ -674,4 +674,146 @@ mod tests {
             assert_eq!(point.group, hook.group);
         }
     }
+
+    /// A Lua fixture: `fixtures/generated/lua/liblua-<version>.so`, built by the
+    /// fixture lane from the official release tarball.
+    fn lua_lib(version: &str) -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/lua")
+            .join(format!("liblua-{version}.so"));
+        if path.exists() {
+            Some(path)
+        } else if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!(
+                "required Lua fixture missing: {}; run tools/build_fixtures.py",
+                path.display()
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Core-API names a Lua library exports (aux library and luaopen_* excluded).
+    fn lua_core_exports(version: &str) -> Option<Vec<String>> {
+        let path = lua_lib(version)?;
+        let module = kotama_image::LoadedModule::parse(&std::fs::read(path).unwrap())
+            .expect("Lua fixture must parse");
+        let mut core: Vec<String> = exports_from_module(&module)
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| name.starts_with("lua_") && !name.starts_with("luaL_"))
+            .collect();
+        core.sort();
+        Some(core)
+    }
+
+    fn lua_resolved(version: &str) -> (usize, Vec<String>) {
+        let module =
+            kotama_image::LoadedModule::parse(&std::fs::read(lua_lib(version).unwrap()).unwrap())
+                .unwrap();
+        let (resolved, unresolved) = resolve_lua_exports(&exports_from_module(&module));
+        let mut missing: Vec<String> = unresolved.iter().map(|(n, _)| n.clone()).collect();
+        missing.sort();
+        (resolved.len(), missing)
+    }
+
+    fn claimed_absent(version: u32) -> Vec<String> {
+        let mut names: Vec<String> = kotama_runtime_lua::KNOWN_ABSENT
+            .iter()
+            .find(|(v, _)| *v == version)
+            .unwrap()
+            .1
+            .iter()
+            .map(|n| (*n).to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The table was derived from the 5.4 header. Against a real 5.4 library it must
+    /// resolve completely, and the core names it exports must be exactly the table.
+    #[test]
+    fn the_table_is_exactly_the_core_api_of_a_real_5_4_library() {
+        let Some(core) = lua_core_exports("5.4.7") else {
+            eprintln!("skip: Lua fixtures not built");
+            return;
+        };
+        let mut table: Vec<&str> = kotama_runtime_lua::LUA_API.iter().map(|a| a.name).collect();
+        table.sort();
+        assert_eq!(core, table, "real 5.4 core exports vs table");
+        let (resolved, missing) = lua_resolved("5.4.7");
+        assert_eq!(resolved, 98);
+        assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    /// KNOWN_ABSENT for 5.3 names ten functions. Against a real 5.3 library the
+    /// unresolved set must be exactly those ten; the binary is what makes it so.
+    #[test]
+    fn the_5_3_absence_list_is_exactly_what_a_real_5_3_library_lacks() {
+        if lua_lib("5.3.6").is_none() {
+            eprintln!("skip: Lua fixtures not built");
+            return;
+        }
+        let (resolved, missing) = lua_resolved("5.3.6");
+        assert_eq!(resolved, 88);
+        let claimed = claimed_absent(503);
+        assert_eq!(missing, claimed, "5.3 claimed vs real absence");
+    }
+
+    /// Same for 5.1.
+    #[test]
+    fn the_5_1_absence_list_is_exactly_what_a_real_5_1_library_lacks() {
+        if lua_lib("5.1.5").is_none() {
+            eprintln!("skip: Lua fixtures not built");
+            return;
+        }
+        let (resolved, missing) = lua_resolved("5.1.5");
+        assert_eq!(resolved, 64);
+        let claimed = claimed_absent(501);
+        assert_eq!(missing, claimed, "5.1 claimed vs real absence");
+    }
+
+    /// The older libraries export names the 5.4 table has never heard of. A mount
+    /// against an old runtime needs to know these exist, or it will report functions
+    /// missing that the library in fact has under older names.
+    #[test]
+    fn older_libraries_export_names_the_5_4_table_renamed_or_dropped() {
+        let Some(core) = lua_core_exports("5.3.6") else {
+            eprintln!("skip: Lua fixtures not built");
+            return;
+        };
+        for old in ["lua_getuservalue", "lua_setuservalue", "lua_newuserdata"] {
+            assert!(core.iter().any(|n| n == old), "5.3 must export {old}");
+            assert!(kotama_runtime_lua::by_name(old).is_none());
+        }
+        let Some(core) = lua_core_exports("5.1.5") else {
+            return;
+        };
+        for old in [
+            "lua_call",
+            "lua_pcall",
+            "lua_yield",
+            "lua_remove",
+            "lua_insert",
+            "lua_replace",
+        ] {
+            assert!(core.iter().any(|n| n == old), "5.1 must export {old}");
+        }
+    }
+
+    /// 98, 88, 64: monotone, because each absence list is a superset of the previous.
+    #[test]
+    fn resolution_shrinks_monotonically_across_releases() {
+        let mut counts = Vec::new();
+        for version in ["5.4.7", "5.3.6", "5.1.5"] {
+            if lua_lib(version).is_none() {
+                continue;
+            }
+            counts.push(lua_resolved(version).0);
+        }
+        if counts.len() == 3 {
+            assert_eq!(counts, [98, 88, 64]);
+            assert!(counts.windows(2).all(|w| w[0] > w[1]));
+        }
+    }
 }
