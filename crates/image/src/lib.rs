@@ -245,6 +245,18 @@ impl Arch {
             Self::Other("riscv64") | Self::Other("riscv64gc") | Self::Other("riscv64imafdc")
         )
     }
+
+    /// True for the 32-bit ARM architecture (A32 or Thumb, in any container).
+    ///
+    /// Identified by its canonical name, so any container carrying ARM code
+    /// (ELF32, Mach-O, PE, raw) qualifies.
+    #[must_use]
+    pub fn is_arm32(self) -> bool {
+        matches!(
+            self,
+            Self::Other("arm") | Self::Other("armv7") | Self::Other("thumb")
+        )
+    }
     /// 短名（进 JSON 报告）。
     #[must_use]
     pub const fn short(self) -> &'static str {

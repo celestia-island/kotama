@@ -310,6 +310,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kotama-lift-arm"
+version = "0.1.0"
+
+[[package]]
 name = "kotama-lift-riscv"
 version = "0.1.0"
 
@@ -386,6 +390,7 @@ dependencies = [
  "kotama",
  "kotama-image",
  "kotama-lift-a64",
+ "kotama-lift-arm",
  "kotama-lift-riscv",
 ]
 
