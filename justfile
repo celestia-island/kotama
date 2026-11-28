@@ -49,6 +49,12 @@ mutate *specs:
 # Survey: which Rust-ecosystem script engines expose a C ABI a hook plan can
 # address. Reads crates.io and the local registry; needs the network once per
 # crate. The table is the research record — re-run to refresh it.
+# Fixture reproducibility: build every lane twice, hash between. Not in `gate`
+# (minutes, and the fixture directory is shared across worktrees). Run it when a
+# lane changes.
+fixture-repro:
+    python tools/fixture_reproducibility.py
+
 engine-survey:
     python tools/engine_survey.py
     python tools/engine_survey_selftest.py
