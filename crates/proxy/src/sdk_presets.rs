@@ -15,6 +15,30 @@
 //! `^malloc` would also catch `malloc_usable_size` and any vendor extension that
 //! happens to share the prefix, and an interception surface that grows by accident
 //! is not auditable.
+//!
+//! # Where the chain stops
+//!
+//! "Mount a runtime" is a chain, and it is worth saying which links exist:
+//!
+//! 1. **Choose** what to intercept — [HookSelection](crate::hook_plan::HookSelection),
+//!    the presets below, `kotama hook plan`. Exists.
+//! 2. **Resolve** the chosen names to addresses in a real image —
+//!    `pe_hookable_symbols` / `elf_hookable_symbols`, `runtime-resolve`, with the
+//!    executable-section filter from #184/#185. Exists.
+//! 3. **Check the hook body** against the contract — `payload::hook_guard` counts
+//!    allocations; `tools/hook_body_lint.py` scans a declared body for locks and
+//!    I/O calls. Exists, and has exactly one body to check: the forwarding mirror's
+//!    C `kotama_log_entry`.
+//! 4. **Install** the hook — write the jump into the target. **Does not exist.**
+//!
+//! Nothing in this repository installs a hook. The Rust payload is a reader (it
+//!    answers `Request`s and captures a stack); the C agent is a loader; the
+//!    forwarding mirror works by *replacement*, not interception — the host loads
+//!    `mirror.dll` where the real DLL would have been. `retour` is named once, in
+//!    `deny.toml`, as a reference implementation that was read; no crate depends on
+//!    it. Step 4 is the one link that turns a plan into a process, and it is not
+//!    built. Until it is, "mount" means "resolve and verify", and the tests that
+//!    pass are tests of that.
 
 use crate::hook_plan::HookSelection;
 
