@@ -82,6 +82,7 @@ mod field_xref_tests {
 }
 
 pub mod msvc_rtti;
+pub mod patchable;
 
 pub mod a64;
 pub mod a64_xrefs;

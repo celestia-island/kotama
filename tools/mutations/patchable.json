@@ -1,0 +1,38 @@
+{
+  "test": [
+    "-p",
+    "kotama-scan",
+    "--lib",
+    "--",
+    "patchable"
+  ],
+  "files": {
+    "p": "crates/scan/src/patchable.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 boundary one short (jump lands mid-instruction)",
+      "file": "p",
+      "find": "    while covered < jump_size {",
+      "repl": "    while covered + 1 < jump_size {"
+    },
+    {
+      "name": "M2 stranded entries not seen (an entry at +3 passes)",
+      "file": "p",
+      "find": "        .filter(|&e| e > 0 && (e as usize) < covered)",
+      "repl": "        .filter(|&_| false)"
+    },
+    {
+      "name": "M3 short function overwritten into the next one",
+      "file": "p",
+      "find": "        if !decoder.can_decode() {\n            return Err(PrefixError::TooShort);\n        }",
+      "repl": "        if !decoder.can_decode() {\n            break;\n        }"
+    },
+    {
+      "name": "M4 bitness unchecked (non-x86 guessed)",
+      "file": "p",
+      "find": "    if !matches!(bitness, 16 | 32 | 64) {\n        return Err(PrefixError::Unsupported);\n    }",
+      "repl": ""
+    }
+  ]
+}
