@@ -104,9 +104,11 @@
     `--ida`（需 `KOTAMA_IDA`）纳入 IDA 差分。常驻 CI runner 尚未注册（2026-11-23 用户裁决），
     本机通过不等于常驻 CI 项完成。
   - 注入支持 x64→x64 与 x64→x86（WOW64）：跨位宽时按目标进程里的 32 位 kernel32 导出表
-    解析 `LoadLibraryW`；x86 载荷 = `dist/i686-pc-windows-gnu/kotama_agent.dll`（pack 车道
-    经 `tools/build_windows_agent.py --target x86-windows-gnu` 产出），attach 矩阵与 host live
-    e2e 各含一条 x86 目标车道（夹具 `x86-windows-gnu/-O2/spin.exe`）。
+    解析 `LoadLibraryW`；x86 载荷 = `dist/i686-pc-windows-gnu/kotama_agent.dll`（目录名是
+    Rust triple，由 `tools/build_windows_agent.py --target x86-windows-gnu` 产出；**`just dist-refresh`
+    一次刷新两个 C agent 与 Rust 载荷**——bench 只检查文件在不在，不重建，2026-11-28 实踩 e2e
+    对着三天前的产物通过），attach 矩阵与 host live e2e 各含一条 x86 目标车道
+    （夹具 `x86-windows-gnu/-O2/spin.exe`）。
   - 符号无关对比（2026-11-25 实测）：把 PE 的 `IMAGE_DIRECTORY_ENTRY_DEBUG` 数据目录清零，
     IDA 就找不到伴生 PDB。同一份 `x86_64-windows-msvc/-O2/loops.exe` 上，无 PDB 的 kotama 覆盖
     PDB 真值 0.845、无 PDB 的 IDA 9.1 只有 0.751（x86 上 0.820 对 0.796）。所以「无 PDB 夹具
