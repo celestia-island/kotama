@@ -665,6 +665,19 @@ mod tests {
         }
     }
 
+    /// The toolchain, from `KOTAMA_ZIG` or `PATH`, or None to skip.
+    fn zig_path() -> Option<std::path::PathBuf> {
+        if let Some(path) = std::env::var_os("KOTAMA_ZIG") {
+            return Some(std::path::PathBuf::from(path));
+        }
+        std::process::Command::new("zig")
+            .arg("version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|_| std::path::PathBuf::from("zig"))
+    }
+
     /// A PE forwarder is a string in `.rdata`, not code in this image, and is
     /// not offered. The proxy smoke fixture forwards to kernel32.Sleep; it is
     /// built by the CLI test, so this builds the same shape here rather than
@@ -675,8 +688,11 @@ mod tests {
     /// fails).
     #[test]
     fn a_pe_forwarder_is_not_a_hook_site() {
-        let Some(zig) = std::env::var_os("KOTAMA_ZIG") else {
-            eprintln!("skip: KOTAMA_ZIG not set");
+        // Same discovery as the CLI tests: the env var, else a zig on PATH.
+        // Without the fallback this was the one zig-dependent test in the tree
+        // that skipped silently wherever the variable was not exported.
+        let Some(zig) = zig_path() else {
+            eprintln!("skip: no zig (set KOTAMA_ZIG)");
             return;
         };
         let root = std::env::temp_dir().join(format!("kotama-forwarder-{}", std::process::id()));
