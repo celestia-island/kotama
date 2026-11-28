@@ -1,0 +1,57 @@
+{
+  "test": [
+    "-p",
+    "kotama-scan",
+    "-p",
+    "kotama-image",
+    "--",
+    "function_starts",
+    "empty_start_list",
+    "uleb128",
+    "lld_executable",
+    "non_macho"
+  ],
+  "files": {
+    "scan": "crates/scan/src/lib.rs",
+    "fs": "crates/image/src/macho_function_starts.rs",
+    "img": "crates/image/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 merge skipped (starts never folded in)",
+      "file": "scan",
+      "find": "    if !module.macho_function_starts.is_empty() {",
+      "repl": "    if false {"
+    },
+    {
+      "name": "M2 existing start not given the evidence",
+      "file": "scan",
+      "find": "                Some(entry) => {\n                    entry.evidence.insert(Evidence::FunctionStarts);\n                }",
+      "repl": "                Some(_) => {}"
+    },
+    {
+      "name": "M3 new start not sized to the next",
+      "file": "scan",
+      "find": "                        .map_or(0, |next| next.saturating_sub(rva));",
+      "repl": "                        .map_or(0, |_| 0);"
+    },
+    {
+      "name": "M4 ULEB128 continuation bit ignored",
+      "file": "fs",
+      "find": "        if byte & 0x80 == 0 {\n            return Some((result, pos + (shift / 7) as usize + 1));\n        }",
+      "repl": "        return Some((result, pos + (shift / 7) as usize + 1));"
+    },
+    {
+      "name": "M5 terminator not honoured (reads past the end)",
+      "file": "fs",
+      "find": "                if delta == 0 {\n                    break;\n                }",
+      "repl": ""
+    },
+    {
+      "name": "M6 base not subtracted (VM address used as rva)",
+      "file": "img",
+      "find": "let macho_function_starts = macho_function_starts::function_start_symbols(data, base);",
+      "repl": "let macho_function_starts = macho_function_starts::function_start_symbols(data, 0);"
+    }
+  ]
+}
