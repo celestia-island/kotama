@@ -162,14 +162,17 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
         debug_functions: &module.debug_functions,
         eh_frame_functions: &module.eh_frame_functions,
     };
-    // Static and live discovery share one router: the lifters are reached from
-    // `discover_with`, and the PE exception directory is a static-only extra that
-    // `discover_impl` adds for the x86 path.
+    // Static and live discovery share one router: `discover_with` decides per
+    // architecture and owns the whole routing table, so this cannot drift from it.
+    // The PE exception directory is a static-only extra that `discover_impl` adds
+    // for the x86 path, which `discover_with` reaches on its own.
     let space = module.address_space();
-    if module.arch.is_aarch64() || module.arch.is_riscv64() || module.arch.is_arm32() {
-        return discover_with(view, &space);
+    match module.arch {
+        kotama_image::Arch::X86_64 | kotama_image::Arch::X86 => {
+            discover_impl(view, &space, module.exception_directory)
+        }
+        _ => discover_with(view, &space),
     }
-    discover_impl(view, &space, module.exception_directory)
 }
 
 /// 提取静态 PE64 的完整异常目录与 `.xdata` 事实，供反编译 sidecar 使用。
@@ -4647,5 +4650,75 @@ mod tests {
         };
         assert_eq!(count(&a), 60, "plain build instruction count");
         assert_eq!(count(&b), 60, "compressed build instruction count");
+    }
+
+    /// An address space with nothing in it: every read is out of bounds.
+    struct EmptySpace;
+    impl AddressSpace for EmptySpace {
+        fn segments(&self) -> &[kotama::Segment] {
+            &[]
+        }
+        fn read(&self, _rva: u64, _len: usize) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    /// An architecture the x86 decoder cannot take must come back empty, not
+    /// panic. Every lifter architecture reports bitness 0, and iced-x86 refuses
+    /// a zero bitness by unwinding — so a recognised-but-unsupported name
+    /// (riscv32 today, powerpc tomorrow) routed into the x86 path takes the
+    /// process down. This is a regression for a real RV32 ELF crashing the CLI.
+    #[test]
+    fn an_unsupported_architecture_is_empty_rather_than_a_panic() {
+        for name in ["riscv32", "powerpc64", "mips", "sparc64", "s390x", "wasm32"] {
+            let arch = Arch::Other(name);
+            assert!(
+                !arch.is_disassemblable(),
+                "{name} must not claim to be decodable"
+            );
+            assert_eq!(arch.bitness(), 0);
+            let view = ScanView {
+                container: Container::Elf32,
+                arch,
+                image_base: 0,
+                entry_rva: Some(0x1000),
+                sections: &[],
+                symbols: &[],
+                dynamic_symbols: &[],
+                debug_functions: &[],
+                eh_frame_functions: &[],
+            };
+            let space = EmptySpace;
+            assert!(
+                discover_with(view, &space).is_empty(),
+                "{name}: empty section list must yield no functions and no panic"
+            );
+        }
+    }
+
+    /// The static router and the live router are one function: a non-x86 module
+    /// goes through `discover_with` exactly as a live view does, so the two
+    /// cannot disagree about which decoder an architecture gets. Before the fix
+    /// this reached iced-x86 with bitness 0 and the real RV32 ELF took the CLI down.
+    #[test]
+    fn the_static_router_delegates_to_the_live_router_for_non_x86() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/cross/riscv32-noc/norvc");
+        let Ok(bytes) = std::fs::read(&path) else {
+            if std::env::var("KOTAMA_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+                panic!(
+                    "required RV32 fixture missing: {}; run tools/build_fixtures.py",
+                    path.display()
+                );
+            }
+            eprintln!("skip: RV32 fixture not built");
+            return;
+        };
+        let module = LoadedModule::parse(&bytes).expect("RV32 ELF parses");
+        assert_eq!(module.arch, Arch::Other("riscv32"));
+        assert!(!module.arch.is_disassemblable());
+        // Empty, not a panic: the architecture is recognised and no lifter has it yet.
+        assert!(crate::discover(&module).is_empty());
+        assert!(module.sections.iter().any(|section| section.executable));
     }
 }

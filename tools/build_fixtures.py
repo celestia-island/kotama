@@ -233,6 +233,11 @@ CROSS_LANES = [
     ("riscv64-norvc", "riscv64-linux-musl", ["-nostdlib", "-mcpu=generic_rv64"], "riscv", "norvc"),
     ("riscv64-rvc", "riscv64-linux-musl", ["-nostdlib", "-mcpu=generic_rv64+c"], "riscv", "rvc"),
     ("riscv64-strings", "riscv64-linux-musl", ["-nostdlib", "-mcpu=generic_rv64+c", "-fno-builtin"], "riscv_strings", "strings"),
+    # RV32 shares the RV64 encoding minus the 64-bit-only forms and with c.jal
+    # restored to its RV32 meaning; it is the next architecture to lift, and until
+    # then it is the regression sample for "unsupported must not crash".
+    ("riscv32-noc", "riscv32-linux-musl", ["-nostdlib", "-mcpu=generic_rv32", "-fno-builtin"], "riscv", "norvc"),
+    ("riscv32-c", "riscv32-linux-musl", ["-nostdlib", "-mcpu=generic_rv32+c", "-fno-builtin"], "riscv", "rvc"),
     ("arm-a32", "arm-linux-musleabi", [], "arm", "a32"),
     ("arm-thumb", "thumb-linux-musleabi", [], "arm", "thumb"),
     ("arm-strings", "arm-linux-musleabi", [], "arm_strings", "a32"),
