@@ -37,7 +37,9 @@
 //!    output change. `retour` is still only read, in `deny.toml`; nothing depends on it.
 //!
 //! What is still not built: a hook *body* to install — the stub in the e2e is a
-//!    hand-assembled ABI-correct return, not a Rust closure — and anything outside x64.
+//!    hand-assembled ABI-correct return, not a Rust closure — and anything outside x64
+//!    (`install::plan` is fixed at bitness 64; `patchable` already takes 16/32). The
+//!    open items after #192 are tracked in the handoff PR that follows it.
 
 use crate::hook_plan::HookSelection;
 

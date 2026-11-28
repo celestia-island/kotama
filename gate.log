@@ -1,0 +1,252 @@
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+warning: unused workspace dependency `kotama-runtime-quickjs`
+  --> Cargo.toml:41:1
+   |
+41 | kotama-runtime-quickjs = { path = "crates/runtime-quickjs", version = "^0.1" }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `kotama-runtime-quickjs`
+warning: workspace (manifest) generated 1 warning
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+    Checking memchr v2.8.3
+   Compiling crc32fast v1.5.5
+    Checking cfg-if v1.0.5
+    Checking adler2 v2.0.1
+    Checking typenum v1.20.1
+   Compiling autocfg v1.5.1
+    Checking kotama v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff)
+    Checking simd-adler32 v0.3.10
+    Checking bitflags v2.13.2
+    Checking const-oid v0.10.3
+   Compiling num-traits v0.2.19
+    Checking twox-hash v2.1.5
+    Checking equivalent v1.0.3
+    Checking hashbrown v0.17.2
+    Checking miniz_oxide v0.9.1
+    Checking wasmparser v0.263.0
+    Checking hybrid-array v0.4.15
+    Checking scroll v0.11.0
+    Checking cpufeatures v0.3.1
+    Checking stable_deref_trait v1.2.1
+    Checking uuid v1.29.3
+    Checking ruzstd v0.9.1
+    Checking fallible-iterator v0.2.0
+    Checking indexmap v2.14.2
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking fnv v1.0.7
+   Compiling radium v0.7.0
+    Checking tap v1.0.1
+    Checking funty v2.0.0
+    Checking lazy_static v1.5.1
+    Checking pdb v0.8.0
+    Checking kotama-lift-arm v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\lift-arm)
+    Checking flate2 v1.1.11
+    Checking kotama-lift-riscv v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\lift-riscv)
+    Checking digest v0.11.3
+   Compiling zmij v1.0.23
+    Checking gimli v0.34.0
+    Checking wyz v0.5.1
+    Checking aho-corasick v1.1.5
+    Checking iced-x86 v1.22.0
+    Checking rmp v0.8.15
+    Checking object v0.41.0
+   Compiling serde_json v1.0.154
+    Checking regex-syntax v0.8.12
+    Checking windows-link v0.2.1
+    Checking sha2 v0.11.1
+    Checking itoa v1.0.19
+    Checking kotama-runtime-quickjs v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-quickjs)
+   Compiling syn v3.0.10
+    Checking kotama-runtime-jni v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-jni)
+    Checking kotama-runtime-lua v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-lua)
+    Checking kotama-backend-ghidra v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\backend-ghidra)
+    Checking kotama-resource v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\resource)
+    Checking windows-sys v0.61.2
+    Checking bitvec v1.1.1
+    Checking regex-automata v0.4.19
+    Checking kotama-image v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\image)
+   Compiling serde_derive v1.0.229
+    Checking regex v1.13.2
+    Checking yaxpeax-arch v0.3.3
+    Checking rmp-serde v1.3.1
+    Checking kotama-proxy v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\proxy)
+    Checking kotama-engine-formats v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\examples\engine-formats)
+    Checking kotama-overlay v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\overlay)
+    Checking kotama-runtime-mount v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-mount)
+    Checking yaxpeax-arm v0.5.0
+    Checking kotama-proto v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\proto)
+    Checking kotama-runtime-resolve v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-resolve)
+    Checking kotama-pack v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\pack)
+    Checking kotama-payload v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\payload)
+    Checking kotama-lift-a64 v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\lift-a64)
+    Checking kotama-scan v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\scan)
+    Checking kotama-decomp v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\decomp)
+    Checking kotama-host v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\host)
+    Checking kotama-cli v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\cli)
+warning: unused dependency `serde`
+  --> examples\engine-formats\Cargo.toml:32:1
+   |
+32 | serde.workspace = true
+   | ^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `serde`
+warning: unused dependency `serde_json`
+  --> examples\engine-formats\Cargo.toml:33:1
+   |
+33 | serde_json.workspace = true
+   | ^^^^^^^^^^
+   |
+help: consider removing the dependency on `serde_json`
+warning: `kotama-engine-formats` (manifest) generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 47.32s
+cargo clippy -p kotama-resource --all-targets --all-features -- -D warnings
+warning: unused workspace dependency `kotama-runtime-quickjs`
+  --> Cargo.toml:41:1
+   |
+41 | kotama-runtime-quickjs = { path = "crates/runtime-quickjs", version = "^0.1" }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `kotama-runtime-quickjs`
+warning: workspace (manifest) generated 1 warning
+   Compiling crc32fast v1.5.5
+    Checking flate2 v1.1.11
+    Checking kotama-resource v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\resource)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.50s
+cargo clippy -p kotama-cli --all-targets --all-features -- -D warnings
+warning: unused workspace dependency `kotama-runtime-quickjs`
+  --> Cargo.toml:41:1
+   |
+41 | kotama-runtime-quickjs = { path = "crates/runtime-quickjs", version = "^0.1" }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `kotama-runtime-quickjs`
+warning: workspace (manifest) generated 1 warning
+    Checking windows-sys v0.61.2
+    Checking kotama-resource v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\resource)
+    Checking kotama-host v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\host)
+    Checking kotama-cli v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.81s
+cargo clippy -p kotama-engine-formats --all-targets --all-features -- -D warnings
+warning: unused workspace dependency `kotama-runtime-quickjs`
+  --> Cargo.toml:41:1
+   |
+41 | kotama-runtime-quickjs = { path = "crates/runtime-quickjs", version = "^0.1" }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `kotama-runtime-quickjs`
+warning: workspace (manifest) generated 1 warning
+    Checking kotama-engine-formats v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\examples\engine-formats)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.49s
+python tools/genericity_scan.py
+genericity: clean (42 terms, 12 file kinds)
+python tools/genericity_selftest.py
+ok   product name in a source file is caught
+ok   the same name under examples/engine-formats is allowed
+ok   generic format words are not flagged
+ok   a studio name in a comment is caught
+ok   ordinary English is not flagged
+python tools/mutate_selftest.py
+ok   a caught mutant exits 0 and reports CAUGHT
+ok   the file is restored byte for byte
+ok   a surviving mutant exits 1 and reports MISSED
+ok   a missing anchor reports ANCHOR and does not exit 0
+ok   a red baseline is refused with exit 3
+ok   a zero-test baseline is refused with exit 4
+ok   a refused baseline leaves the file untouched
+python tools/hook_body_lint.py
+ok   crates/cli/src/proxy.rs 'void kotama_log_entry(': clean against 9 calls
+cargo test --workspace
+warning: unused workspace dependency `kotama-runtime-quickjs`
+  --> Cargo.toml:41:1
+   |
+41 | kotama-runtime-quickjs = { path = "crates/runtime-quickjs", version = "^0.1" }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `kotama-runtime-quickjs`
+warning: workspace (manifest) generated 1 warning
+   Compiling memchr v2.8.3
+   Compiling kotama v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff)
+   Compiling cfg-if v1.0.5
+   Compiling adler2 v2.0.1
+   Compiling simd-adler32 v0.3.10
+   Compiling typenum v1.20.1
+   Compiling bitflags v2.13.2
+   Compiling equivalent v1.0.3
+   Compiling serde_core v1.0.229
+   Compiling hashbrown v0.17.2
+   Compiling const-oid v0.10.3
+   Compiling twox-hash v2.1.5
+   Compiling num-traits v0.2.19
+   Compiling stable_deref_trait v1.2.1
+   Compiling crc32fast v1.5.5
+   Compiling cpufeatures v0.3.1
+   Compiling miniz_oxide v0.9.1
+   Compiling wasmparser v0.263.0
+   Compiling ruzstd v0.9.1
+   Compiling fnv v1.0.7
+   Compiling scroll v0.11.0
+   Compiling fallible-iterator v0.2.0
+   Compiling hybrid-array v0.4.15
+   Compiling indexmap v2.14.2
+   Compiling uuid v1.29.3
+   Compiling tap v1.0.1
+   Compiling radium v0.7.0
+   Compiling funty v2.0.0
+   Compiling rmp v0.8.15
+   Compiling kotama-lift-riscv v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\lift-riscv)
+   Compiling flate2 v1.1.11
+   Compiling kotama-lift-arm v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\lift-arm)
+   Compiling lazy_static v1.5.1
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling gimli v0.34.0
+   Compiling pdb v0.8.0
+   Compiling wyz v0.5.1
+   Compiling aho-corasick v1.1.5
+   Compiling windows-link v0.2.1
+   Compiling regex-syntax v0.8.12
+   Compiling zmij v1.0.23
+   Compiling object v0.41.0
+   Compiling iced-x86 v1.22.0
+   Compiling itoa v1.0.19
+   Compiling digest v0.11.3
+   Compiling kotama-runtime-jni v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-jni)
+   Compiling kotama-runtime-quickjs v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-quickjs)
+   Compiling bitvec v1.1.1
+   Compiling kotama-runtime-lua v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-lua)
+   Compiling windows-sys v0.61.2
+   Compiling kotama-backend-ghidra v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\backend-ghidra)
+   Compiling kotama-resource v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\resource)
+   Compiling regex-automata v0.4.19
+   Compiling sha2 v0.11.1
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.154
+   Compiling regex v1.13.2
+   Compiling kotama-image v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\image)
+   Compiling yaxpeax-arch v0.3.3
+   Compiling rmp-serde v1.3.1
+   Compiling kotama-overlay v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\overlay)
+   Compiling kotama-proxy v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\proxy)
+   Compiling kotama-runtime-mount v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-mount)
+   Compiling kotama-proto v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\proto)
+   Compiling kotama-engine-formats v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\examples\engine-formats)
+   Compiling yaxpeax-arm v0.5.0
+   Compiling kotama-runtime-resolve v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\runtime-resolve)
+   Compiling kotama-pack v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\pack)
+   Compiling kotama-payload v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\payload)
+   Compiling kotama-lift-a64 v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\lift-a64)
+   Compiling kotama-scan v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\scan)
+   Compiling kotama-decomp v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\decomp)
+   Compiling kotama-host v0.1.0 (D:\源代码\工程项目\celestia\_worktree\kotama\handoff\crates\host)
