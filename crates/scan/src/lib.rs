@@ -167,12 +167,44 @@ pub fn discover(module: &LoadedModule) -> Vec<FunctionEntry> {
     // The PE exception directory is a static-only extra that `discover_impl` adds
     // for the x86 path, which `discover_with` reaches on its own.
     let space = module.address_space();
-    match module.arch {
+    let mut found = match module.arch {
         kotama_image::Arch::X86_64 | kotama_image::Arch::X86 => {
             discover_impl(view, &space, module.exception_directory)
         }
         _ => discover_with(view, &space),
+    };
+    // Mach-O's own list of entry points is a static-only source — a live process
+    // has no load commands — so it is folded in here rather than carried through
+    // `ScanView`. A start the lifter already found gains the evidence; one it
+    // missed becomes an entry whose size is the distance to the next start.
+    if !module.macho_function_starts.is_empty() {
+        let starts: Vec<u64> = module
+            .macho_function_starts
+            .iter()
+            .map(|symbol| symbol.rva)
+            .collect();
+        for (index, &rva) in starts.iter().enumerate() {
+            match found.iter_mut().find(|entry| entry.rva == rva) {
+                Some(entry) => {
+                    entry.evidence.insert(Evidence::FunctionStarts);
+                }
+                None => {
+                    let size = starts
+                        .get(index + 1)
+                        .map_or(0, |next| next.saturating_sub(rva));
+                    found.push(FunctionEntry {
+                        rva,
+                        size,
+                        size_inferred: true,
+                        name: None,
+                        evidence: std::collections::BTreeSet::from([Evidence::FunctionStarts]),
+                    });
+                }
+            }
+        }
+        found.sort_by_key(|entry| entry.rva);
     }
+    found
 }
 
 /// 提取静态 PE64 的完整异常目录与 `.xdata` 事实，供反编译 sidecar 使用。
@@ -4864,5 +4896,75 @@ mod tests {
         // covered by the A64 predicate because the instruction set is identical
         // and only the pointer width differs, which a decoder does not see.
         assert!(Arch::Other("aarch64_ilp32").is_aarch64());
+    }
+
+    /// The merge: a start the lifter already found gains the evidence, one it
+    /// missed becomes an entry sized to the next start, and the result stays
+    /// sorted. Built on the real Mach-O fixture with an injected start list,
+    /// because the lld-linked fixture carries an empty `LC_FUNCTION_STARTS`.
+    ///
+    /// mutate: starts-not-merged (returning `found` before the merge leaves the
+    /// injected start absent and the existing one without its evidence).
+    #[test]
+    fn function_starts_merge_into_the_lifter_result() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/cross/aarch64-macho/macho");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skip: Mach-O fixture not built");
+            return;
+        };
+        let mut module = LoadedModule::parse(&data).unwrap();
+        assert!(
+            module.macho_function_starts.is_empty(),
+            "the fixture's list is empty"
+        );
+        let lifter = crate::discover(&module);
+        let existing = lifter[0].rva;
+        let injected = existing + 0x400;
+        module.macho_function_starts = vec![
+            kotama_image::SymbolInfo {
+                rva: existing,
+                size: 0,
+                name: String::new(),
+            },
+            kotama_image::SymbolInfo {
+                rva: injected,
+                size: 0,
+                name: String::new(),
+            },
+            kotama_image::SymbolInfo {
+                rva: injected + 0x40,
+                size: 0,
+                name: String::new(),
+            },
+        ];
+        let merged = crate::discover(&module);
+        assert_eq!(merged.len(), lifter.len() + 2);
+        let kept = merged.iter().find(|e| e.rva == existing).unwrap();
+        assert!(kept.evidence.contains(&Evidence::FunctionStarts));
+        let new = merged.iter().find(|e| e.rva == injected).unwrap();
+        assert_eq!(new.size, 0x40, "sized to the next start");
+        assert!(new.size_inferred);
+        assert_eq!(
+            new.evidence,
+            std::collections::BTreeSet::from([Evidence::FunctionStarts])
+        );
+        assert!(merged.windows(2).all(|w| w[0].rva < w[1].rva));
+    }
+
+    /// An empty start list is the common case on every non-Mach-O container and
+    /// on a lld-linked executable: nothing changes.
+    #[test]
+    fn an_empty_start_list_leaves_the_result_alone() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/cross/aarch64-macho/macho");
+        let Ok(data) = std::fs::read(&path) else {
+            return;
+        };
+        let module = LoadedModule::parse(&data).unwrap();
+        let found = crate::discover(&module);
+        assert!(found
+            .iter()
+            .all(|e| !e.evidence.contains(&Evidence::FunctionStarts)));
     }
 }
