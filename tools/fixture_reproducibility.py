@@ -20,19 +20,47 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent
 LANES = ["cross", "lua", "shared", "x86_64-linux-gnu", "x86_64-windows-gnu"]
-BUILD_ARGS = ["--targets", "x86_64-linux-gnu", "x86_64-windows-gnu", "--opt", "O2"]
+# The MSVC lane: its .obj and .pdb carry a fresh debug GUID per build by design,
+# so only the .exe — the thing every PE test reads — is held to byte identity.
+MSVC_LANE = "x86_64-windows-msvc"
+MSVC_SUFFIX = ".exe"
+BUILD_ARGS = ["--targets", "x86_64-linux-gnu", "x86_64-windows-gnu", "x86_64-windows-msvc", "--opt", "O2"]
 
 
 def snapshot(root: pathlib.Path) -> dict[str, str]:
     out: dict[str, str] = {}
-    for lane in LANES:
+    for lane in [*LANES, MSVC_LANE]:
         base = root / lane
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*")):
-            if path.is_file() and "_lua-src" not in path.parts:
-                out[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+            if not path.is_file() or "_lua-src" in path.parts:
+                continue
+            if lane == MSVC_LANE and path.suffix != MSVC_SUFFIX:
+                continue
+            data = path.read_bytes()
+            if lane == MSVC_LANE:
+                data = mask_pdb_age(data)
+            out[str(path.relative_to(root))] = hashlib.sha256(data).hexdigest()
     return out
+
+
+def mask_pdb_age(data: bytes) -> bytes:
+    """Zero the 4-byte PDB age inside the PE debug directory's RSDS record.
+
+    The MSVC linker increments the age on every link — by design, so a debugger
+    can tell a stale PDB from a fresh one — and writes it into both the PDB and
+    the PE. It is the only byte that differs between two `/Brepro` builds of the
+    same source; everything else, timestamp and debug GUID included, is already
+    content-derived. Masking it lets the check assert what is actually
+    reproducible instead of failing forever on a counter that is meant to move.
+    """
+    rsds = data.find(b"RSDS")
+    if rsds == -1 or rsds + 24 > len(data):
+        return data
+    masked = bytearray(data)
+    masked[rsds + 20 : rsds + 24] = bytes(4)
+    return bytes(masked)
 
 
 def build() -> int:
