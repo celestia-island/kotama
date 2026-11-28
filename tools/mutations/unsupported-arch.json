@@ -1,0 +1,28 @@
+{
+  "test": [
+    "-p",
+    "kotama-scan",
+    "--",
+    "unsupported_architecture",
+    "static_router",
+    "every_cross_sample",
+    "each_lifter"
+  ],
+  "files": {
+    "lib": "crates/scan/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 discover() regains the duplicated routing (riscv32 falls to x86)",
+      "file": "lib",
+      "find": "    match module.arch {\n        kotama_image::Arch::X86_64 | kotama_image::Arch::X86 => {\n            discover_impl(view, &space, module.exception_directory)\n        }\n        _ => discover_with(view, &space),\n    }",
+      "repl": "    if module.arch.is_aarch64() || module.arch.is_riscv64() || module.arch.is_arm32() {\n        return discover_with(view, &space);\n    }\n    discover_impl(view, &space, module.exception_directory)"
+    },
+    {
+      "name": "M2 discover_with loses its gate (unsupported arch reaches x86)",
+      "file": "lib",
+      "find": "    if !view.arch.is_disassemblable() {\n        return Vec::new();\n    }\n    discover_impl(view, space, None)",
+      "repl": "    discover_impl(view, space, None)"
+    }
+  ]
+}
