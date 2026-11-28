@@ -21,12 +21,26 @@
 //!   ring, formats with `snprintf` and writes with `WriteFile`. The contract
 //!   does not apply to it; it exists so the hook body never has to do I/O.
 //!
+//! # DllMain does two things it should not, and both are known
+//!
 //! `DllMain` opens the log file and starts the worker. It does no hooking.
+//! `CreateFileA` is file I/O under the loader lock, and `CreateThread` starts a
+//! thread that may not have run before `DllMain` returns. Microsoft's guidance
+//! says to do neither. In practice both have been safe here: the mirror is
+//! loaded by the smoke test in `proxy_cli.rs` on both x64 and x86, the file is
+//! opened append-only with share-all so a second loader does not contend, and
+//! the worker's first act is a 20 ms sleep so it never races `DllMain`'s tail.
+//! The correct shape is an explicit `proxy_init` the host calls once the process
+//! is past initialisation — the same fix as for the lazy `LoadLibraryW` in
+//! `kotama_original` — and until that exists these two are the price of a
+//! mirror that needs no host cooperation to start logging.
+//!
+//! # What checks this
 //!
 //! Nothing here is checked by `kotama_payload::hook_guard`: that counter guards
 //! the payload's own hook bodies, and this runtime is a separate binary with its
 //! own C. The classification above is a reading of the generated source, and the
-//! test below pins the three functions' shape so it cannot drift silently.
+//! tests pin the three functions' shape so it cannot drift silently.
 
 use std::fs;
 use std::path::{Path, PathBuf};
