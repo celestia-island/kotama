@@ -1,0 +1,42 @@
+{
+  "test": [
+    "-p",
+    "kotama-proxy"
+  ],
+  "files": {
+    "plan": "crates/proxy/src/hook_plan.rs",
+    "sdk": "crates/proxy/src/sdk_presets.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 excuse ignored (dlopen errors on Windows)",
+      "file": "plan",
+      "find": "        if selection\n            .not_on_platform\n            .iter()\n            .any(|excused| excused == name)\n        {\n            continue;\n        }\n",
+      "repl": ""
+    },
+    {
+      "name": "M2 excuse is a prefix match",
+      "file": "plan",
+      "find": "            .any(|excused| excused == name)",
+      "repl": "            .any(|excused| name.starts_with(excused.as_str()))"
+    },
+    {
+      "name": "M3 excuse becomes exclusion (present name dropped from the plan)",
+      "file": "plan",
+      "find": "        if !hit_groups.contains(&symbol.group) || excluded_groups.contains(&symbol.group) {\n            continue;\n        }",
+      "repl": "        if !hit_groups.contains(&symbol.group)\n            || excluded_groups.contains(&symbol.group)\n            || selection\n                .not_on_platform\n                .iter()\n                .any(|e| e.as_bytes() == symbol.name.as_slice())\n        {\n            continue;\n        }"
+    },
+    {
+      "name": "M4 selection_for excuses on Posix too",
+      "file": "sdk",
+      "find": "            not_on_platform: if platform == Platform::Posix {\n                Vec::new()\n            } else {",
+      "repl": "            not_on_platform: if false {\n                Vec::new()\n            } else {"
+    },
+    {
+      "name": "M5 selection_for excuses nothing",
+      "file": "sdk",
+      "find": "            not_on_platform: if platform == Platform::Posix {\n                Vec::new()\n            } else {",
+      "repl": "            not_on_platform: if true {\n                Vec::new()\n            } else {"
+    }
+  ]
+}
