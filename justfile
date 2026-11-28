@@ -57,6 +57,11 @@ fixture-repro:
 
 # Skip audit: which tests skipped under the gate env, and whether each skip is an
 # accounted exception. Run after \`gate\`; fails on an unaccounted skip.
+# Hook-body lint: a declarative table of hook bodies and the calls each must not
+# make. A new hook body is a row, not a new test. In gate.
+hook-body-lint:
+    python tools/hook_body_lint.py
+
 skip-audit:
     python tools/skip_audit.py
 
@@ -70,7 +75,7 @@ engine-survey:
     python tools/engine_survey.py
     python tools/engine_survey_selftest.py
 # One-shot gate.
-gate: fmt lint genericity test licenses
+gate: fmt lint genericity hook-body-lint test licenses
 
 # Build the optional desktop shells (Tauri frontend must be built first).
 ui-build:
