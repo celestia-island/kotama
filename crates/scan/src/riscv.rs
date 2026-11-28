@@ -17,9 +17,18 @@ use kotama::{AddressSpace, Evidence, FunctionEntry};
 use kotama_image::SymbolInfo;
 
 use crate::ScanView;
-use kotama_lift_riscv::{address_forms, call_targets, lift, Flow};
+use kotama_lift_riscv::{address_forms, call_targets_with, lift_with, Flow, Xlen};
 
 use crate::{CallEdge, StringXref};
+
+/// The base width to decode a view with: RV32 reads c.jal as a call.
+fn xlen_of(view: &ScanView) -> Xlen {
+    if view.arch.is_riscv32() {
+        Xlen::Rv32
+    } else {
+        Xlen::Rv64
+    }
+}
 
 /// A function candidate under construction.
 #[derive(Default)]
@@ -68,11 +77,11 @@ pub fn discover_riscv(view: &ScanView, space: &dyn AddressSpace) -> Vec<Function
         let Some(bytes) = space.read(section.rva, section.size as usize) else {
             continue;
         };
-        let mut targets: Vec<u64> = call_targets(bytes, section.rva)
+        let mut targets: Vec<u64> = call_targets_with(bytes, section.rva, xlen_of(view))
             .into_iter()
             .map(|call| call.target)
             .collect();
-        for instruction in lift(bytes, section.rva) {
+        for instruction in lift_with(bytes, section.rva, xlen_of(view)) {
             if instruction.flow == Flow::Call {
                 if let Some(target) = instruction.target {
                     targets.push(target);
@@ -136,7 +145,7 @@ pub fn discover_riscv(view: &ScanView, space: &dyn AddressSpace) -> Vec<Function
 /// self-edges and targets outside the table.
 #[must_use]
 pub fn call_graph_riscv(
-    _view: &ScanView,
+    view: &ScanView,
     space: &dyn AddressSpace,
     functions: &[FunctionEntry],
 ) -> Vec<CallEdge> {
@@ -154,11 +163,11 @@ pub fn call_graph_riscv(
         // Two shapes carry a call. Under the medany code model a call is
         // `auipc x1, hi` + `jalr x1, x1, lo`, so the target is only visible after
         // pairing them; a `jal ra, target` carries it directly.
-        let mut targets: Vec<u64> = call_targets(bytes, function.rva)
+        let mut targets: Vec<u64> = call_targets_with(bytes, function.rva, xlen_of(view))
             .into_iter()
             .map(|call| call.target)
             .collect();
-        let instructions = lift(bytes, function.rva);
+        let instructions = lift_with(bytes, function.rva, xlen_of(view));
         for instruction in instructions {
             if instruction.flow == Flow::Call {
                 if let Some(target) = instruction.target {

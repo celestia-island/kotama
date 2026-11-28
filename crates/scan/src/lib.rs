@@ -217,7 +217,7 @@ pub fn discover_with(view: ScanView<'_>, space: &dyn AddressSpace) -> Vec<Functi
     if view.arch.is_aarch64() {
         return a64::discover_a64(&view, space);
     }
-    if view.arch.is_riscv64() {
+    if view.arch.is_riscv64() || view.arch.is_riscv32() {
         return riscv::discover_riscv(&view, space);
     }
     if view.arch.is_arm32() {
@@ -721,7 +721,7 @@ pub fn call_graph_with(
     if view.arch.is_aarch64() {
         return a64_xrefs::call_graph_a64(&view, space, functions);
     }
-    if view.arch.is_riscv64() {
+    if view.arch.is_riscv64() || view.arch.is_riscv32() {
         return riscv::call_graph_riscv(&view, space, functions);
     }
     if view.arch.is_arm32() {
@@ -818,7 +818,7 @@ pub fn string_xrefs_with(
     if view.arch.is_aarch64() {
         return a64_xrefs::string_xrefs_a64(&view, space, functions);
     }
-    if view.arch.is_riscv64() {
+    if view.arch.is_riscv64() || view.arch.is_riscv32() {
         return riscv::string_xrefs_riscv(&view, space, functions);
     }
     if view.arch.is_arm32() {
@@ -4332,6 +4332,7 @@ mod tests {
         let arch = match module.arch {
             Arch::Other("aarch64") => "aarch64",
             Arch::Other("riscv64") => "riscv64",
+            Arch::Other("riscv32") => "riscv32",
             Arch::Other("arm") => "arm",
             other => panic!("unexpected arch {other:?}"),
         };
@@ -4360,6 +4361,8 @@ mod tests {
             ("arm-strings-thumb", "thumb"),
             ("aarch64-elf", "elf"),
             ("aarch64-macho", "macho"),
+            ("riscv32-noc", "norvc"),
+            ("riscv32-c", "rvc"),
         ];
         let mut checked = 0;
         for (lane, stem) in lanes {
@@ -4395,6 +4398,8 @@ mod tests {
             ("arm-strings-thumb", "thumb", "arm", 18, 16, 3),
             ("aarch64-elf", "elf", "aarch64", 22, 17, 0),
             ("aarch64-macho", "macho", "aarch64", 4, 3, 0),
+            ("riscv32-noc", "norvc", "riscv32", 4, 3, 0),
+            ("riscv32-c", "rvc", "riscv32", 4, 3, 0),
         ];
         let mut checked = 0;
         for (lane, stem, arch, functions, edges, xrefs) in expected {
@@ -4665,12 +4670,12 @@ mod tests {
 
     /// An architecture the x86 decoder cannot take must come back empty, not
     /// panic. Every lifter architecture reports bitness 0, and iced-x86 refuses
-    /// a zero bitness by unwinding — so a recognised-but-unsupported name
-    /// (riscv32 today, powerpc tomorrow) routed into the x86 path takes the
-    /// process down. This is a regression for a real RV32 ELF crashing the CLI.
+    /// a zero bitness by unwinding — so a recognised-but-unsupported name routed
+    /// into the x86 path takes the process down. This is a regression for a real
+    /// ELF crashing the CLI; riscv32 left the list when its lifter arrived.
     #[test]
     fn an_unsupported_architecture_is_empty_rather_than_a_panic() {
-        for name in ["riscv32", "powerpc64", "mips", "sparc64", "s390x", "wasm32"] {
+        for name in ["powerpc64", "mips", "sparc64", "s390x", "wasm32"] {
             let arch = Arch::Other(name);
             assert!(
                 !arch.is_disassemblable(),
@@ -4698,8 +4703,9 @@ mod tests {
 
     /// The static router and the live router are one function: a non-x86 module
     /// goes through `discover_with` exactly as a live view does, so the two
-    /// cannot disagree about which decoder an architecture gets. Before the fix
-    /// this reached iced-x86 with bitness 0 and the real RV32 ELF took the CLI down.
+    /// cannot disagree about which decoder an architecture gets. Before #171
+    /// this reached iced-x86 with bitness 0 and the real RV32 ELF took the CLI
+    /// down; since the RV32 lifter landed it finds the sample's four functions.
     #[test]
     fn the_static_router_delegates_to_the_live_router_for_non_x86() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4716,9 +4722,24 @@ mod tests {
         };
         let module = LoadedModule::parse(&bytes).expect("RV32 ELF parses");
         assert_eq!(module.arch, Arch::Other("riscv32"));
-        assert!(!module.arch.is_disassemblable());
-        // Empty, not a panic: the architecture is recognised and no lifter has it yet.
-        assert!(crate::discover(&module).is_empty());
+        assert!(module.arch.is_disassemblable());
+        // The same source as the RV64 sample: _start, compute, helper, other.
+        let found = crate::discover(&module);
+        assert_eq!(found.len(), 4, "{found:?}");
+        // And the live router agrees with the static one.
+        let view = ScanView {
+            container: module.container,
+            arch: module.arch,
+            image_base: module.image_base,
+            entry_rva: module.entry_rva,
+            sections: &module.sections,
+            symbols: &module.symbols,
+            dynamic_symbols: &module.dynamic_symbols,
+            debug_functions: &module.debug_functions,
+            eh_frame_functions: &module.eh_frame_functions,
+        };
+        let space = module.address_space();
+        assert_eq!(crate::discover_with(view, &space).len(), 4);
         assert!(module.sections.iter().any(|section| section.executable));
     }
 }

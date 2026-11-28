@@ -1,0 +1,45 @@
+{
+  "test": [
+    "-p",
+    "kotama-lift-riscv",
+    "-p",
+    "kotama-scan",
+    "--",
+    "c_jal",
+    "same_bytes",
+    "differ_only",
+    "every_cross_sample",
+    "each_lifter",
+    "static_router"
+  ],
+  "files": {
+    "lift": "crates/lift-riscv/src/lib.rs",
+    "scan": "crates/scan/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 c.jal imm bit 3 mapped to imm[2] (off by one)",
+      "file": "lift",
+      "find": "        | (((o >> 4) & 1) << 2)\n        | (((o >> 3) & 1) << 1);\n    address.wrapping_add",
+      "repl": "        | (((o >> 4) & 1) << 2)\n        | (((o >> 3) & 1) << 2);\n    address.wrapping_add"
+    },
+    {
+      "name": "M2 c.jal sign bit dropped (bit 12 ignored)",
+      "file": "lift",
+      "find": "    let imm = (((o >> 12) & 1) << 11)\n        | (((o >> 8) & 1) << 10)",
+      "repl": "    let imm = (((o >> 8) & 1) << 10)"
+    },
+    {
+      "name": "M3 rv64 also reads c.jal as a call",
+      "file": "lift",
+      "find": "        (0b01, 0b001) if xlen == Xlen::Rv32 => {",
+      "repl": "        (0b01, 0b001) => {"
+    },
+    {
+      "name": "M4 scan stops routing riscv32 to the lifter",
+      "file": "scan",
+      "find": "    if view.arch.is_riscv64() || view.arch.is_riscv32() {\n        return riscv::discover_riscv(&view, space);",
+      "repl": "    if view.arch.is_riscv64() {\n        return riscv::discover_riscv(&view, space);"
+    }
+  ]
+}
