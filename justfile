@@ -55,6 +55,11 @@ mutate *specs:
 fixture-repro:
     python tools/fixture_reproducibility.py
 
+# Skip audit: which tests skipped under the gate env, and whether each skip is an
+# accounted exception. Run after \`gate\`; fails on an unaccounted skip.
+skip-audit:
+    python tools/skip_audit.py
+
 engine-survey:
     python tools/engine_survey.py
     python tools/engine_survey_selftest.py
