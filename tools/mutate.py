@@ -28,7 +28,8 @@ number before the rule existed:
   - Files are restored after each mutant and the tree is re-verified green.
 
 Exit code: 0 when every mutant that ran was caught and the tree is green;
-1 when some mutant that ran survived; 3 or 4 when the baseline is refused.
+1 when some mutant that ran survived; 3 or 4 when the baseline is refused;
+5 when an anchor matched nothing (a mutant that never ran is not a pass).
 """
 
 from __future__ import annotations
@@ -101,7 +102,12 @@ def main() -> int:
     print(f"caught {caught}/{ran} ran, {len(results) - ran} anchor failure(s)")
     restored, _ = run_tests(root, spec["test"], env)
     print(f"restored: {restored}")
-    return 0 if restored == 0 and caught == ran else 1
+    anchor_failures = len(results) - ran
+    if restored != 0 or anchor_failures:
+        # An anchor that matched nothing means a mutant never ran; a run with
+        # zero mutants that ran must not report success (0 caught of 0 ran).
+        return 5 if anchor_failures else 1
+    return 0 if caught == ran else 1
 
 
 if __name__ == "__main__":
