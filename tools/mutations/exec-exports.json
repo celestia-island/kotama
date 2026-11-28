@@ -1,0 +1,32 @@
+{
+  "test": [
+    "-p",
+    "kotama-runtime-resolve",
+    "--",
+    "exports_from_module_keeps",
+    "sectionless"
+  ],
+  "files": {
+    "r": "crates/runtime-resolve/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 section filter dropped (vtables become hook addresses)",
+      "file": "r",
+      "find": "        .filter(|(_, address)| {\n            let rva = address.wrapping_sub(module.image_base);\n            module.sections.iter().any(|section| {\n                section.executable\n                    && rva >= section.rva\n                    && rva < section.rva.saturating_add(section.size)\n            })\n        })\n",
+      "repl": ""
+    },
+    {
+      "name": "M2 filter inverted (only data survives)",
+      "file": "r",
+      "find": "                section.executable\n                    && rva >= section.rva",
+      "repl": "                !section.executable\n                    && rva >= section.rva"
+    },
+    {
+      "name": "M3 image base not subtracted before the section lookup",
+      "file": "r",
+      "find": "            let rva = address.wrapping_sub(module.image_base);\n            module.sections.iter().any(|section| {\n                section.executable",
+      "repl": "            let rva = *address;\n            module.sections.iter().any(|section| {\n                section.executable"
+    }
+  ]
+}

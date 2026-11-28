@@ -267,10 +267,28 @@ pub fn exports_from_symbols(base: u64, symbols: &[kotama_image::SymbolInfo]) -> 
         .collect()
 }
 
-/// The same list read straight off a loaded module.
+/// The same list read straight off a loaded module, filtered to what a hook
+/// can be planted on: an export whose address lands in an executable section.
+///
+/// A PE export directory names vtables, RTTI and static data as readily as
+/// functions — the local VM library exports 4,507 names and 4,291 of them are
+/// data — and a resolver given those would plan a hook on a data address.
+/// `exports_from_symbols` cannot do this filter: it sees symbols, not sections.
+/// The rule is the address's section, not the symbol's kind, because that is
+/// what the process will actually jump to.
 #[must_use]
 pub fn exports_from_module(module: &kotama_image::LoadedModule) -> Vec<(String, u64)> {
     exports_from_symbols(module.image_base, &module.dynamic_symbols)
+        .into_iter()
+        .filter(|(_, address)| {
+            let rva = address.wrapping_sub(module.image_base);
+            module.sections.iter().any(|section| {
+                section.executable
+                    && rva >= section.rva
+                    && rva < section.rva.saturating_add(section.size)
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -815,5 +833,75 @@ mod tests {
             assert_eq!(counts, [98, 88, 64]);
             assert!(counts.windows(2).all(|w| w[0] > w[1]));
         }
+    }
+
+    /// The VM library exports 4,507 names and most are data: vtables, RTTI, static
+    /// objects. Only the executable ones are hookable, and the three Invocation
+    /// API exports are among them.
+    ///
+    /// mutate: section-filter-dropped (removing the executable-section filter
+    /// makes the count jump to the raw export total; the assertion on "every
+    /// export is executable" fails on the first vtable).
+    #[test]
+    fn exports_from_module_keeps_only_what_lands_in_executable_sections() {
+        let dll = std::path::Path::new(
+            "D:/源代码/工程项目/celestia/_scratch/kotama-tools/jdk25/jdk-25.0.5.1+2/bin/server/jvm.dll",
+        );
+        let Ok(data) = std::fs::read(dll) else {
+            eprintln!("skip: VM library not on this machine");
+            return;
+        };
+        let module = kotama_image::LoadedModule::parse(&data).unwrap();
+        let raw = module.dynamic_symbols.len();
+        let filtered = exports_from_module(&module);
+        assert!(raw > 4000, "the VM library exports thousands: {raw}");
+        assert!(
+            filtered.len() < raw / 2,
+            "most of those are data; {} of {raw} survived",
+            filtered.len()
+        );
+        for (name, address) in &filtered {
+            let rva = address - module.image_base;
+            let section = module
+                .sections
+                .iter()
+                .find(|s| rva >= s.rva && rva < s.rva + s.size)
+                .unwrap_or_else(|| panic!("{name} lands in no section"));
+            assert!(
+                section.executable,
+                "{name} @ {rva:#x} is in {}",
+                section.name
+            );
+        }
+        // The three the Invocation API resolver needs are still there.
+        for needed in [
+            "JNI_CreateJavaVM",
+            "JNI_GetCreatedJavaVMs",
+            "JNI_GetDefaultJavaVMInitArgs",
+        ] {
+            assert!(
+                filtered.iter().any(|(n, _)| n == needed),
+                "{needed} was filtered out"
+            );
+        }
+        // And a vtable is not.
+        assert!(
+            !filtered.iter().any(|(n, _)| n.starts_with("??_7")),
+            "vtables must not survive"
+        );
+    }
+
+    /// A module with no sections keeps everything: the filter cannot tell, and
+    /// refusing everything would make a sectionless image unhookable for a reason
+    /// that is not the image's.
+    #[test]
+    fn a_sectionless_module_keeps_every_export() {
+        let symbols = vec![kotama_image::SymbolInfo {
+            rva: 0x1000,
+            size: 8,
+            name: "f".into(),
+        }];
+        let exports = exports_from_symbols(0x400000, &symbols);
+        assert_eq!(exports, vec![("f".to_string(), 0x401000)]);
     }
 }
