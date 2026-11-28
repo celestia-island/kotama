@@ -105,6 +105,13 @@ fn decompile_impl(
     body_limit: Option<u64>,
     exceptions: &[ExceptionFunction],
 ) -> FunctionText {
+    // An architecture without a decompiler gets an honest listing, not a panic.
+    // iced-x86 unwinds on the zero bitness every lifter architecture reports,
+    // so the x86 decoder must never be reached for them.
+    if !matches!(arch, Arch::X86_64 | Arch::X86) {
+        return lifter_listing(space, module_id, arch, function);
+    }
+
     let exception = exceptions
         .iter()
         .find(|exception| u64::from(exception.runtime.begin_rva) == function.rva);
@@ -354,6 +361,77 @@ fn direct_target(instruction: &Instruction) -> Option<u64> {
 #[allow(dead_code)]
 fn is_call(instruction: &Instruction) -> bool {
     instruction.mnemonic() == Mnemonic::Call
+}
+
+/// A function on an architecture the x86 decompiler does not serve: the
+/// lifted instructions as a listing, with the same URI and name header the
+/// pseudo-C output carries, so a consumer can tell what it is looking at.
+///
+/// This is not a decompilation and does not pretend to be one. The lifter has
+/// already resolved control flow; the listing is that structure, one
+/// instruction per line, and the first line says it is a listing.
+fn lifter_listing(
+    space: &dyn AddressSpace,
+    module_id: ModuleId,
+    arch: Arch,
+    function: &FunctionEntry,
+) -> FunctionText {
+    let key = FuncKey::new(module_id, function.rva);
+    let uri = key.to_string();
+    let fallback_name = format!("sub_{:x}", function.rva);
+    let name = function.name.as_deref().unwrap_or(&fallback_name);
+    let mut out = String::with_capacity(1024);
+    let _ = writeln!(
+        out,
+        "/* kotama://{module_id}/{:x} name={name} */",
+        function.rva
+    );
+    let _ = writeln!(
+        out,
+        "/* {}: instruction listing; no decompiler for this architecture */",
+        arch.short()
+    );
+    let Some(bytes) = read_body(space, function, None) else {
+        let _ = writeln!(out, "/* ERROR: unreadable body at {:x} */", function.rva);
+        return FunctionText { uri, text: out };
+    };
+    let instructions: Vec<(u64, u8, String)> = match arch {
+        a if a.is_aarch64() => kotama_lift_a64::lift(bytes, function.rva)
+            .0
+            .into_iter()
+            .map(|i| (i.address, 4, i.text))
+            .collect(),
+        a if a.is_riscv64() => kotama_lift_riscv::lift(bytes, function.rva)
+            .into_iter()
+            .map(|i| (i.address, i.width, i.text))
+            .collect(),
+        a if a.is_riscv32() => {
+            kotama_lift_riscv::lift_with(bytes, function.rva, kotama_lift_riscv::Xlen::Rv32)
+                .into_iter()
+                .map(|i| (i.address, i.width, i.text))
+                .collect()
+        }
+        a if a.is_arm32() => {
+            let mode = if function.rva & 1 == 1 {
+                kotama_lift_arm::Mode::Thumb
+            } else {
+                kotama_lift_arm::Mode::Arm
+            };
+            kotama_lift_arm::lift(bytes, function.rva & !1, mode)
+                .into_iter()
+                .map(|i| (i.address, u8::try_from(i.width).unwrap_or(u8::MAX), i.text))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    if instructions.is_empty() {
+        let _ = writeln!(out, "/* no lifter for {}; nothing to list */", arch.short());
+    }
+    for (address, width, text) in &instructions {
+        let _ = writeln!(out, "  {address:#x}  {text}");
+        let _ = width;
+    }
+    FunctionText { uri, text: out }
 }
 
 #[cfg(test)]
@@ -624,5 +702,77 @@ mod tests {
         let first = decompile_function(&space, id, module.arch, target).text;
         let second = decompile_function(&space, id, module.arch, target).text;
         assert_eq!(first, second);
+    }
+
+    /// A function on a lifter architecture comes back as an instruction listing
+    /// with the same URI header the pseudo-C carries, not a panic. Before this
+    /// the x86 decoder was reached with bitness 0 and `analyze --decompile`
+    /// unwound on every A64, RISC-V and ARM binary.
+    ///
+    /// mutate: decomp-gate-removed (dropping the gate sends each of these
+    /// through iced-x86, which unwinds — the test fails on the panic).
+    #[test]
+    fn a_lifter_architecture_yields_a_listing_not_a_panic() {
+        for (lane, stem, arch) in [
+            ("aarch64-elf", "elf", "aarch64"),
+            ("riscv64-norvc", "norvc", "riscv64"),
+            ("riscv32-c", "rvc", "riscv32"),
+            ("arm-thumb", "thumb", "arm"),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/generated/cross")
+                .join(lane)
+                .join(stem);
+            let Ok(bytes) = std::fs::read(&path) else {
+                eprintln!("skip: {lane} not built");
+                continue;
+            };
+            let module = kotama_image::LoadedModule::parse(&bytes).unwrap();
+            assert_eq!(module.arch.short(), arch, "{lane}");
+            let functions = kotama_scan::discover(&module);
+            assert!(!functions.is_empty(), "{lane}");
+            let function = &functions[0];
+            let space = module.address_space();
+            let text =
+                decompile_function(&space, ModuleId::from_bytes([0; 32]), module.arch, function);
+            assert!(text.text.contains("instruction listing"), "{lane}");
+            assert!(text.text.contains(arch), "{lane}");
+            let listed = text.text.lines().filter(|l| l.starts_with("  0x")).count();
+            assert!(listed > 0, "{lane}: a listing with no instructions");
+            assert!(text.uri.starts_with("kotama://"), "{lane}");
+        }
+    }
+
+    /// An architecture with neither a decompiler nor a lifter says so in the
+    /// text instead of pretending or panicking.
+    #[test]
+    fn an_unsupported_architecture_says_so_in_the_text() {
+        let space = StaticSpace {
+            segment: kotama::Segment {
+                rva: 0x1000,
+                size: 16,
+                perms: kotama::Perms {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
+            },
+            bytes: vec![0u8; 16],
+        };
+        let function = FunctionEntry {
+            rva: 0x1000,
+            size: 16,
+            size_inferred: false,
+            name: None,
+            evidence: Default::default(),
+        };
+        let text = decompile_function(
+            &space,
+            ModuleId::from_bytes([0; 32]),
+            Arch::Other("mips"),
+            &function,
+        );
+        assert!(text.text.contains("no lifter for mips"), "{}", text.text);
+        assert!(!text.text.contains("ERROR"), "{}", text.text);
     }
 }
