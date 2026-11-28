@@ -1,0 +1,40 @@
+{
+  "test": [
+    "-p",
+    "kotama-scan",
+    "--",
+    "is_disassemblable_agrees",
+    "the_router_agrees",
+    "liftable_set"
+  ],
+  "files": {
+    "scan": "crates/scan/src/lib.rs",
+    "image": "crates/image/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 table says arm is unliftable (predicate disagrees)",
+      "file": "scan",
+      "find": "        (\"arm\", true),",
+      "repl": "        (\"arm\", false),"
+    },
+    {
+      "name": "M2 table says powerpc is liftable (no lifter claims it)",
+      "file": "scan",
+      "find": "        (\"powerpc\", false),",
+      "repl": "        (\"powerpc\", true),"
+    },
+    {
+      "name": "M3 image drops arm from is_disassemblable",
+      "file": "image",
+      "find": "            || self.is_arm32()\n    }",
+      "repl": "    }"
+    },
+    {
+      "name": "M4 router drops the arm route (arm reaches x86 gate)",
+      "file": "scan",
+      "find": "    if view.arch.is_arm32() {\n        return arm::discover_arm(&view, space);\n    }",
+      "repl": ""
+    }
+  ]
+}

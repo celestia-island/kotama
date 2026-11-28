@@ -4742,4 +4742,127 @@ mod tests {
         assert_eq!(crate::discover_with(view, &space).len(), 4);
         assert!(module.sections.iter().any(|section| section.executable));
     }
+
+    /// Every canonical architecture name, and whether the pipeline can lift it.
+    ///
+    /// The names are the ones `image` assigns from the object crate's enum. This
+    /// table is the single place a name's status is written down; the tests
+    /// below hold the predicate and the router to it, so neither can drift.
+    const ARCH_TABLE: &[(&str, bool)] = &[
+        ("aarch64", true),
+        ("aarch64_ilp32", true),
+        ("arm", true),
+        ("riscv64", true),
+        ("riscv32", true),
+        ("avr", false),
+        ("bpf", false),
+        ("csky", false),
+        ("loongarch64", false),
+        ("mips", false),
+        ("mips64", false),
+        ("msp430", false),
+        ("powerpc", false),
+        ("powerpc64", false),
+        ("s390x", false),
+        ("sbf", false),
+        ("sparc64", false),
+        ("wasm32", false),
+        ("wasm64", false),
+        ("x86_64_x32", false),
+        ("xtensa", false),
+    ];
+
+    /// `is_disassemblable` and the table agree, name for name. Adding a lifter
+    /// means flipping its row here; the predicate then has to follow.
+    #[test]
+    fn is_disassemblable_agrees_with_the_table() {
+        for (name, liftable) in ARCH_TABLE {
+            assert_eq!(
+                Arch::Other(name).is_disassemblable(),
+                *liftable,
+                "{name}: table and predicate disagree"
+            );
+        }
+    }
+
+    /// A liftable name is routed to a lifter and finds functions on a real
+    /// fixture; an unliftable one is the empty result. This is the test that
+    /// would have caught #171 before the CLI crashed: the router is checked
+    /// against the same table the predicate is.
+    ///
+    /// mutate: router-drops-a-lifter (removing an `is_*` arm from
+    /// `discover_with` sends that architecture to the x86 gate, which yields
+    /// zero on a non-x86 fixture — so the liftable half must find its golden
+    /// count, not merely "not panic").
+    #[test]
+    fn the_router_agrees_with_the_table() {
+        // (name, fixture lane, stem, golden function count from the cross tables)
+        let liftable: &[(&str, &str, &str, usize)] = &[
+            ("aarch64", "aarch64-elf", "elf", 22),
+            ("arm", "arm-a32", "a32", 20),
+            ("riscv64", "riscv64-norvc", "norvc", 4),
+            ("riscv32", "riscv32-noc", "norvc", 4),
+        ];
+        for (name, lane, stem, want) in liftable {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/generated/cross")
+                .join(lane)
+                .join(stem);
+            let Ok(bytes) = std::fs::read(&path) else {
+                eprintln!("skip: {lane} not built");
+                continue;
+            };
+            let module = LoadedModule::parse(&bytes).unwrap();
+            assert_eq!(module.arch, Arch::Other(name), "{name}");
+            let found = crate::discover(&module);
+            assert_eq!(found.len(), *want, "{name}: router must reach its lifter");
+        }
+        // The unliftable half: every such name on an empty view is empty and does
+        // not unwind on the x86 decoder's zero bitness.
+        for (name, liftable) in ARCH_TABLE {
+            if *liftable {
+                continue;
+            }
+            let view = ScanView {
+                container: Container::Elf32,
+                arch: Arch::Other(name),
+                image_base: 0,
+                entry_rva: None,
+                sections: &[],
+                symbols: &[],
+                dynamic_symbols: &[],
+                debug_functions: &[],
+                eh_frame_functions: &[],
+            };
+            assert!(discover_with(view, &EmptySpace).is_empty(), "{name}");
+        }
+        // aarch64_ilp32 has no fixture: the instruction set is the A64 one and only
+        // the pointer width differs, which a decoder does not see. Its predicate
+        // is what carries it, and that is checked above.
+        assert!(Arch::Other("aarch64_ilp32").is_aarch64());
+    }
+
+    /// Every liftable name has a predicate, and the liftable set is exactly what
+    /// the four lifter crates claim. A predicate added without a row, or a row
+    /// without a predicate, fails here.
+    #[test]
+    fn the_liftable_set_is_exactly_what_the_lifters_claim() {
+        let liftable: Vec<&str> = ARCH_TABLE
+            .iter()
+            .filter(|(_, l)| *l)
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(liftable.len(), 5, "a64 (both ABIs), rv64, rv32, arm");
+        for name in &liftable {
+            let arch = Arch::Other(name);
+            assert!(
+                arch.is_aarch64() || arch.is_riscv64() || arch.is_riscv32() || arch.is_arm32(),
+                "{name} is liftable but no lifter claims it"
+            );
+        }
+        // And the ILP32 ABI is the one name with no fixture of its own: it is
+        // covered by the A64 predicate because the instruction set is identical
+        // and only the pointer width differs, which a decoder does not see.
+        assert!(Arch::Other("aarch64_ilp32").is_aarch64());
+    }
 }
