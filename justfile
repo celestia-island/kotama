@@ -46,6 +46,12 @@ mutate-selftest:
 mutate *specs:
     python tools/mutate.py {{specs}}
 
+# Survey: which Rust-ecosystem script engines expose a C ABI a hook plan can
+# address. Reads crates.io and the local registry; needs the network once per
+# crate. The table is the research record — re-run to refresh it.
+engine-survey:
+    python tools/engine_survey.py
+    python tools/engine_survey_selftest.py
 # One-shot gate.
 gate: fmt lint genericity test licenses
 
