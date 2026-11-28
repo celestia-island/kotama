@@ -1,0 +1,56 @@
+{
+  "test": [
+    "-p",
+    "kotama-scan",
+    "--",
+    "every_cross_sample",
+    "each_lifter",
+    "compressed_and_plain",
+    "arm_and_thumb_builds",
+    "string_samples_find",
+    "a_stripped_a64",
+    "tiles_the",
+    "fixed_width_lifter",
+    "both_widths",
+    "narrow_instructions"
+  ],
+  "files": {
+    "plan": "crates/scan/src/lib.rs",
+    "riscv": "crates/scan/src/riscv.rs",
+    "a64": "crates/scan/src/a64.rs",
+    "lift_arm": "crates/lift-arm/src/lib.rs",
+    "lift_riscv": "crates/lift-riscv/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 live path loses riscv routing",
+      "file": "plan",
+      "find": "    if view.arch.is_riscv64() {\n        return riscv::discover_riscv(&view, space);\n    }\n    if view.arch.is_arm32() {\n        return arm::discover_arm(&view, space);\n    }\n    // The x86 decoder",
+      "repl": "    if view.arch.is_arm32() {\n        return arm::discover_arm(&view, space);\n    }\n    // The x86 decoder"
+    },
+    {
+      "name": "M2 riscv call targets not seeded (expected MISSED: redundancy)",
+      "file": "riscv",
+      "find": "                .insert(Evidence::CallTarget);",
+      "repl": "                .insert(Evidence::Symtab);"
+    },
+    {
+      "name": "M3 thumb width narrowed (expected CAUGHT via golden count)",
+      "file": "lift_arm",
+      "find": "    if low >> 11 >= 0b11101 {",
+      "repl": "    if low >> 11 >= 0b11110 {"
+    },
+    {
+      "name": "M4 riscv c-extension prefix broken",
+      "file": "lift_riscv",
+      "find": "    if low & 0b11 != 0b11 {\n        2",
+      "repl": "    if low & 0b11 != 0b11 {\n        4"
+    },
+    {
+      "name": "M5 a64 bl targets not seeded (expected MISSED: redundancy)",
+      "file": "a64",
+      "find": "                .insert(Evidence::CallTarget);",
+      "repl": "                .insert(Evidence::Symtab);"
+    }
+  ]
+}

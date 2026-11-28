@@ -31,9 +31,16 @@ genericity:
     python tools/genericity_scan.py
     python tools/genericity_selftest.py
 
-# One-shot gate.
+# Dependency licences: permissive only, no AGPL/GPL/LGPL in the tree.
 licenses:
     cargo deny check licenses bans sources
+
+# Mutation: replay a spec of one-token mutations the tests are required to
+# catch. A surviving mutant that is not a documented equivalence is a hole in
+# the tests. Not part of `gate` — it edits source files while it runs, so it
+# must not overlap a build.
+mutate *specs:
+    python tools/mutate.py {{specs}}
 
 # One-shot gate.
 gate: fmt lint genericity test licenses
