@@ -1,0 +1,38 @@
+{
+  "test": [
+    "-p",
+    "kotama-decomp",
+    "--",
+    "lifter_architecture",
+    "unsupported_architecture"
+  ],
+  "files": {
+    "d": "crates/decomp/src/lib.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 gate removed (lifter archs reach iced-x86 and unwind)",
+      "file": "d",
+      "find": "    if !matches!(arch, Arch::X86_64 | Arch::X86) {\n        return lifter_listing(space, module_id, arch, function);\n    }\n",
+      "repl": ""
+    },
+    {
+      "name": "M2 gate inverted (x86 goes to the listing, lifters to iced)",
+      "file": "d",
+      "find": "    if !matches!(arch, Arch::X86_64 | Arch::X86) {",
+      "repl": "    if matches!(arch, Arch::X86_64 | Arch::X86) {"
+    },
+    {
+      "name": "M3 listing claims to be a decompilation",
+      "file": "d",
+      "find": "        \"/* {}: instruction listing; no decompiler for this architecture */\",",
+      "repl": "        \"/* {}\","
+    },
+    {
+      "name": "M4 unsupported arch reports ERROR instead of no-lifter",
+      "file": "d",
+      "find": "let _ = writeln!(out, \"/* no lifter for {}; nothing to list */\", arch.short());",
+      "repl": "let _ = writeln!(out, \"/* ERROR: no lifter */\");"
+    }
+  ]
+}
