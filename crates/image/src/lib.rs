@@ -229,6 +229,7 @@ impl Arch {
         matches!(self, Self::X86_64 | Self::X86)
             || self.is_aarch64()
             || self.is_riscv64()
+            || self.is_riscv32()
             || self.is_arm32()
     }
     /// True for the 64-bit ARM architecture (Aarch64 / A64 instructions).
@@ -249,6 +250,18 @@ impl Arch {
         matches!(
             self,
             Self::Other("riscv64") | Self::Other("riscv64gc") | Self::Other("riscv64imafdc")
+        )
+    }
+
+    /// True for the 32-bit RISC-V architecture (RV32 with or without the C extension).
+    ///
+    /// RV32 shares the RV64 encodings except for one compressed halfword, so it
+    /// takes the same lifter with the width stated; see `lift_riscv::Xlen`.
+    #[must_use]
+    pub fn is_riscv32(self) -> bool {
+        matches!(
+            self,
+            Self::Other("riscv32") | Self::Other("riscv32gc") | Self::Other("riscv32imafc")
         )
     }
 
