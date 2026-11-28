@@ -9,38 +9,33 @@
 //! - **`kotama_log_entry`** is the hook body. It runs on the caller's thread,
 //!   inside the caller's lock hierarchy. It does an atomic increment, writes a
 //!   slot in a pre-allocated ring, and reads two thread/time APIs. No heap, no
-//!   lock, no file. Everything it needs was set up before the first hook fired.
-//! - **`kotama_original`** resolves the backing export on first use. It calls
-//!   `LoadLibraryW` and `GetProcAddress`, which take the loader lock. That is a
-//!   **known exception** to "no locking": it happens once per ordinal-lazy
-//!   path, never from a DllMain, and is cached afterwards so the lock is not
-//!   taken again. It is an exception because there is no way to bind to a
-//!   forwarding target without the loader, and the alternative — resolving
-//!   everything eagerly in DllMain — would hold the loader lock for longer.
-//! - **`worker_main`** is the consumer. It runs on its own thread, drains the
-//!   ring, formats with `snprintf` and writes with `WriteFile`. The contract
-//!   does not apply to it; it exists so the hook body never has to do I/O.
+//!   lock, no file, and it does not start the runtime.
+//! - **`kotama_original`** resolves the backing export. It calls
+//!   `InitOnceExecuteOnce` to start the runtime the first time any stub
+//!   forwards, then reads the cached module. The once-only fast path is a
+//!   status read; the first call runs `kotama_start` under the once lock.
+//! - **`kotama_start`** is the only place with side effects: it opens the log,
+//!   loads the backing module, and starts the worker. It runs once, from
+//!   whichever thread first forwards — never from `DllMain`, so the loader lock
+//!   is not held while a file is opened or a thread is created.
+//! - **`worker_main`** is the consumer: its own thread, drains the ring,
+//!   formats and writes. The contract does not apply to it.
 //!
-//! # DllMain does two things it should not, and both are known
-//!
-//! `DllMain` opens the log file and starts the worker. It does no hooking.
-//! `CreateFileA` is file I/O under the loader lock, and `CreateThread` starts a
-//! thread that may not have run before `DllMain` returns. Microsoft's guidance
-//! says to do neither. In practice both have been safe here: the mirror is
-//! loaded by the smoke test in `proxy_cli.rs` on both x64 and x86, the file is
-//! opened append-only with share-all so a second loader does not contend, and
-//! the worker's first act is a 20 ms sleep so it never races `DllMain`'s tail.
-//! The correct shape is an explicit `proxy_init` the host calls once the process
-//! is past initialisation — the same fix as for the lazy `LoadLibraryW` in
-//! `kotama_original` — and until that exists these two are the price of a
-//! mirror that needs no host cooperation to start logging.
+//! `DllMain` is registration only: it sets the stop flag on detach and does
+//! nothing else. The mirror still needs no cooperation from the host to begin
+//! logging — the first forwarded call starts it — but no longer does file I/O or
+//! thread creation under the loader lock, which #181 had recorded as the two
+//! things it did against Microsoft's guidance.
 //!
 //! # What checks this
 //!
 //! Nothing here is checked by `kotama_payload::hook_guard`: that counter guards
 //! the payload's own hook bodies, and this runtime is a separate binary with its
-//! own C. The classification above is a reading of the generated source, and the
-//! tests pin the three functions' shape so it cannot drift silently.
+//! own C. The tests slice the four functions out of the generated source and
+//! hold each to its contents, and every side effect is asserted to have exactly
+//! one home. The smoke test in `proxy_cli.rs` builds the mirror with zig, loads
+//! it, and calls through it on both x64 and x86 — that is the proof the once
+//! start actually runs, which the source-shape tests cannot give.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,6 +127,33 @@ static volatile LONG stopping;
 static HANDLE log_handle = INVALID_HANDLE_VALUE;
 static HANDLE worker_thread;
 static HMODULE backing_module;
+static INIT_ONCE start_once = INIT_ONCE_STATIC_INIT;
+static DWORD WINAPI worker_main(LPVOID unused);
+
+/* Runs once, under InitOnceExecuteOnce, the first time a forwarding stub needs
+ * the backing module. DllMain does not call it: file I/O and thread creation
+ * under the loader lock are what this defers, and a mirror that starts itself
+ * lazily needs no cooperation from the host to begin logging. */
+static BOOL CALLBACK kotama_start(PINIT_ONCE once, LPVOID param, LPVOID *context) {
+    (void)once;
+    (void)param;
+    (void)context;
+    char path[MAX_PATH];
+    DWORD length = GetEnvironmentVariableA("KOTAMA_PROXY_LOG", path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        lstrcpyA(path, "kotama-proxy.log");
+    }
+    log_handle = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HMODULE loaded = LoadLibraryW(KOTAMA_BACKING_NAME);
+    if (loaded) {
+        backing_module = loaded;
+    }
+    if (log_handle != INVALID_HANDLE_VALUE) {
+        worker_thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);
+    }
+    return TRUE;
+}
 
 __declspec(noreturn) static void kotama_missing_original(void) {
     RaiseException(0xE0000001u, 0, 0, NULL);
@@ -140,12 +162,7 @@ __declspec(noreturn) static void kotama_missing_original(void) {
 }
 
 void *kotama_original(unsigned ordinal) {
-    if (!backing_module) {
-        HMODULE loaded = LoadLibraryW(KOTAMA_BACKING_NAME);
-        if (loaded) {
-            InterlockedCompareExchangePointer((PVOID volatile *)&backing_module, loaded, NULL);
-        }
-    }
+    InitOnceExecuteOnce(&start_once, kotama_start, NULL, NULL);
     if (!backing_module) {
         return (void *)kotama_missing_original;
     }
@@ -153,6 +170,10 @@ void *kotama_original(unsigned ordinal) {
     return address ? (void *)address : (void *)kotama_missing_original;
 }
 
+/* The hook body. Runs on the caller's thread inside its lock hierarchy: an
+ * atomic increment, a slot in the pre-allocated ring, two thread/time reads.
+ * No heap, no lock, no file, and it does not start the runtime — kotama_original
+ * does, so by the time any entry is logged the ring has a consumer. */
 void kotama_log_entry(unsigned ordinal) {
     LONG slot = InterlockedIncrement(&write_index) - 1;
     KOTAMA_LOG_ENTRY *entry = &ring[(unsigned)slot % KOTAMA_LOG_CAP];
@@ -191,19 +212,12 @@ static DWORD WINAPI worker_main(LPVOID unused) {
     return 0;
 }
 
+/* Registration only. The runtime starts the first time a stub forwards; the
+ * loader lock is never held while a file is opened or a thread is created. */
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)instance;
     (void)reserved;
-    if (reason == DLL_PROCESS_ATTACH) {
-        char path[MAX_PATH];
-        DWORD length = GetEnvironmentVariableA("KOTAMA_PROXY_LOG", path, MAX_PATH);
-        if (length == 0 || length >= MAX_PATH) {
-            lstrcpyA(path, "kotama-proxy.log");
-        }
-        log_handle = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                 NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        worker_thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);
-    } else if (reason == DLL_PROCESS_DETACH) {
+    if (reason == DLL_PROCESS_DETACH) {
         InterlockedExchange(&stopping, 1);
     }
     return TRUE;
@@ -624,33 +638,63 @@ fn generate(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
 
-    /// The generated runtime's three functions keep their contract shapes: the
-    /// hook body touches the ring and nothing else, the resolver is the only
-    /// loader-lock caller, the worker is the only file writer. A future edit that
-    /// moves a `WriteFile` into `kotama_log_entry` would pass every existing
-    /// test and violate the one rule the runtime exists to keep.
+    /// The generated runtime's contract after lazy start: DllMain registers
+    /// only, the one-time starter is the only place a file is opened, a thread
+    /// created or a library loaded, the hook body touches the ring and nothing
+    /// else, and the resolver triggers the start before it reads the module.
     ///
-    /// mutate: io-in-hook-body (a WriteFile inside kotama_log_entry's body makes
-    /// the "hook body" slice contain it — the test fails on that slice).
+    /// mutate: start-moved-to-dllmain (a CreateFileA in DllMain fails the
+    /// "registration only" slice); io-in-hook-body (a WriteFile in the hook
+    /// body fails its slice).
     #[test]
-    fn the_generated_runtime_keeps_the_hook_body_free_of_io_and_locks() {
+    fn the_generated_runtime_starts_lazily_and_keeps_the_hook_body_clean() {
         let source = runtime_source("original_real.dll");
         let body = |name: &str, until: &str| -> &str {
             let start = source.find(name).expect(name);
             let end = source[start..].find(until).expect(until) + start;
             &source[start..end]
         };
-        let hook = body("void kotama_log_entry(", "\n}\n");
+        let starter = body("static BOOL CALLBACK kotama_start(", "\n}\n");
         let resolver = body("void *kotama_original(", "\n}\n");
-        let worker = body("static DWORD WINAPI worker_main(", "\n}\n");
+        let hook = body("void kotama_log_entry(", "\n}\n");
+        let dllmain = body("BOOL WINAPI DllMain(", "\n}\n");
 
-        // The hook body: ring writes and interlocked ops only.
+        // The one-time starter holds every side effect.
+        for needed in ["CreateFileA", "CreateThread", "LoadLibraryW"] {
+            assert!(
+                starter.contains(needed),
+                "starter must do {needed}:\n{starter}"
+            );
+        }
+        // The resolver starts the runtime, then reads the cached module.
+        assert!(
+            resolver.contains("InitOnceExecuteOnce(&start_once"),
+            "{resolver}"
+        );
+        assert!(resolver.contains("GetProcAddress"), "{resolver}");
+        for forbidden in [
+            "LoadLibraryW",
+            "CreateFile",
+            "WriteFile",
+            "malloc",
+            "HeapAlloc",
+            "EnterCriticalSection",
+        ] {
+            assert!(
+                !resolver.contains(forbidden),
+                "resolver must not call {forbidden}:\n{resolver}"
+            );
+        }
+        // The hook body: ring writes and interlocked ops only. It does not
+        // start the runtime — that is the resolver's job, so a hook that fires
+        // before any forward simply writes a slot the worker will read later.
         assert!(hook.contains("InterlockedIncrement"), "{hook}");
         assert!(hook.contains("ring["), "{hook}");
         for forbidden in [
             "WriteFile",
             "CreateFile",
             "LoadLibrary",
+            "InitOnceExecuteOnce",
             "malloc",
             "HeapAlloc",
             "EnterCriticalSection",
@@ -661,33 +705,54 @@ mod tests {
                 "hook body must not call {forbidden}:\n{hook}"
             );
         }
-        // The resolver is the one place the loader lock is taken.
-        assert!(resolver.contains("LoadLibraryW"), "{resolver}");
-        assert!(resolver.contains("GetProcAddress"), "{resolver}");
-        assert!(!resolver.contains("WriteFile"), "{resolver}");
-        // The worker is the one place a file is written.
-        assert!(worker.contains("WriteFile"), "{worker}");
-        assert!(worker.contains("snprintf"), "{worker}");
-        assert!(!worker.contains("LoadLibrary"), "{worker}");
+        // DllMain: registration only. Nothing else.
+        assert!(dllmain.contains("DLL_PROCESS_DETACH"), "{dllmain}");
+        assert!(
+            dllmain.contains("InterlockedExchange(&stopping"),
+            "{dllmain}"
+        );
+        for forbidden in [
+            "CreateFile",
+            "CreateThread",
+            "LoadLibrary",
+            "ring[",
+            "kotama_start",
+            "kotama_log_entry",
+            "InitOnceExecuteOnce",
+        ] {
+            assert!(
+                !dllmain.contains(forbidden),
+                "DllMain must not contain {forbidden}:\n{dllmain}"
+            );
+        }
     }
 
-    /// DllMain opens the log and starts the worker; it does no hooking and no
-    /// ring writes.
+    /// Every side effect in the runtime lives in exactly one function, so a
+    /// reader looking for "where does the file get opened" has one answer.
     #[test]
-    fn dllmain_only_opens_the_log_and_starts_the_worker() {
+    fn each_side_effect_has_exactly_one_home() {
         let source = runtime_source("original_real.dll");
-        let start = source.find("BOOL WINAPI DllMain(").expect("DllMain");
-        let end = source[start..].find("\n}\n").expect("end") + start;
-        let dllmain = &source[start..end];
-        assert!(dllmain.contains("CreateFileA"), "{dllmain}");
-        assert!(dllmain.contains("CreateThread"), "{dllmain}");
-        assert!(
-            !dllmain.contains("ring["),
-            "DllMain must not touch the ring"
-        );
-        assert!(
-            !dllmain.contains("kotama_log_entry"),
-            "DllMain must not hook"
-        );
+        for (call, home) in [
+            ("CreateFileA", "kotama_start"),
+            ("CreateThread", "kotama_start"),
+            ("LoadLibraryW", "kotama_start"),
+            ("WriteFile", "worker_main"),
+        ] {
+            let count = source.matches(call).count();
+            assert_eq!(
+                count, 1,
+                "{call} appears {count} times, expected exactly one"
+            );
+            let at = source.find(call).unwrap();
+            let fn_start = source[..at]
+                .rfind(
+                    "
+}
+",
+                )
+                .map_or(0, |i| i + 3);
+            let fn_head = &source[fn_start..at];
+            assert!(fn_head.contains(home), "{call} is not inside {home}");
+        }
     }
 }
