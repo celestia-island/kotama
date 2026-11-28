@@ -144,8 +144,16 @@ def build_msvc_target(target: str, opt_levels: list[str], sources: list[Path]) -
             ]
             if src.suffix == ".cpp":
                 cmd += ["/EHsc", "/GR"]
+            # /Brepro on both ends: the compiler stamps the COFF header with a
+            # content hash instead of the clock, and the linker does the same for
+            # the PE timestamp. Without it two builds of the same source differ in
+            # every .obj and .exe, and every PE test is passing on different bytes
+            # each time. The .obj and .pdb still carry a fresh debug GUID each build
+            # — Microsoft's design for debug-info uniqueness — so the .exe is what
+            # the reproducibility check holds to.
             cmd += [
-                f"/Fo{obj}", f"/Fe{exe}", str(src), "/link", "/DEBUG:FULL",
+                "/Brepro",
+                f"/Fo{obj}", f"/Fe{exe}", str(src), "/link", "/DEBUG:FULL", "/Brepro",
                 "/INCREMENTAL:NO", f"/PDB:{pdb}",
             ]
             proc = run(cmd, cwd = out_dir, env = env)
