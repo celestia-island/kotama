@@ -30,6 +30,7 @@ fmt:
 genericity:
     python tools/genericity_scan.py
     python tools/genericity_selftest.py
+    python tools/mutate_selftest.py
 
 # Dependency licences: permissive only, no AGPL/GPL/LGPL in the tree.
 licenses:
@@ -39,6 +40,9 @@ licenses:
 # catch. A surviving mutant that is not a documented equivalence is a hole in
 # the tests. Not part of `gate` — it edits source files while it runs, so it
 # must not overlap a build.
+mutate-selftest:
+    python tools/mutate_selftest.py
+
 mutate *specs:
     python tools/mutate.py {{specs}}
 
