@@ -185,6 +185,9 @@ pub enum Evidence {
     PointerTarget,
     /// 代码里的绝对地址立即数（`push offset` / `mov reg, offset` / 静态回调注册）。
     ImmediateTarget,
+    /// Mach-O `LC_FUNCTION_STARTS` entry: the loader's own list of function
+    /// entry points, present even on a fully stripped binary.
+    FunctionStarts,
     /// 16 字节对齐、前面有填充的 `sub esp, imm` 序言。
     PrologueTarget,
 }
@@ -201,6 +204,7 @@ impl Evidence {
             Self::Pdata => "pdata",
             Self::UnwindInfo => "unwind",
             Self::EhFrame => "eh_frame",
+            Self::FunctionStarts => "function_starts",
             Self::Entry => "entry",
             Self::CallTarget => "call",
             Self::PointerTarget => "pointer",

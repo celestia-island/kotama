@@ -13,6 +13,7 @@
 
 pub mod eh_frame;
 pub mod elf_export;
+pub mod macho_function_starts;
 pub mod macho_unwind;
 pub mod pe_export;
 
@@ -447,6 +448,12 @@ pub struct LoadedModule {
     /// 全 strip 的 ELF 只剩这张表能给出函数边界，所以它单独一份、不与
     /// `debug_functions` 混在一起：来源不同，证据等级也不同。
     pub eh_frame_functions: Vec<SymbolInfo>,
+    /// Mach-O `LC_FUNCTION_STARTS` entry points: exact address, no size, no name.
+    ///
+    /// Kept apart from `eh_frame_functions` for the same reason that one is kept
+    /// apart from `debug_functions`: a different source with a different evidence
+    /// level, and the one that survives a full strip on this container.
+    pub macho_function_starts: Vec<SymbolInfo>,
     /// PE exception directory（DataDirectory 索引 3）；不依赖节名。
     pub exception_directory: Option<DataDirectory>,
     /// PE 资源目录中的叶子资源（DataDirectory 索引 2）。
@@ -1554,6 +1561,7 @@ impl LoadedModule {
         relative_relocations.sort_unstable();
         let debug_functions = dwarf_functions(file, base);
         let eh_frame_functions = frame_functions(file, base);
+        let macho_function_starts = macho_function_starts::function_start_symbols(data, base);
         let exception_directory = pe_data_directory(data, container, 3);
         let pdb_identity = pe_pdb_identity(data, &backing, container);
         let resources = pe_resources(data, &backing, container);
@@ -1570,6 +1578,7 @@ impl LoadedModule {
             imports,
             debug_functions,
             eh_frame_functions,
+            macho_function_starts,
             exception_directory,
             resources,
             version_info,
