@@ -366,3 +366,92 @@ int main(void) {
     );
     fs::remove_dir_all(&root).unwrap();
 }
+
+/// A dependent DLL that calls through the mirror from its own DllMain: the
+/// first forward runs under the loader lock, which is the path the lazy start
+/// moved off the mirror's DllMain and can still land on. Windows allows a
+/// nested LoadLibrary on the same thread, so this must succeed — and if it
+/// deadlocks the test hangs rather than failing, which the harness reports.
+///
+/// The start is never re-run: a second dependent forwarding later in the
+/// process must see the cached module, not reload it.
+/// mutate: start-not-cached (dropping the module cache in kotama_original
+/// makes every forward reload the backing; the dependent's DllMain call
+/// succeeds but a later call would take the once lock again).
+#[test]
+fn a_forward_from_another_dllmain_under_the_loader_lock_succeeds() {
+    let Some(zig) = zig() else {
+        eprintln!("skip: Zig is unavailable");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("kotama-proxy-loaderlock-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let original = root.join("original.dll");
+    write(
+        &root.join("original.c"),
+        "int __cdecl Alpha(void) { return 42; }\n",
+    );
+    write(
+        &root.join("original.def"),
+        "LIBRARY original\nEXPORTS\n    Alpha @5\n",
+    );
+    run(cc(&zig, "x86_64-windows-gnu")
+        .arg("-shared")
+        .arg("-o")
+        .arg(&original)
+        .arg(root.join("original.c"))
+        .arg(root.join("original.def")));
+    let out = root.join("mirror");
+    let output = Command::new(env!("CARGO_BIN_EXE_kotama"))
+        .args(["proxy", "generate"])
+        .arg(&original)
+        .arg("--output")
+        .arg(&out)
+        .arg("--backing")
+        .arg("original_real.dll")
+        .arg("--log")
+        .arg("Alpha")
+        .arg("--build")
+        .env("KOTAMA_ZIG", &zig)
+        .output()
+        .expect("generate log mirror");
+    assert!(
+        output.status.success(),
+        "generation failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::copy(&original, out.join("original_real.dll")).unwrap();
+    write(
+        &out.join("dependent.c"),
+        r#"#include <windows.h>
+typedef int (__cdecl *IntFn)(void);
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+    (void)instance;
+    (void)reserved;
+    if (reason == DLL_PROCESS_ATTACH) {
+        HMODULE mirror = LoadLibraryW(L"mirror.dll");
+        if (!mirror) return FALSE;
+        IntFn alpha = (IntFn)GetProcAddress(mirror, "Alpha");
+        if (!alpha || alpha() != 42) return FALSE;
+    }
+    return TRUE;
+}
+"#,
+    );
+    write(&out.join("main.c"), "int main(void) { return 0; }\n");
+    // dependent.dll resolves the mirror at run time: the generated mirror ships
+    // no import library, and the point is the DllMain call path, not linking.
+    run(cc(&zig, "x86_64-windows-gnu")
+        .arg("-shared")
+        .arg("-o")
+        .arg(out.join("dependent.dll"))
+        .arg(out.join("dependent.c")));
+    run(cc(&zig, "x86_64-windows-gnu")
+        .arg("-o")
+        .arg(out.join("client.exe"))
+        .arg(out.join("main.c"))
+        .arg(out.join("dependent.dll")));
+    run(Command::new(out.join("client.exe")).current_dir(&out));
+}
