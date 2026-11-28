@@ -1,0 +1,40 @@
+{
+  "test": [
+    "-p",
+    "kotama-cli",
+    "--bin",
+    "kotama",
+    "--",
+    "hook_body",
+    "dllmain_only"
+  ],
+  "files": {
+    "p": "crates/cli/src/proxy.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 WriteFile inside the hook body (the rule the runtime exists to keep)",
+      "file": "p",
+      "find": "    entry->tick = GetTickCount();\n    InterlockedIncrement(&entry->seq);",
+      "repl": "    entry->tick = GetTickCount();\n    InterlockedIncrement(&entry->seq);\n    WriteFile(log_handle, \"x\", 1, NULL, NULL);"
+    },
+    {
+      "name": "M2 LoadLibraryW moved into the hook body",
+      "file": "p",
+      "find": "    entry->tick = GetTickCount();\n    InterlockedIncrement(&entry->seq);",
+      "repl": "    entry->tick = GetTickCount();\n    InterlockedIncrement(&entry->seq);\n    LoadLibraryW(KOTAMA_BACKING_NAME);"
+    },
+    {
+      "name": "M3 DllMain touches the ring",
+      "file": "p",
+      "find": "        log_handle = CreateFileA(path, FILE_APPEND_DATA,",
+      "repl": "        ring[0].seq = 1;\n        log_handle = CreateFileA(path, FILE_APPEND_DATA,"
+    },
+    {
+      "name": "M4 worker stops writing (the file writer disappears)",
+      "file": "p",
+      "find": "                WriteFile(log_handle, line, (DWORD)length, &written, NULL);",
+      "repl": "                (void)length;"
+    }
+  ]
+}
