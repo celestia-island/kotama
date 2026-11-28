@@ -1,0 +1,18 @@
+{
+  "test": ["-p", "kotama-cli", "--bin", "kotama", "--", "starts_lazily", "one_home"],
+  "files": {"p": "crates/cli/src/proxy.rs"},
+  "mutations": [
+    {"name": "M1 start moved back into DllMain (loader lock under I/O)", "file": "p",
+     "find": "    if (reason == DLL_PROCESS_DETACH) {\n        InterlockedExchange(&stopping, 1);\n    }\n    return TRUE;",
+     "repl": "    if (reason == DLL_PROCESS_ATTACH) {\n        InitOnceExecuteOnce(&start_once, kotama_start, NULL, NULL);\n    } else if (reason == DLL_PROCESS_DETACH) {\n        InterlockedExchange(&stopping, 1);\n    }\n    return TRUE;"},
+    {"name": "M2 resolver skips the once start", "file": "p",
+     "find": "    InitOnceExecuteOnce(&start_once, kotama_start, NULL, NULL);\n    if (!backing_module) {",
+     "repl": "    if (!backing_module) {"},
+    {"name": "M3 WriteFile inside the hook body", "file": "p",
+     "find": "    InterlockedIncrement(&entry->seq);\n}\n\nstatic DWORD WINAPI worker_main(LPVOID unused) {",
+     "repl": "    InterlockedIncrement(&entry->seq);\n    WriteFile(log_handle, \"x\", 1, NULL, NULL);\n}\n\nstatic DWORD WINAPI worker_main(LPVOID unused) {"},
+    {"name": "M4 starter no longer loads the backing module", "file": "p",
+     "find": "    HMODULE loaded = LoadLibraryW(KOTAMA_BACKING_NAME);\n    if (loaded) {\n        backing_module = loaded;\n    }",
+     "repl": "    (void)0;"}
+  ]
+}
