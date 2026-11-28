@@ -22,24 +22,24 @@ REPO = HERE.parent
 LANES = ["cross", "lua", "shared", "x86_64-linux-gnu", "x86_64-windows-gnu"]
 # The MSVC lane: its .obj and .pdb carry a fresh debug GUID per build by design,
 # so only the .exe — the thing every PE test reads — is held to byte identity.
-MSVC_LANE = "x86_64-windows-msvc"
+MSVC_LANES = ["x86_64-windows-msvc", "x86-windows-msvc"]
 MSVC_SUFFIX = ".exe"
-BUILD_ARGS = ["--targets", "x86_64-linux-gnu", "x86_64-windows-gnu", "x86_64-windows-msvc", "--opt", "O2"]
+BUILD_ARGS = ["--targets", "x86_64-linux-gnu", "x86_64-windows-gnu", "x86_64-windows-msvc", "x86-windows-msvc", "--opt", "O2"]
 
 
 def snapshot(root: pathlib.Path) -> dict[str, str]:
     out: dict[str, str] = {}
-    for lane in [*LANES, MSVC_LANE]:
+    for lane in [*LANES, *MSVC_LANES]:
         base = root / lane
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*")):
             if not path.is_file() or "_lua-src" in path.parts:
                 continue
-            if lane == MSVC_LANE and path.suffix != MSVC_SUFFIX:
+            if lane in MSVC_LANES and path.suffix != MSVC_SUFFIX:
                 continue
             data = path.read_bytes()
-            if lane == MSVC_LANE:
+            if lane in MSVC_LANES:
                 data = mask_pdb_age(data)
             out[str(path.relative_to(root))] = hashlib.sha256(data).hexdigest()
     return out
