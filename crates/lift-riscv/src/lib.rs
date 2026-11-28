@@ -24,6 +24,20 @@ pub const T1: u32 = 5;
 /// Register `x0`, the hard-wired zero register.
 pub const ZERO: u32 = 0;
 
+/// The base integer ISA width a RISC-V byte stream was encoded for.
+///
+/// RV32 and RV64 share every encoding except one: the compressed halfword with
+/// quadrant `01` and funct3 `001` is `c.jal` on RV32 and `c.addiw` on RV64 — a
+/// control transfer on one, an arithmetic non-event on the other. Everything
+/// else the lifter reads is the same bytes with the same meaning.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Xlen {
+    /// RV64: the default; `c.addiw`, no `c.jal`.
+    Rv64,
+    /// RV32: `c.jal` is a call.
+    Rv32,
+}
+
 /// What an instruction does to control flow.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flow {
@@ -290,10 +304,34 @@ fn decode32(address: u64, word: u32) -> RvLifted {
 
 /// Decode a 2-byte compressed instruction at `address`.
 ///
+/// The absolute target of a `c.jal` halfword at `address`.
+///
+/// The offset is imm[11:1] with imm[0] implicit. The bit map was read off a
+/// reference decoder by setting each bit of [12:2] alone and recording the
+/// resulting offset — bit 2 -> +0x20, bit 3 -> +0x2, bit 4 -> +0x4, bit 5 ->
+/// +0x8, bit 6 -> +0x80, bit 7 -> +0x40, bit 8 -> +0x400, bit 9 -> +0x100,
+/// bit 10 -> +0x200, bit 11 -> +0x10, bit 12 -> -0x800 (sign). The test pins
+/// all eleven.
+fn c_jal_target(low: u16, address: u64) -> u64 {
+    let o = u32::from(low);
+    let imm = (((o >> 12) & 1) << 11)
+        | (((o >> 8) & 1) << 10)
+        | (((o >> 10) & 1) << 9)
+        | (((o >> 9) & 1) << 8)
+        | (((o >> 6) & 1) << 7)
+        | (((o >> 7) & 1) << 6)
+        | (((o >> 2) & 1) << 5)
+        | (((o >> 11) & 1) << 4)
+        | (((o >> 5) & 1) << 3)
+        | (((o >> 4) & 1) << 2)
+        | (((o >> 3) & 1) << 1);
+    address.wrapping_add(sext(imm as u64, 12) as u64)
+}
+
 /// Only the compressed control-flow encodings are interpreted; the rest is reported
 /// as `.half`. Quadrant 1 holds `c.j`, `c.jal`, `c.beqz`, `c.bnez`; quadrant 2 holds
 /// `c.jr`, `c.jalr` and `c.ebreak`.
-fn decode16(address: u64, low: u16) -> RvLifted {
+fn decode16(address: u64, low: u16, xlen: Xlen) -> RvLifted {
     let quadrant = low & 0b11;
     let funct3 = (low >> 13) & 0x7;
     let data = RvLifted {
@@ -331,10 +369,26 @@ fn decode16(address: u64, low: u16) -> RvLifted {
                 Some(target),
             )
         }
-        // c.jal (RV32 only; on RV64 this encoding is c.addiw, not a control transfer).
-        // Treated as a call only if the caller says the mode is RV32, which the
-        // public entry point never does, so this arm documents the encoding.
+        // c.jal (RV32) / c.addiw (RV64): one encoding, two meanings.
+        // The offset is imm[11:1] with imm[0] implicit. The bit map below was
+        // read off a reference decoder by setting each bit of [12:2] alone and
+        // recording the resulting offset — bit 2 -> +0x20, bit 3 -> +0x2, bit 4
+        // -> +0x4, bit 5 -> +0x8, bit 6 -> +0x80, bit 7 -> +0x40, bit 8 ->
+        // +0x400, bit 9 -> +0x100, bit 10 -> +0x200, bit 11 -> +0x10, bit 12 ->
+        // -0x800 (sign). The test pins all eleven.
+        (0b01, 0b001) if xlen == Xlen::Rv32 => {
+            let target = c_jal_target(low, address);
+            fact(
+                address,
+                2,
+                format!("c.jal {target:#x}"),
+                Flow::Call,
+                Some(target),
+            )
+        }
+        // On RV64 the same encoding is c.addiw, not a control transfer.
         (0b01, 0b001) => data,
+
         // c.beqz / c.bnez: offset[8|4:3] and imm[7:6|2:1|5] at bits 12|11:10|6:5|4:3|2.
         (0b01, 0b110) | (0b01, 0b111) => {
             let o = u32::from(low);
@@ -403,6 +457,12 @@ fn decode16(address: u64, low: u16) -> RvLifted {
 /// an error.
 #[must_use]
 pub fn lift(bytes: &[u8], address: u64) -> Vec<RvLifted> {
+    lift_with(bytes, address, Xlen::Rv64)
+}
+
+/// Lift with the base ISA width stated explicitly; RV32 reads `c.jal` as a call.
+#[must_use]
+pub fn lift_with(bytes: &[u8], address: u64, xlen: Xlen) -> Vec<RvLifted> {
     let mut out = Vec::new();
     let mut pc = address;
     let mut i = 0usize;
@@ -413,7 +473,7 @@ pub fn lift(bytes: &[u8], address: u64) -> Vec<RvLifted> {
             break;
         }
         let decoded = if width == 2 {
-            decode16(pc, low)
+            decode16(pc, low, xlen)
         } else if width == 4 {
             decode32(
                 pc,
@@ -477,6 +537,12 @@ pub struct CallTarget {
 /// indirect call and yields nothing.
 #[must_use]
 pub fn call_targets(bytes: &[u8], address: u64) -> Vec<CallTarget> {
+    call_targets_with(bytes, address, Xlen::Rv64)
+}
+
+/// Call targets with the base ISA width stated; RV32 reads `c.jal` as a call.
+#[must_use]
+pub fn call_targets_with(bytes: &[u8], address: u64, xlen: Xlen) -> Vec<CallTarget> {
     let mut bases: Vec<(u32, u64)> = Vec::new();
     let mut out = Vec::new();
     let mut pc = address;
@@ -486,6 +552,17 @@ pub fn call_targets(bytes: &[u8], address: u64) -> Vec<CallTarget> {
         let width = instruction_width(low);
         if i + width > bytes.len() {
             break;
+        }
+        if width == 2 {
+            // Only RV32 has a compressed call with a static target: c.jal.
+            // On RV64 the same halfword is c.addiw and yields nothing here.
+            if xlen == Xlen::Rv32 && low & 0b11 == 0b01 && (low >> 13) & 0x7 == 0b001 {
+                let target = c_jal_target(low, pc);
+                out.push(CallTarget { at: pc, target });
+            }
+            i += width;
+            pc += width as u64;
+            continue;
         }
         if width == 4 {
             let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
@@ -992,5 +1069,93 @@ mod tests {
         let forms = address_forms(&code, 0x8000);
         assert_eq!(forms.len(), 1);
         assert_eq!(forms.first().map(|form| form.target), Some(0x7000));
+    }
+
+    /// `c.jal` is the one encoding RV32 and RV64 disagree on. Each line sets one
+    /// bit of [12:2] alone and the expected offset is what a reference decoder
+    /// produced for that exact halfword — so the bit map in the decoder is
+    /// pinned bit by bit, not by a handful of coincidental points.
+    #[test]
+    fn c_jal_on_rv32_targets_what_the_reference_decoder_says() {
+        for (bit, offset) in [
+            (2u32, 0x20i64),
+            (3, 0x2),
+            (4, 0x4),
+            (5, 0x8),
+            (6, 0x80),
+            (7, 0x40),
+            (8, 0x400),
+            (9, 0x100),
+            (10, 0x200),
+            (11, 0x10),
+            (12, -0x800),
+        ] {
+            let halfword: u16 = 0x2001 | (1 << bit);
+            let bytes = halfword.to_le_bytes();
+            let lifted = lift_with(&bytes, 0x1000, Xlen::Rv32);
+            assert_eq!(lifted.len(), 1, "bit {bit}");
+            assert_eq!(lifted[0].flow, Flow::Call, "bit {bit}");
+            assert_eq!(
+                lifted[0].target,
+                Some((0x1000 + offset) as u64),
+                "bit {bit}"
+            );
+        }
+        // Zero offset, and a combined one that touches several bits at once.
+        for (halfword, offset) in [(0x2001u16, 0i64), (0x2011, 4), (0x2081, 0x40)] {
+            let bytes = halfword.to_le_bytes();
+            let lifted = lift_with(&bytes, 0x1000, Xlen::Rv32);
+            assert_eq!(
+                lifted[0].target,
+                Some((0x1000 + offset) as u64),
+                "{halfword:#06x}"
+            );
+        }
+    }
+
+    /// The same bytes on RV64 are `c.addiw` — data, not a call — so the default
+    /// `lift` must not see a control transfer in them.
+    #[test]
+    fn the_same_bytes_on_rv64_are_not_a_call() {
+        for halfword in [0x2001u16, 0x2009, 0x2011, 0x2081, 0x3001] {
+            let bytes = halfword.to_le_bytes();
+            let lifted = lift(&bytes, 0x1000);
+            assert_eq!(lifted[0].flow, Flow::FallThrough, "{halfword:#06x}");
+            assert!(!lifted[0].text.starts_with("c.jal"), "{halfword:#06x}");
+            assert_eq!(lifted[0].target, None, "{halfword:#06x}");
+        }
+    }
+
+    /// `lift` and `lift_with(Rv64)` are the same function; nothing may depend
+    /// on which one a caller reaches for.
+    #[test]
+    fn lift_is_lift_with_rv64() {
+        let bytes: Vec<u8> = (0..256u16).flat_map(u16::to_le_bytes).collect();
+        assert_eq!(lift(&bytes, 0), lift_with(&bytes, 0, Xlen::Rv64));
+    }
+
+    /// Every other compressed encoding lifts identically on both widths: the
+    /// disagreement is exactly one arm.
+    #[test]
+    fn rv32_and_rv64_differ_only_at_the_c_jal_encoding() {
+        let bytes: Vec<u8> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
+        let rv64 = lift(&bytes, 0);
+        let rv32 = lift_with(&bytes, 0, Xlen::Rv32);
+        assert_eq!(rv64.len(), rv32.len());
+        let differing: Vec<u16> = rv64
+            .iter()
+            .zip(&rv32)
+            .filter(|(a, b)| a.text != b.text || a.flow != b.flow || a.target != b.target)
+            .map(|(a, _)| {
+                u16::from_le_bytes([bytes[a.address as usize], bytes[a.address as usize + 1]])
+            })
+            .collect();
+        // Every differing halfword is the (01, 001) encoding.
+        for halfword in &differing {
+            assert_eq!(halfword & 0b11, 0b01, "{halfword:#06x}");
+            assert_eq!((halfword >> 13) & 0x7, 0b001, "{halfword:#06x}");
+        }
+        // And there are many of them (one per offset value), so the sweep is real.
+        assert!(differing.len() > 100, "{}", differing.len());
     }
 }
