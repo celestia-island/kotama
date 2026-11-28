@@ -29,6 +29,7 @@ use windows_sys::Win32::System::Memory::VirtualProtectEx;
 use windows_sys::Win32::System::Memory::VirtualQueryEx;
 use windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION;
 use windows_sys::Win32::System::Memory::MEM_COMMIT;
+use windows_sys::Win32::System::Memory::MEM_FREE;
 use windows_sys::Win32::System::Memory::PAGE_EXECUTE;
 use windows_sys::Win32::System::Memory::PAGE_EXECUTE_READ;
 use windows_sys::Win32::System::Memory::PAGE_EXECUTE_READWRITE;
@@ -322,6 +323,82 @@ pub(crate) fn writable_regions(process: &TargetProcess) -> Result<Vec<Region>, H
         }
     }
     Ok(merged)
+}
+
+/// 在目标进程里提交一块可执行内存，返回基址。钩子的 trampoline 与桩住在那里。
+///
+/// 在目标进程里提交一块可执行内存，返回基址。钩子的 trampoline 与桩住在那里。
+///
+/// `near` 是必须靠近的地址：rel32 只能跳 ±2 GB，trampoline 必须住在目标函数旁边。
+/// Windows 会忽略一个落在已占用区域的 hint 并自由选址——在 `0x7ff7…` 的映像上
+/// 那是几 TB 外——所以这里先用 `VirtualQueryEx` 从 `near` 往下扫出第一块够大的
+/// 空闲区，把 hint 指向它。扫不到就退回自由选址，由 `plan` 用距离拒绝。
+///
+/// 页是 `PAGE_EXECUTE_READWRITE`：trampoline 先被写入再被执行。分离时由内核回收
+/// （不 VirtualFreeEx：一个仍在 trampoline 里的线程被释放页就是 use-after-free）。
+pub(crate) fn alloc_remote(
+    handle: &OwnedHandle,
+    size: usize,
+    near: Option<u64>,
+) -> Result<u64, HostError> {
+    use windows_sys::Win32::System::Memory::{
+        VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+    };
+    const GRANULARITY: u64 = 0x1_0000;
+    let size = size.max(1).div_ceil(GRANULARITY as usize) * GRANULARITY as usize;
+    let hint = near
+        .and_then(|n| free_region_below(handle, n, size))
+        .map_or(std::ptr::null_mut(), |a| a as *mut c_void);
+    // SAFETY: 句柄来自 open_writer（含 PROCESS_VM_OPERATION）；hint 来自 VirtualQueryEx 的空闲区或 NULL；
+    // 分配保护是 RWX，因为 trampoline 要先写后执行。
+    let base = unsafe {
+        VirtualAllocEx(
+            handle.as_raw_handle(),
+            hint,
+            size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        )
+    };
+    if base.is_null() {
+        return Err(last_error(&format!(
+            "VirtualAllocEx {size} B near {near:?}"
+        )));
+    }
+    Ok(base as u64)
+}
+
+/// 从 `below` 往下找第一块至少 `size` 大的空闲区，返回其对齐后的基址。
+fn free_region_below(handle: &OwnedHandle, below: u64, size: usize) -> Option<u64> {
+    const GRANULARITY: u64 = 0x1_0000;
+    let mut address = below & !(GRANULARITY - 1);
+    for _ in 0..4096 {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: 只查询，不解引用；address 在用户地址范围内或查询失败即返回 0。
+        let queried = unsafe {
+            VirtualQueryEx(
+                handle.as_raw_handle(),
+                address as *const c_void,
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if queried == 0 {
+            return None;
+        }
+        let base = info.BaseAddress as u64;
+        if info.State == MEM_FREE && info.RegionSize as u64 >= size as u64 {
+            return Some(
+                base.max(address.saturating_sub(0x4000_0000))
+                    .max(GRANULARITY),
+            );
+        }
+        if base == 0 {
+            return None;
+        }
+        address = base - GRANULARITY;
+    }
+    None
 }
 
 /// 写一段已授权进程内存；只读页临时提升后必须恢复原保护。

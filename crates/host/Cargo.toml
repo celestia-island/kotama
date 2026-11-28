@@ -13,6 +13,7 @@ publish.workspace = true
 kotama.workspace = true
 kotama-image.workspace = true
 kotama-proto.workspace = true
+kotama-scan.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
