@@ -10,6 +10,9 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+kotama-lift-arm.workspace = true
+kotama-lift-riscv.workspace = true
+kotama-lift-a64.workspace = true
 kotama.workspace = true
 kotama-image.workspace = true
 iced-x86.workspace = true
