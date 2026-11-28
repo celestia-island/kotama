@@ -1,4 +1,32 @@
 //! kotama proxy: strict PE export inspection and forwarding-mirror generation.
+//!
+//! # What the generated runtime may and may not do
+//!
+//! The mirror's C runtime has three kinds of code in it, and the hook-body
+//! contract — no allocation, no locking, no I/O on the target's thread — applies
+//! to exactly one of them:
+//!
+//! - **`kotama_log_entry`** is the hook body. It runs on the caller's thread,
+//!   inside the caller's lock hierarchy. It does an atomic increment, writes a
+//!   slot in a pre-allocated ring, and reads two thread/time APIs. No heap, no
+//!   lock, no file. Everything it needs was set up before the first hook fired.
+//! - **`kotama_original`** resolves the backing export on first use. It calls
+//!   `LoadLibraryW` and `GetProcAddress`, which take the loader lock. That is a
+//!   **known exception** to "no locking": it happens once per ordinal-lazy
+//!   path, never from a DllMain, and is cached afterwards so the lock is not
+//!   taken again. It is an exception because there is no way to bind to a
+//!   forwarding target without the loader, and the alternative — resolving
+//!   everything eagerly in DllMain — would hold the loader lock for longer.
+//! - **`worker_main`** is the consumer. It runs on its own thread, drains the
+//!   ring, formats with `snprintf` and writes with `WriteFile`. The contract
+//!   does not apply to it; it exists so the hook body never has to do I/O.
+//!
+//! `DllMain` opens the log file and starts the worker. It does no hooking.
+//!
+//! Nothing here is checked by `kotama_payload::hook_guard`: that counter guards
+//! the payload's own hook bodies, and this runtime is a separate binary with its
+//! own C. The classification above is a reading of the generated source, and the
+//! test below pins the three functions' shape so it cannot drift silently.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -575,5 +603,77 @@ fn generate(args: &[String]) -> ExitCode {
             Err(error) => fail(error),
         },
         Err(error) => fail(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The generated runtime's three functions keep their contract shapes: the
+    /// hook body touches the ring and nothing else, the resolver is the only
+    /// loader-lock caller, the worker is the only file writer. A future edit that
+    /// moves a `WriteFile` into `kotama_log_entry` would pass every existing
+    /// test and violate the one rule the runtime exists to keep.
+    ///
+    /// mutate: io-in-hook-body (a WriteFile inside kotama_log_entry's body makes
+    /// the "hook body" slice contain it — the test fails on that slice).
+    #[test]
+    fn the_generated_runtime_keeps_the_hook_body_free_of_io_and_locks() {
+        let source = runtime_source("original_real.dll");
+        let body = |name: &str, until: &str| -> &str {
+            let start = source.find(name).expect(name);
+            let end = source[start..].find(until).expect(until) + start;
+            &source[start..end]
+        };
+        let hook = body("void kotama_log_entry(", "\n}\n");
+        let resolver = body("void *kotama_original(", "\n}\n");
+        let worker = body("static DWORD WINAPI worker_main(", "\n}\n");
+
+        // The hook body: ring writes and interlocked ops only.
+        assert!(hook.contains("InterlockedIncrement"), "{hook}");
+        assert!(hook.contains("ring["), "{hook}");
+        for forbidden in [
+            "WriteFile",
+            "CreateFile",
+            "LoadLibrary",
+            "malloc",
+            "HeapAlloc",
+            "EnterCriticalSection",
+            "WaitFor",
+        ] {
+            assert!(
+                !hook.contains(forbidden),
+                "hook body must not call {forbidden}:\n{hook}"
+            );
+        }
+        // The resolver is the one place the loader lock is taken.
+        assert!(resolver.contains("LoadLibraryW"), "{resolver}");
+        assert!(resolver.contains("GetProcAddress"), "{resolver}");
+        assert!(!resolver.contains("WriteFile"), "{resolver}");
+        // The worker is the one place a file is written.
+        assert!(worker.contains("WriteFile"), "{worker}");
+        assert!(worker.contains("snprintf"), "{worker}");
+        assert!(!worker.contains("LoadLibrary"), "{worker}");
+    }
+
+    /// DllMain opens the log and starts the worker; it does no hooking and no
+    /// ring writes.
+    #[test]
+    fn dllmain_only_opens_the_log_and_starts_the_worker() {
+        let source = runtime_source("original_real.dll");
+        let start = source.find("BOOL WINAPI DllMain(").expect("DllMain");
+        let end = source[start..].find("\n}\n").expect("end") + start;
+        let dllmain = &source[start..end];
+        assert!(dllmain.contains("CreateFileA"), "{dllmain}");
+        assert!(dllmain.contains("CreateThread"), "{dllmain}");
+        assert!(
+            !dllmain.contains("ring["),
+            "DllMain must not touch the ring"
+        );
+        assert!(
+            !dllmain.contains("kotama_log_entry"),
+            "DllMain must not hook"
+        );
     }
 }
