@@ -32,6 +32,10 @@ pub enum PrefixError {
         /// Offset from the function's entry, in bytes.
         at: u64,
     },
+    /// Known entries that land inside the bytes a jump would overwrite. The
+    /// prefix is evaluated but not installable; raised by consumers that need
+    /// the verdict as an error rather than a field.
+    Stranded(Vec<u64>),
 }
 
 impl std::fmt::Display for PrefixError {
@@ -40,6 +44,9 @@ impl std::fmt::Display for PrefixError {
             Self::Unsupported => f.write_str("no decoder for this architecture"),
             Self::TooShort => f.write_str("function too short to hold the jump"),
             Self::Undecodable { at } => write!(f, "undecodable instruction at {at:#x}"),
+            Self::Stranded(entries) => {
+                write!(f, "entries at {entries:?} would land inside the jump")
+            }
         }
     }
 }

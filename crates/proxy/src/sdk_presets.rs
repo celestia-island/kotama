@@ -29,16 +29,15 @@
 //!    allocations; `tools/hook_body_lint.py` scans a declared body for locks and
 //!    I/O calls. Exists, and has exactly one body to check: the forwarding mirror's
 //!    C `kotama_log_entry`.
-//! 4. **Install** the hook — write the jump into the target. **Does not exist.**
+//! 4. **Install** the hook — write the jump into the target. Exists, x64, from #192:
+//!    `scan::install::plan` turns the prefix into a trampoline and an `E9 rel32`,
+//!    refusing a prefix with a RIP-relative instruction or a stranded entry by name;
+//!    `Session::install_hook` writes trampoline first, then jump, under `WriteMemory`.
+//!    The live e2e replaces a fixture function with a stub and watches the target's
+//!    output change. `retour` is still only read, in `deny.toml`; nothing depends on it.
 //!
-//! Nothing in this repository installs a hook. The Rust payload is a reader (it
-//!    answers `Request`s and captures a stack); the C agent is a loader; the
-//!    forwarding mirror works by *replacement*, not interception — the host loads
-//!    `mirror.dll` where the real DLL would have been. `retour` is named once, in
-//!    `deny.toml`, as a reference implementation that was read; no crate depends on
-//!    it. Step 4 is the one link that turns a plan into a process, and it is not
-//!    built. Until it is, "mount" means "resolve and verify", and the tests that
-//!    pass are tests of that.
+//! What is still not built: a hook *body* to install — the stub in the e2e is a
+//!    hand-assembled ABI-correct return, not a Rust closure — and anything outside x64.
 
 use crate::hook_plan::HookSelection;
 

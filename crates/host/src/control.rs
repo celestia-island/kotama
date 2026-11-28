@@ -139,8 +139,26 @@ impl Session {
         self.writer.is_some()
     }
 
-    /// 写一段内存。
+    /// 在目标进程里分配一块可执行内存，返回基址。
     ///
+    /// `near` 是选址提示：rel32 只能跳 ±2 GB，trampoline 必须住在目标函数旁边。
+    /// 内核不保证 honoring 提示；调用方用返回的基址算距离。
+    ///
+    /// 只在 Windows 实现；Linux 的等价物（远程 mmap）不在本方法内。
+    ///
+    /// # Errors
+    /// 未授权、非 Windows、或分配失败。
+    pub fn alloc_remote(&self, size: usize, near: Option<u64>) -> Result<u64, HostError> {
+        #[cfg(target_os = "windows")]
+        {
+            let writer = self.writer.as_ref().ok_or(HostError::CapabilityDenied(
+                "alloc requires an explicitly granted session (with_write)",
+            ))?;
+            crate::windows::alloc_remote(writer, size, near)
+        }
+    }
+
+    /// 写一段内存。    ///
     /// # Errors
     /// 未授权（[`HostError::CapabilityDenied`]，负对照钉的就是它）或写入失败。
     pub fn write_bytes(&self, address: u64, bytes: &[u8]) -> Result<(), HostError> {
@@ -151,8 +169,32 @@ impl Session {
         write_at(writer, address, bytes)
     }
 
-    /// 冻结一个值：后台线程按 `interval_ms` 周期重写。
+    /// 安装一个钩子：先写 trampoline，再写入口的跳转。
     ///
+    /// 顺序是契约的一半。一个线程在两次写之间进入函数时，必须落进**完整的**
+    /// trampoline（它跳回 `entry + overwrite`），而不是半个跳转。trampoline 先落地
+    /// 就保证了这一点：在跳转写入之前，入口仍是原指令，走原路。
+    ///
+    /// [`Install`](kotama_scan::install::Install) 由 `kotama_scan::install::plan` 从字节算出，
+    /// 不在这里重算：这个方法只负责写，不负责判断入口能不能放跳转。
+    ///
+    /// # Errors
+    /// 未授权（[`HostError::CapabilityDenied`]）或任一写入失败。trampoline 写入成功
+    /// 而跳转写入失败时，trampoline 留在目标里（无害：没人跳进去），错误原样返回。
+    pub fn install_hook(&self, install: &kotama_scan::install::Install) -> Result<(), HostError> {
+        self.write_bytes(install.trampoline.address, &install.trampoline.bytes)?;
+        self.write_bytes(install.jump.address, &install.jump.bytes)
+    }
+
+    /// 卸载一个钩子：把原始字节写回入口。trampoline 不回收。
+    ///
+    /// # Errors
+    /// 未授权或写入失败。
+    pub fn uninstall_hook(&self, install: &kotama_scan::install::Install) -> Result<(), HostError> {
+        self.write_bytes(install.jump.address, &install.original)
+    }
+
+    /// 冻结一个值：后台线程按 `interval_ms` 周期重写。    ///
     /// 返回 [`FreezeHandle`]；丢弃即停止冻结。目标进程退出时线程自行结束。
     ///
     /// # Errors

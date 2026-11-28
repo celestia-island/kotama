@@ -1,0 +1,45 @@
+{
+  "test": [
+    "-p",
+    "kotama-scan",
+    "--lib",
+    "--",
+    "install::"
+  ],
+  "files": {
+    "i": "crates/scan/src/install.rs",
+    "c": "crates/host/src/control.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 rel measured from `from` not `from+5`",
+      "file": "i",
+      "find": "    let displacement = i128::from(to) - i128::from(from) - JUMP_SIZE as i128;",
+      "repl": "    let displacement = i128::from(to) - i128::from(from);"
+    },
+    {
+      "name": "M2 trampoline has no return jump",
+      "file": "i",
+      "find": "    let mut trampoline_bytes = code[..prefix.overwrite].to_vec();\n    trampoline_bytes.extend_from_slice(&back);",
+      "repl": "    let mut trampoline_bytes = code[..prefix.overwrite].to_vec();\n    let _ = back;"
+    },
+    {
+      "name": "M3 RIP-relative not refused",
+      "file": "i",
+      "find": "        if instruction.is_ip_rel_memory_operand() {",
+      "repl": "        if false {"
+    },
+    {
+      "name": "M4 stranded entry planned anyway",
+      "file": "i",
+      "find": "    if !prefix.is_patchable() {\n        return Err(InstallError::Prefix(PrefixError::Stranded(prefix.stranded)));\n    }",
+      "repl": ""
+    },
+    {
+      "name": "M5 install writes jump before trampoline",
+      "file": "c",
+      "find": "        self.write_bytes(install.trampoline.address, &install.trampoline.bytes)?;\n        self.write_bytes(install.jump.address, &install.jump.bytes)",
+      "repl": "        self.write_bytes(install.jump.address, &install.jump.bytes)?;\n        self.write_bytes(install.trampoline.address, &install.trampoline.bytes)"
+    }
+  ]
+}

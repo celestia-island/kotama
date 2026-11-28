@@ -81,6 +81,7 @@ mod field_xref_tests {
     }
 }
 
+pub mod install;
 pub mod msvc_rtti;
 pub mod patchable;
 
