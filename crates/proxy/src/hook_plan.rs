@@ -214,16 +214,18 @@ pub fn plan_hooks(
     }
     Ok(HookPlan { hooks, warnings })
 }
-/// Hookable symbols for a PE image, one group per public ordinal.
+/// Hookable symbols for a PE image, one group per ordinal.
 ///
-/// An ordinal with several names is one group. No system library on the machine
-/// this was written on carries such an alias (kernel32, ntdll and both msvcrt
-/// were checked: every ordinal has exactly one name), so that case is stated
-/// here as the contract rather than pinned by a test with a real sample.
+/// Only exports whose address lands in an executable section are offered. The
+/// export directory names vtables and static data as readily as functions — the
+/// local C runtime exports 1,330 names and 46 of them are RTTI vtables — and a
+/// planner that accepted those would intercept a data address. Forwarders are
+/// excluded too: they are a string in `.rdata`, not code in this image. The
+/// rule is the address's section, because that is what the process jumps to.
 ///
-/// Aliases (several names on one ordinal) stay in one group, which is what the
-/// planner's grouping means: a PE alias is intercepted as one hook. Names are the
-/// raw bytes the container stores, as `HookableSymbol` wants.
+/// A PE with no sections keeps every export: the filter cannot tell, and
+/// refusing everything would make a sectionless image unplannable for a reason
+/// that is not the image's.
 ///
 /// # Errors
 /// Returns [HookPlanError] when the image is not a PE or its export table is
@@ -232,9 +234,25 @@ pub fn pe_hookable_symbols(data: &[u8]) -> Result<Vec<HookableSymbol>, HookPlanE
     let table = kotama_image::pe_export::parse_pe_exports(data)
         .map_err(|error| HookPlanError(format!("export table: {error}")))?
         .ok_or_else(|| HookPlanError("not a PE image".to_string()))?;
+    let module = kotama_image::LoadedModule::parse(data)
+        .map_err(|error| HookPlanError(error.to_string()))?;
+    let executable = |rva: u32| {
+        module.sections.iter().any(|section| {
+            section.executable
+                && u64::from(rva) >= section.rva
+                && u64::from(rva) < section.rva.saturating_add(section.size)
+        })
+    };
+    let has_sections = !module.sections.is_empty();
     Ok(table
         .entries
         .iter()
+        .filter(|entry| match entry.target {
+            kotama_image::pe_export::PeExportTarget::Address(rva) => {
+                !has_sections || executable(rva)
+            }
+            kotama_image::pe_export::PeExportTarget::Forward { .. } => false,
+        })
         .flat_map(|entry| {
             entry.names.iter().map(move |name| HookableSymbol {
                 name: name.clone(),
@@ -262,10 +280,19 @@ pub fn elf_hookable_symbols(data: &[u8]) -> Result<Vec<HookableSymbol>, HookPlan
     ) {
         return Err(HookPlanError("not an ELF image".to_string()));
     }
+    let has_sections = !module.sections.is_empty();
+    let executable = |rva: u64| {
+        module.sections.iter().any(|section| {
+            section.executable
+                && rva >= section.rva
+                && rva < section.rva.saturating_add(section.size)
+        })
+    };
     let mut symbols: Vec<HookableSymbol> = module
         .dynamic_symbols
         .iter()
         .filter(|symbol| !symbol.name.is_empty())
+        .filter(|symbol| !has_sections || executable(symbol.rva))
         .enumerate()
         .map(|(index, symbol)| HookableSymbol {
             name: symbol.name.clone().into_bytes(),
@@ -530,9 +557,14 @@ mod tests {
         assert!(plan_hooks(&symbols, &selection).is_err());
     }
 
-    /// The PE bridge groups aliases by ordinal. The shared-library fixture has
-    /// six exports — three of its own and three the toolchain's CRT glue — each
-    /// on its own ordinal, so six groups for six names.
+    /// The PE bridge groups aliases by ordinal, and offers only what is code.
+    /// The shared-library fixture has six exports: three of its own, two CRT
+    /// glue functions in `.text`, and one — the toolchain's "is this a DLL"
+    /// flag — which is a **variable** in `.data`. Six names, five hookable.
+    ///
+    /// mutate: data-not-filtered (dropping the executable-section filter
+    /// brings the count back to six; the assertion that the DLL flag is absent
+    /// fails on it).
     #[test]
     fn the_pe_bridge_groups_aliases_by_ordinal() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -544,12 +576,18 @@ mod tests {
         let symbols = pe_hookable_symbols(&data).unwrap();
         assert_eq!(
             symbols.len(),
-            6,
-            "three exports plus three CRT-glue exports"
+            5,
+            "three exports plus two CRT-glue functions; the DLL flag is data: {symbols:?}"
+        );
+        assert!(
+            !symbols
+                .iter()
+                .any(|symbol| symbol.name == b"__mingw_module_is_dll"),
+            "a variable in .data is not a hook site"
         );
         let groups: std::collections::BTreeSet<u32> =
             symbols.iter().map(|symbol| symbol.group).collect();
-        assert_eq!(groups.len(), 6, "every export is on its own ordinal here");
+        assert_eq!(groups.len(), 5, "five names on five ordinals here");
     }
 
     /// The ELF bridge dedupes by name: a name exported twice (once as a default
@@ -586,5 +624,86 @@ mod tests {
     #[test]
     fn the_elf_bridge_refuses_non_elf_input() {
         assert!(elf_hookable_symbols(b"not a binary").is_err());
+    }
+
+    /// The ELF bridge offers code only. The shared-library fixture exports a
+    /// const variable alongside its three functions, and the variable is not a
+    /// hook site — it is the ELF shape of what the toolchain's DLL flag is on the
+    /// PE side.
+    ///
+    /// mutate: elf-data-offered (dropping the executable-section filter brings
+    /// the count to four; the assertion that the variable is absent fails).
+    #[test]
+    fn the_elf_bridge_offers_code_only() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/x86_64-linux-gnu/-O2/libexports.so");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skip: fixture not built");
+            return;
+        };
+        let symbols = elf_hookable_symbols(&data).unwrap();
+        assert_eq!(
+            symbols.len(),
+            3,
+            "three functions; the variable is data: {symbols:?}"
+        );
+        assert!(
+            !symbols
+                .iter()
+                .any(|symbol| symbol.name == b"exported_rodata"),
+            "a const in .rodata is not a hook site"
+        );
+        for name in [
+            b"exported_add".as_slice(),
+            b"exported_mul".as_slice(),
+            b"exported_void".as_slice(),
+        ] {
+            assert!(
+                symbols.iter().any(|symbol| symbol.name == name),
+                "{name:?} missing"
+            );
+        }
+    }
+
+    /// A PE forwarder is a string in `.rdata`, not code in this image, and is
+    /// not offered. The proxy smoke fixture forwards to kernel32.Sleep; it is
+    /// built by the CLI test, so this builds the same shape here rather than
+    /// depend on a test-order.
+    ///
+    /// mutate: forwarder-offered (accepting Forward targets makes the count 4
+    /// on a three-name-plus-one-forwarder image; the forwarder-absent assertion
+    /// fails).
+    #[test]
+    fn a_pe_forwarder_is_not_a_hook_site() {
+        let Some(zig) = std::env::var_os("KOTAMA_ZIG") else {
+            eprintln!("skip: KOTAMA_ZIG not set");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("kotama-forwarder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("o.c"), "int __cdecl A(void) { return 1; }\n").unwrap();
+        std::fs::write(
+            root.join("o.def"),
+            "LIBRARY o\nEXPORTS\n    A @1\n    B=kernel32.Sleep @2\n",
+        )
+        .unwrap();
+        let status = std::process::Command::new(zig)
+            .args(["cc", "-target", "x86_64-windows-gnu", "-shared", "-o"])
+            .arg(root.join("o.dll"))
+            .arg(root.join("o.c"))
+            .arg(root.join("o.def"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let data = std::fs::read(root.join("o.dll")).unwrap();
+        let symbols = pe_hookable_symbols(&data).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            symbols.len(),
+            1,
+            "one function; the forwarder is a string: {symbols:?}"
+        );
+        assert_eq!(symbols[0].name, b"A");
     }
 }
