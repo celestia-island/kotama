@@ -1,0 +1,34 @@
+{
+  "test": [
+    "-p",
+    "kotama-proxy",
+    "--",
+    "pe_bridge_groups",
+    "elf_bridge_dedupes",
+    "elf_bridge_offers",
+    "forwarder_is_not"
+  ],
+  "files": {
+    "h": "crates/proxy/src/hook_plan.rs"
+  },
+  "mutations": [
+    {
+      "name": "M1 PE filter dropped (the DLL flag becomes a hook site)",
+      "file": "h",
+      "find": "            kotama_image::pe_export::PeExportTarget::Address(rva) => {\n                !has_sections || executable(rva)\n            }",
+      "repl": "            kotama_image::pe_export::PeExportTarget::Address(_) => true,"
+    },
+    {
+      "name": "M2 PE forwarders accepted (a string in .rdata becomes a hook site)",
+      "file": "h",
+      "find": "            kotama_image::pe_export::PeExportTarget::Forward { .. } => false,",
+      "repl": "            kotama_image::pe_export::PeExportTarget::Forward { .. } => true,"
+    },
+    {
+      "name": "M3 ELF filter dropped",
+      "file": "h",
+      "find": "        .filter(|symbol| !has_sections || executable(symbol.rva))\n",
+      "repl": ""
+    }
+  ]
+}
