@@ -60,6 +60,12 @@ fixture-repro:
 skip-audit:
     python tools/skip_audit.py
 
+# Refresh dist/ from current source: both C agents and the Rust payload. Nothing else
+# does — bench only checks the files exist — so run this before the live e2e or it
+# tests a payload built days before the source.
+dist-refresh:
+    python tools/dist_refresh.py
+
 engine-survey:
     python tools/engine_survey.py
     python tools/engine_survey_selftest.py

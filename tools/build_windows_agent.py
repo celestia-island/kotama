@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """构建 windows 载荷（C agent + loader），走 zig cc 交叉编译。
 
-产物（默认落 `dist/<target>/`，支持 x86_64-windows-gnu 与 x86-windows-gnu）：
+产物（默认落 `dist/<dir>/`；dir 是 **Rust target triple**，与 kotama_payload.dll 同一套命名，
+所以 pack / bench / e2e 只认一个路径）：
+  - `x86_64-pc-windows-gnu` ← zig target `x86_64-windows-gnu`
+  - `i686-pc-windows-gnu`   ← zig target `x86-windows-gnu`（zig 没有同名 triple；i386 已除名）
   - `kotama_agent.dll`   —— 载荷本体（DllMain 起线程，TCP 回环说话）
   - `kotama_load.exe`    —— wine 下的装载器（LoadLibrary 预载 + 拉起目标）
 
@@ -74,7 +77,12 @@ def main() -> int:
         print("# toolchain ok")
         return 0
 
-    out_dir = Path(args.out_dir) if args.out_dir else REPO / "dist" / args.target
+    # The output directory is the Rust triple, not the zig one: the x86 agent
+    # lands beside the x86 kotama_payload.dll under i686-pc-windows-gnu, which is
+    # the name pack, bench and the e2e already use. Written under the zig name it
+    # was a second directory nobody read, and the e2e kept testing a stale copy.
+    rust_dir = {"x86_64-windows-gnu": "x86_64-pc-windows-gnu", "x86-windows-gnu": "i686-pc-windows-gnu"}[args.target]
+    out_dir = Path(args.out_dir) if args.out_dir else REPO / "dist" / rust_dir
     out_dir.mkdir(parents = True, exist_ok = True)
     compile_one(zig, SOURCE_DIR / "kotama_agent.c", out_dir / "kotama_agent.dll", True, args.target)
     compile_one(zig, SOURCE_DIR / "kotama_load.c", out_dir / "kotama_load.exe", False, args.target)
